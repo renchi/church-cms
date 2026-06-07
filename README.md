@@ -72,6 +72,32 @@ To run a single service:
 pnpm --filter members-service dev
 ```
 
+## Running with Docker
+
+The Phase 1 services (members API, its Postgres database, and Adminer) run as a
+local stack defined in [`docker-compose.yml`](docker-compose.yml):
+
+```bash
+cp .env.example .env        # one-time: create your local credentials file
+docker compose up --build   # build + start the whole stack
+```
+
+Once it's up:
+
+- API — <http://localhost:3001> (`curl localhost:3001/health`)
+- Adminer (DB browser) — <http://localhost:8080>
+- Postgres — `localhost:5432`
+
+```bash
+docker compose down         # stop; database volume survives
+docker compose down -v      # stop and wipe the database volume
+```
+
+For the full workflow — plus the equivalent **raw `docker` commands** as a
+learning exercise — see [docs/docker-local-dev.md](docs/docker-local-dev.md).
+
 ## Docs
 
-Architecture Decision Records are in [`docs/adr/`](docs/adr/).
+- [docs/docker-local-dev.md](docs/docker-local-dev.md) — running the stack locally
+  with Docker (Compose workflow + raw `docker` equivalents)
+- Architecture Decision Records are in [`docs/adr/`](docs/adr/).
