@@ -1,0 +1,20 @@
+{
+  // --- Remote-SSH port forwarding for the docker-compose stack ---
+  // Background: VS Code only auto-forwards ports it DETECTS. The members-service
+  // logs "Server listening at http://0.0.0.0:3001", so output-based detection
+  // catches 3001 automatically. Adminer (8080) prints no URL, so without help it
+  // is never detected and "localhost:8080" fails on your local machine.
+
+  // "hybrid" detects ports from BOTH listening processes and URLs printed in
+  // terminal output — the most thorough source, so Docker-published ports like
+  // Adminer's 8080 get picked up too.
+  "remote.autoForwardPortsSource": "hybrid",
+
+  // Labels + behaviour for our stack's ports when they are forwarded.
+  // onAutoForward: "notify" shows a toast; "silent" forwards quietly.
+  "remote.portsAttributes": {
+    "3001": { "label": "members-service (API)", "onAutoForward": "notify" },
+    "8080": { "label": "adminer (DB UI)", "onAutoForward": "notify" },
+    "5432": { "label": "members-db (Postgres)", "onAutoForward": "silent" }
+  }
+}
