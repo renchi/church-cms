@@ -7,9 +7,39 @@
 #   docker compose down -v         stop and remove containers AND the DB volume
 #   docker compose logs -f members-service   tail a single service's logs
 #
-# Credentials are read from .env at this directory (see .env.example).
+# On startup the order is: members-db → members-migrate (applies the schema, then
+# exits) → members-service. So a fresh "docker compose up" gives you a working,
+# migrated database with no manual steps.
+#
+# Credentials are read from .env in this directory (see .env.example).
 # Docker Compose automatically loads .env for ${VAR} substitution in this file.
 # Do NOT commit .env — it is git-ignored.
+
+# ─── Reusable config (YAML anchor) ───────────────────────────────────────────
+# Keys starting with "x-" are extension fields: Docker Compose ignores them as
+# services, but we can reference them as anchors to avoid repeating ourselves.
+# "&members-base" names this block; "<<: *members-base" below merges it into a
+# service. Both the migrate job and the long-running service are built from the
+# same image and need the same DATABASE_URL, so we define those once here.
+x-members-base: &members-base
+  build:
+    # "context: ." means the build context is the monorepo root.
+    # The Dockerfile needs the root pnpm-lock.yaml and workspace config,
+    # so we must build from here, not from apps/members-service/.
+    context: .
+    dockerfile: apps/members-service/Dockerfile
+  # Pin an explicit image name so both services share ONE built image instead
+  # of each building their own. Compose builds it once and reuses it.
+  image: church-cms-members-service:latest
+  environment:
+    # Inside Docker, services talk to each other by service name, not "localhost".
+    # "members-db" is the service name defined below — Docker's internal DNS
+    # resolves it to that container's IP automatically. This is why DATABASE_URL
+    # here differs from apps/members-service/.env (which uses localhost for
+    # running the service directly on your machine, outside Docker).
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@members-db:5432/${POSTGRES_DB}
+  networks:
+    - cms-network
 
 services:
 
@@ -46,36 +76,47 @@ services:
       retries: 5         # mark unhealthy after 5 consecutive failures
       start_period: 10s  # don't count failures during the first 10 s (DB is initialising)
 
+  # ─── Migration job — applies the schema, then exits ─────────────────────────
+  members-migrate:
+    # Merge in the shared build/image/DATABASE_URL/network config defined above.
+    <<: *members-base
+
+    # Override the image's default command (node dist/index.js) to run the Prisma
+    # migrator instead. "migrate deploy" applies any pending migrations from
+    # prisma/migrations and is the production-safe command (unlike "migrate dev",
+    # it never generates new migrations or prompts). The image's ENTRYPOINT (tini)
+    # still runs, so this becomes: tini -- node_modules/.bin/prisma migrate deploy.
+    command: ["node_modules/.bin/prisma", "migrate", "deploy"]
+
+    # This is a one-shot job: it runs once and exits. Don't restart it.
+    restart: "no"
+
+    depends_on:
+      members-db:
+        # Wait until Postgres is actually accepting connections (healthcheck
+        # above) before trying to apply migrations.
+        condition: service_healthy
+
+    # Note: this "run migrations as a separate job, then start the app" pattern
+    # maps directly to a Kubernetes init container / Job (see CMS-14). The
+    # long-running service image deliberately does NOT run migrations itself.
+
   # ─── Members service ────────────────────────────────────────────────────────
   members-service:
-    build:
-      # "context: ." means the build context is the monorepo root.
-      # The Dockerfile needs the root pnpm-lock.yaml and workspace config,
-      # so we must build from here, not from apps/members-service/.
-      context: .
-      dockerfile: apps/members-service/Dockerfile
-
-    environment:
-      # Inside Docker, services talk to each other by service name, not "localhost".
-      # "members-db" below is the service name defined in this file — Docker's
-      # internal DNS resolves it to the members-db container's IP automatically.
-      # This is why DATABASE_URL here differs from the one in apps/members-service/.env
-      # (which uses localhost for running the service directly on your machine).
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@members-db:5432/${POSTGRES_DB}
+    # Same image and DATABASE_URL as the migrate job (via the anchor); the image's
+    # default command (node dist/index.js) runs since we don't override it here.
+    <<: *members-base
 
     ports:
       - "3001:3001"
 
-    networks:
-      - cms-network
-
     depends_on:
-      members-db:
-        # "service_healthy" means Docker waits until members-db passes its
-        # healthcheck (pg_isready above) before starting members-service.
-        # Without this, the service might start before Postgres is ready and
-        # crash on the first database connection attempt.
-        condition: service_healthy
+      members-migrate:
+        # "service_completed_successfully" waits until the migrate job has run and
+        # exited with code 0. This transitively also waits for members-db (which
+        # the migrate job depends on), so the app only starts once the database
+        # exists, is reachable, AND has the current schema applied.
+        condition: service_completed_successfully
 
   # ─── Adminer — lightweight DB browser ──────────────────────────────────────
   adminer:
