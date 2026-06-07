@@ -8,3 +8,4 @@ dist/
 .turbo/
 .next/
 coverage/
+.claude/settings.local.json
