@@ -1,0 +1,24 @@
+# Dependencies — pnpm installs these inside the container
+**/node_modules
+**/.pnpm-store
+
+# Build outputs
+**/dist
+
+# Environment files — inject via docker run -e or Kubernetes Secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# Test files
+**/*.test.ts
+**/*.spec.ts
+
+# Dev tooling
+**/.vscode
+**/.idea
+**/coverage
+
+# Git
+.git
+.gitignore
