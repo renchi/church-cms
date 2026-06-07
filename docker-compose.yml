@@ -1,0 +1,20 @@
+services:
+  members-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cms_user
+      POSTGRES_PASSWORD: cms_password
+      POSTGRES_DB: members_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - members-db-data:/var/lib/postgresql/data
+    networks:
+      - cms-network
+
+volumes:
+  members-db-data:
+
+networks:
+  cms-network:
+    driver: bridge

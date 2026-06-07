@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npx --version)",
+      "Bash(ls /usr/local/bin/ | grep -E \"node|npm|pnpm\" && ls ~/.local/bin/ 2>/dev/null | grep -E \"node|npm|pnpm\")",
+      "Read(//usr/local/bin/**)",
+      "Read(//home/chito/.local/bin/**)"
+    ]
+  }
+}
