@@ -13,8 +13,8 @@
   // Labels + behaviour for our stack's ports when they are forwarded.
   // onAutoForward: "notify" shows a toast; "silent" forwards quietly.
   "remote.portsAttributes": {
-    "3001": { "label": "members-service (API)", "onAutoForward": "notify" },
-    "8080": { "label": "adminer (DB UI)", "onAutoForward": "notify" },
+    "3001": { "label": "members-service (API)", "onAutoForward": "silent" },
+    "8080": { "label": "adminer (DB UI)", "onAutoForward": "silent" },
     "5432": { "label": "members-db (Postgres)", "onAutoForward": "silent" }
   }
 }
