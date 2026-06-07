@@ -1,10 +1,17 @@
 import Fastify from 'fastify'
+import { memberRoutes } from './api/memberRoutes.js'
 import { prisma } from './infrastructure/prisma.js'
 
 const app = Fastify({ logger: true })
 
 app.get('/health', async () => {
   return { status: 'ok' }
+})
+
+app.register(memberRoutes)
+
+app.addHook('onClose', async () => {
+  await prisma.$disconnect()
 })
 
 const start = async () => {
@@ -16,9 +23,5 @@ const start = async () => {
     process.exit(1)
   }
 }
-
-app.addHook('onClose', async () => {
-  await prisma.$disconnect()
-})
 
 start()
