@@ -1,20 +1,112 @@
+# docker-compose.yml — local multi-service development stack
+#
+# Quick reference:
+#   docker compose up --build      start everything (rebuilds service images)
+#   docker compose up              start without rebuilding (faster after first run)
+#   docker compose down            stop and remove containers (data volume survives)
+#   docker compose down -v         stop and remove containers AND the DB volume
+#   docker compose logs -f members-service   tail a single service's logs
+#
+# Credentials are read from .env at this directory (see .env.example).
+# Docker Compose automatically loads .env for ${VAR} substitution in this file.
+# Do NOT commit .env — it is git-ignored.
+
 services:
+
+  # ─── Database ──────────────────────────────────────────────────────────────
   members-db:
     image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: cms_user
-      POSTGRES_PASSWORD: cms_password
-      POSTGRES_DB: members_db
+
+    # env_file passes the variables from .env directly into the container's
+    # environment. The postgres image reads POSTGRES_USER, POSTGRES_PASSWORD,
+    # and POSTGRES_DB on first start to create the database and the superuser.
+    env_file: .env
+
     ports:
+      # host-port:container-port — exposes Postgres on your machine so you can
+      # connect with psql or a GUI tool (e.g. TablePlus) at localhost:5432.
       - "5432:5432"
+
     volumes:
+      # Named volume: Docker manages the storage location on your host.
+      # Data persists across "docker compose down" restarts (but not "down -v").
       - members-db-data:/var/lib/postgresql/data
+
     networks:
       - cms-network
 
+    healthcheck:
+      # pg_isready probes whether Postgres is accepting connections.
+      # "$$" escapes to a literal "$" so Docker Compose doesn't try to interpolate
+      # $POSTGRES_USER as a Compose variable — the shell inside the container
+      # expands it instead, reading the value we injected via env_file above.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s      # check every 10 seconds
+      timeout: 5s        # fail the check if it takes longer than 5 seconds
+      retries: 5         # mark unhealthy after 5 consecutive failures
+      start_period: 10s  # don't count failures during the first 10 s (DB is initialising)
+
+  # ─── Members service ────────────────────────────────────────────────────────
+  members-service:
+    build:
+      # "context: ." means the build context is the monorepo root.
+      # The Dockerfile needs the root pnpm-lock.yaml and workspace config,
+      # so we must build from here, not from apps/members-service/.
+      context: .
+      dockerfile: apps/members-service/Dockerfile
+
+    environment:
+      # Inside Docker, services talk to each other by service name, not "localhost".
+      # "members-db" below is the service name defined in this file — Docker's
+      # internal DNS resolves it to the members-db container's IP automatically.
+      # This is why DATABASE_URL here differs from the one in apps/members-service/.env
+      # (which uses localhost for running the service directly on your machine).
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@members-db:5432/${POSTGRES_DB}
+
+    ports:
+      - "3001:3001"
+
+    networks:
+      - cms-network
+
+    depends_on:
+      members-db:
+        # "service_healthy" means Docker waits until members-db passes its
+        # healthcheck (pg_isready above) before starting members-service.
+        # Without this, the service might start before Postgres is ready and
+        # crash on the first database connection attempt.
+        condition: service_healthy
+
+  # ─── Adminer — lightweight DB browser ──────────────────────────────────────
+  adminer:
+    # Adminer is a single-file PHP web UI for browsing and querying any database.
+    # Open http://localhost:8080 in your browser:
+    #   System:   PostgreSQL
+    #   Server:   members-db     (the service name — Docker DNS resolves it)
+    #   Username: cms_user       (from .env)
+    #   Password: cms_password   (from .env)
+    #   Database: members_db     (from .env)
+    image: adminer
+
+    ports:
+      - "8080:8080"
+
+    networks:
+      - cms-network
+
+    depends_on:
+      - members-db
+
+# ─── Shared infrastructure ─────────────────────────────────────────────────
+
 volumes:
+  # Top-level volume declaration — makes the name "members-db-data" available
+  # across all services. Docker creates it on first run if it doesn't exist.
   members-db-data:
 
 networks:
+  # All services share this bridge network so they can reach each other by
+  # service name (e.g. "members-db"). Without a shared network, containers
+  # are isolated and cannot communicate.
   cms-network:
     driver: bridge
