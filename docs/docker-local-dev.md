@@ -60,9 +60,9 @@ Open <http://localhost:8080> and log in with the values from your `.env`:
 |---|---|
 | System | PostgreSQL |
 | Server | `members-db` |
-| Username | `cms_user` |
-| Password | `cms_password` |
-| Database | `members_db` |
+| Username | value of `POSTGRES_USER` in `.env` |
+| Password | value of `POSTGRES_PASSWORD` in `.env` |
+| Database | value of `POSTGRES_DB` in `.env` |
 
 > Server is `members-db` (the service name), **not** `localhost` — see
 > [why service names, not localhost](#why-service-names-not-localhost) below.
@@ -99,6 +99,20 @@ is. Run these from the repo root.
 > waited for the database to be healthy, ran the migration job to completion, and
 > only then started the service. By hand, you do that sequencing yourself.
 
+### Load your credentials first
+
+The commands below read credentials from `.env` rather than hardcoding them.
+Export it into your shell so `$POSTGRES_USER`, `$POSTGRES_PASSWORD`, and
+`$POSTGRES_DB` are available to every command that follows:
+
+```bash
+set -a; source .env; set +a   # export every variable defined in .env
+```
+
+(`set -a` marks subsequently-set variables for export; `set +a` turns that back
+off. So everything `source` reads from `.env` becomes available to the commands
+and containers below.)
+
 ### 1. Create the shared network and volume
 
 Compose creates these automatically; manually, you do it first.
@@ -117,9 +131,7 @@ is where Postgres data persists.
 docker run -d \
   --name members-db \
   --network cms-network \
-  -e POSTGRES_USER=cms_user \
-  -e POSTGRES_PASSWORD=cms_password \
-  -e POSTGRES_DB=members_db \
+  --env-file .env \
   -p 5432:5432 \
   -v members-db-data:/var/lib/postgresql/data \
   postgres:16-alpine
@@ -130,7 +142,7 @@ docker run -d \
 | `-d` | detached (runs in the background) |
 | `--name` | container name — also its DNS name on the network |
 | `--network` | attach to `cms-network` so others can reach it by name |
-| `-e` | set an environment variable |
+| `--env-file .env` | load all vars from `.env` (POSTGRES_USER/PASSWORD/DB) into the container — same file Compose uses |
 | `-p 5432:5432` | publish `host:container` port |
 | `-v name:/path` | mount the named volume at Postgres's data directory |
 
@@ -138,7 +150,7 @@ Wait until it's accepting connections (this is what Compose's healthcheck did fo
 you):
 
 ```bash
-docker exec members-db pg_isready -U cms_user -d members_db
+docker exec members-db pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 # repeat until it prints: ... accepting connections
 ```
 
@@ -161,7 +173,7 @@ the root lockfile and workspace config). `-f` points at the Dockerfile inside it
 docker run --rm \
   --name members-migrate \
   --network cms-network \
-  -e DATABASE_URL=postgresql://cms_user:cms_password@members-db:5432/members_db \
+  -e DATABASE_URL="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@members-db:5432/$POSTGRES_DB" \
   church-cms-members-service:latest \
   node_modules/.bin/prisma migrate deploy
 ```
@@ -185,7 +197,7 @@ echo $?    # 0 = success
 docker run -d \
   --name members-service \
   --network cms-network \
-  -e DATABASE_URL=postgresql://cms_user:cms_password@members-db:5432/members_db \
+  -e DATABASE_URL="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@members-db:5432/$POSTGRES_DB" \
   -p 3001:3001 \
   church-cms-members-service:latest
 ```
@@ -215,7 +227,7 @@ Then open <http://localhost:8080> (Server: `members-db`, credentials as above).
 docker ps                          # docker compose ps
 docker logs -f members-service     # docker compose logs -f members-service
 docker inspect --format '{{.State.Health.Status}}' members-db   # health status
-docker exec -it members-db psql -U cms_user -d members_db       # psql into the DB
+docker exec -it members-db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"   # psql into the DB
 docker network inspect cms-network # see which containers are attached
 ```
 

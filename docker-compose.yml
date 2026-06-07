@@ -121,12 +121,12 @@ services:
   # ─── Adminer — lightweight DB browser ──────────────────────────────────────
   adminer:
     # Adminer is a single-file PHP web UI for browsing and querying any database.
-    # Open http://localhost:8080 in your browser:
+    # Open http://localhost:8080 in your browser and log in with:
     #   System:   PostgreSQL
-    #   Server:   members-db     (the service name — Docker DNS resolves it)
-    #   Username: cms_user       (from .env)
-    #   Password: cms_password   (from .env)
-    #   Database: members_db     (from .env)
+    #   Server:   members-db   (the service name — Docker DNS resolves it)
+    #   Username: POSTGRES_USER     from .env
+    #   Password: POSTGRES_PASSWORD from .env
+    #   Database: POSTGRES_DB       from .env
     image: adminer
 
     ports:
