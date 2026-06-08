@@ -7,5 +7,6 @@ dist/
 *.log
 .turbo/
 .next/
+*.tsbuildinfo
 coverage/
 .claude/settings.local.json
