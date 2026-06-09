@@ -10,7 +10,7 @@
 
 The Groups context tracks which members belong to which groups. The two natural modelling options are:
 
-1. `GroupMembership` as an entity *inside* the `Group` aggregate
+1. `GroupMembership` as an entity _inside_ the `Group` aggregate
 2. `GroupMembership` as its own aggregate root
 
 ## Decision

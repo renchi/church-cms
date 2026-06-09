@@ -22,6 +22,7 @@ The system is decomposed into **six bounded contexts**. Each context owns its da
 > The heart of the system. This context owns everything about who a person is within the church community.
 
 **Responsibilities:**
+
 - Member registration, profile management, and lifecycle (active → inactive → archived)
 - Family unit grouping and household relationships
 - Member directory and search
@@ -37,13 +38,13 @@ The system is decomposed into **six bounded contexts**. Each context owns its da
 
 > `MemberStatus` has three states with the following allowed transitions:
 >
-> | From | To | Event fired | Who can trigger |
-> |---|---|---|---|
-> | `active` | `inactive` | `MemberStatusChanged` | `ChurchAdmin`, `SuperAdmin` |
-> | `active` | `archived` | `MemberArchived` | `SuperAdmin` only |
-> | `inactive` | `active` | `MemberStatusChanged` | `ChurchAdmin`, `SuperAdmin` |
-> | `inactive` | `archived` | `MemberArchived` | `SuperAdmin` only |
-> | `archived` | `active` | `MemberReinstated` | `SuperAdmin` only — rare, requires explicit justification |
+> | From       | To         | Event fired           | Who can trigger                                           |
+> | ---------- | ---------- | --------------------- | --------------------------------------------------------- |
+> | `active`   | `inactive` | `MemberStatusChanged` | `ChurchAdmin`, `SuperAdmin`                               |
+> | `active`   | `archived` | `MemberArchived`      | `SuperAdmin` only                                         |
+> | `inactive` | `active`   | `MemberStatusChanged` | `ChurchAdmin`, `SuperAdmin`                               |
+> | `inactive` | `archived` | `MemberArchived`      | `SuperAdmin` only                                         |
+> | `archived` | `active`   | `MemberReinstated`    | `SuperAdmin` only — rare, requires explicit justification |
 >
 > Archival is not a terminal state but is treated as near-terminal. Reinstatement from `archived` is permitted only by a `SuperAdmin` and should be an intentional, audited action. All other transitions are disallowed and must throw a domain error.
 
@@ -64,6 +65,7 @@ The system is decomposed into **six bounded contexts**. Each context owns its da
 | `AttendanceRecorded` | Events | Updates the member's denormalised attendance summary |
 
 **What this context does NOT own:**
+
 - Authentication credentials (owned by Identity)
 - Offering records (owned by Finance)
 - Group memberships (owned by Groups)
@@ -75,6 +77,7 @@ The system is decomposed into **six bounded contexts**. Each context owns its da
 > A solved problem. Use an off-the-shelf solution (Clerk, Auth.js, or Supabase Auth) rather than building this from scratch. The church CMS consumes Identity as a service.
 
 **Responsibilities:**
+
 - User authentication (email/password, social login, 2FA)
 - Role assignment: `SuperAdmin`, `ChurchAdmin`, `MinistryLeader`, `Member`
 - Session management and token issuance
@@ -103,6 +106,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 > Tracks all money flowing in and out of the church. Consumes member references from the Members context but owns all financial records independently.
 
 **Responsibilities:**
+
 - Online and manual offering/tithe recording
 - Fund management (General, Building, Missions, etc.)
 - Expense tracking and categorisation
@@ -124,6 +128,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 | `GivingStatementGenerated` | A year-end statement is produced |
 
 **Cross-context references:**
+
 - Stores `donorMemberId` (from Members) on each `Offering` — never the full `Member` object
 - Does not call the Members context in real time; resolves member names at report generation time via a read-model query
 
@@ -136,6 +141,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 > Manages the scheduling of all church activities and tracks who attended them.
 
 **Responsibilities:**
+
 - Service and event creation, editing, and cancellation
 - Recurring schedule management (e.g. every Sunday 9AM)
 - Volunteer role assignment per event
@@ -159,6 +165,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 | `VolunteerAssigned` | A member is assigned to a service role |
 
 **Cross-context references:**
+
 - Stores `memberId` references on `Attendance` and `VolunteerAssignment`
 - Listens to `MemberArchived` from Members to remove the member from future volunteer schedules
 
@@ -171,6 +178,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 > Handles all outbound messaging and community engagement features. Member data is referenced but never owned here.
 
 **Responsibilities:**
+
 - Email broadcast composition and delivery (bulk and targeted)
 - SMS notification dispatch
 - Announcement board management (publish, pin, archive)
@@ -183,6 +191,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 > `RecipientGroup` is a criteria value object — it holds the selection spec (e.g. `{ type: 'active-members' }` or `{ type: 'group', groupId: '...' }`). A `RecipientResolver` **domain service** executes the query against the Members context at campaign-send time and returns a transient list of `{ memberId, email, name }` records. The value object itself never holds the resolved list.
 
 > `VisibilityLevel` on `PrayerRequest` has exactly three valid states:
+>
 > - `private` — visible only to pastoral staff
 > - `members-only` — visible to all logged-in members, requester name shown
 > - `members-anonymous` — visible to all logged-in members, requester name hidden
@@ -199,6 +208,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 | `MessageCampaignSent` | A bulk email or SMS is dispatched |
 
 **Cross-context references:**
+
 - `RecipientResolver` (domain service) calls the Members context at campaign-send time to resolve a `RecipientGroup` criteria spec into a flat `{ memberId, email, name }` list
 - Stores `requesterId` (from Members) on `PrayerRequest` for pastoral follow-up
 
@@ -211,6 +221,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 > Manages the sub-communities within the church — cell groups, choirs, ministry teams, and so on.
 
 **Responsibilities:**
+
 - Group creation and lifecycle management
 - Member enrollment requests and leader approvals
 - Group-level attendance tracking
@@ -237,6 +248,7 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 | `MemberReinstated` | Members | Does **not** automatically restore previous group memberships — the member re-enrolls manually. If the reinstated member was a group leader, the leader slot is not automatically restored either. |
 
 **Cross-context references:**
+
 - Stores `memberId` and `leaderId` (both opaque references from Members) on `Group`
 - Identity context listens to `GroupLeaderAssigned` and reactively assigns the `MinistryLeader` role to the user — Groups does not call Identity directly
 
@@ -268,14 +280,14 @@ Identity and Members are separate contexts deliberately. A `User` (login account
 
 ### Relationship types
 
-| Upstream context | Downstream context | Relationship type | Integration |
-|---|---|---|---|
-| Identity | Members | Customer/Supplier | Identity issues tokens; Members validates them via middleware |
-| Members | Finance | Customer/Supplier | Finance stores `memberId` reference; queries Members read-model for names |
-| Members | Events | Customer/Supplier | Events stores `memberId` on Attendance and VolunteerAssignment |
-| Members | Communications | Customer/Supplier | Comms queries Members for recipient lists |
-| Members | Groups | Customer/Supplier | Groups stores `memberId` and `leaderId` references |
-| Events | Communications | Customer/Supplier | Comms listens to `EventCreated` to generate reminders |
+| Upstream context | Downstream context | Relationship type | Integration                                                               |
+| ---------------- | ------------------ | ----------------- | ------------------------------------------------------------------------- |
+| Identity         | Members            | Customer/Supplier | Identity issues tokens; Members validates them via middleware             |
+| Members          | Finance            | Customer/Supplier | Finance stores `memberId` reference; queries Members read-model for names |
+| Members          | Events             | Customer/Supplier | Events stores `memberId` on Attendance and VolunteerAssignment            |
+| Members          | Communications     | Customer/Supplier | Comms queries Members for recipient lists                                 |
+| Members          | Groups             | Customer/Supplier | Groups stores `memberId` and `leaderId` references                        |
+| Events           | Communications     | Customer/Supplier | Comms listens to `EventCreated` to generate reminders                     |
 
 ### Integration patterns used
 
@@ -310,12 +322,12 @@ When a context needs to display data from another context (e.g. Finance showing 
 
 ## Decision Log
 
-| Date | Decision | Rationale |
-|---|---|---|
-| June 2026 | Identity implemented via external provider (Clerk/Supabase Auth) | Generic subdomain — not worth building custom auth |
-| June 2026 | Members is the single source of truth for person identity | Every other context references a `memberId`, never duplicates person data |
-| June 2026 | Phase 1 uses synchronous HTTP between contexts | Simpler for learning; async message bus (RabbitMQ) introduced in Phase 2 |
-| June 2026 | Finance does not call Members in real time | Avoids runtime coupling; member names resolved at report time via read model |
+| Date      | Decision                                                         | Rationale                                                                                                                                                                                                                                    |
+| --------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| June 2026 | Identity implemented via external provider (Clerk/Supabase Auth) | Generic subdomain — not worth building custom auth                                                                                                                                                                                           |
+| June 2026 | Members is the single source of truth for person identity        | Every other context references a `memberId`, never duplicates person data                                                                                                                                                                    |
+| June 2026 | Phase 1 uses synchronous HTTP between contexts                   | Simpler for learning; async message bus (RabbitMQ) introduced in Phase 2                                                                                                                                                                     |
+| June 2026 | Finance does not call Members in real time                       | Avoids runtime coupling; member names resolved at report time via read model                                                                                                                                                                 |
 | June 2026 | MVP design principle: model only what has known invariants today | Features likely to change are implemented as the simplest possible structure (e.g. `familyId` field instead of `Family` aggregate) with a documented evolution path. Complexity is introduced only when a concrete business rule demands it. |
 
 ---

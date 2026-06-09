@@ -8,6 +8,10 @@
   // "hybrid" detects ports from BOTH listening processes and URLs printed in
   // terminal output — the most thorough source, so Docker-published ports like
   // Adminer's 8080 get picked up too.
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" },
+
   "remote.autoForwardPortsSource": "hybrid",
 
   // Labels + behaviour for our stack's ports when they are forwarded.

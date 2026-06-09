@@ -29,15 +29,15 @@ The alternative — Identity driving the flow — would mean a church admin gran
 
 ### Alternatives considered
 
-| Option | Problem |
-|---|---|
-| Identity drives (admin assigns role first, Groups reacts) | Inverts the natural business flow; couples Identity to Groups |
-| Independent actions (admin does both manually) | Operational burden; risk of state diverging between contexts |
-| Groups calls Identity synchronously | Creates runtime coupling; Groups fails if Identity is unavailable |
+| Option                                                    | Problem                                                           |
+| --------------------------------------------------------- | ----------------------------------------------------------------- |
+| Identity drives (admin assigns role first, Groups reacts) | Inverts the natural business flow; couples Identity to Groups     |
+| Independent actions (admin does both manually)            | Operational burden; risk of state diverging between contexts      |
+| Groups calls Identity synchronously                       | Creates runtime coupling; Groups fails if Identity is unavailable |
 
 ## Consequences
 
 - Identity must subscribe to `GroupLeaderAssigned` events from the Groups context
 - Role revocation also flows from Groups: a new `GroupLeaderAssigned` (replacing the old leader) or `MemberLeftGroup` for the outgoing leader triggers Identity to remove the `MinistryLeader` role
-- If a `MinistryLeader` role needs to be granted *without* a group assignment (e.g. a pastoral assistant), that is an exceptional case handled directly in Identity by an admin — it falls outside this flow
-- If Groups introduces multiple simultaneous leaders per group in the future, the role revocation logic in Identity must be updated to check whether the member still leads *any* group before removing the role
+- If a `MinistryLeader` role needs to be granted _without_ a group assignment (e.g. a pastoral assistant), that is an exceptional case handled directly in Identity by an admin — it falls outside this flow
+- If Groups introduces multiple simultaneous leaders per group in the future, the role revocation logic in Identity must be updated to check whether the member still leads _any_ group before removing the role
