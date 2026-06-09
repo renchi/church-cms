@@ -12,12 +12,12 @@ two parts:
 The stack is defined in [`docker-compose.yml`](../docker-compose.yml) at the repo
 root. It runs four things:
 
-| Service | What it is | Port |
-|---|---|---|
-| `members-db` | PostgreSQL 16 | `5432` |
-| `members-migrate` | One-shot job: applies the Prisma schema, then exits | — |
-| `members-service` | The Fastify + Prisma API | `3001` |
-| `adminer` | Web UI for browsing the database | `8080` |
+| Service           | What it is                                          | Port   |
+| ----------------- | --------------------------------------------------- | ------ |
+| `members-db`      | PostgreSQL 16                                       | `5432` |
+| `members-migrate` | One-shot job: applies the Prisma schema, then exits | —      |
+| `members-service` | The Fastify + Prisma API                            | `3001` |
+| `adminer`         | Web UI for browsing the database                    | `8080` |
 
 ---
 
@@ -56,13 +56,13 @@ docker compose up -d       # detached (background)
 
 Open <http://localhost:8080> and log in with the values from your `.env`:
 
-| Field | Value |
-|---|---|
-| System | PostgreSQL |
-| Server | `members-db` |
-| Username | value of `POSTGRES_USER` in `.env` |
+| Field    | Value                                  |
+| -------- | -------------------------------------- |
+| System   | PostgreSQL                             |
+| Server   | `members-db`                           |
+| Username | value of `POSTGRES_USER` in `.env`     |
 | Password | value of `POSTGRES_PASSWORD` in `.env` |
-| Database | value of `POSTGRES_DB` in `.env` |
+| Database | value of `POSTGRES_DB` in `.env`       |
 
 > Server is `members-db` (the service name), **not** `localhost` — see
 > [why service names, not localhost](#why-service-names-not-localhost) below.
@@ -90,7 +90,7 @@ against an empty database).
 
 ## Doing it by hand (raw `docker`)
 
-Everything above is Compose *orchestrating* plain Docker primitives:
+Everything above is Compose _orchestrating_ plain Docker primitives:
 `docker network`, `docker volume`, `docker build`, `docker run`. Running them
 yourself is the best way to see what Compose actually does — and where its value
 is. Run these from the repo root.
@@ -137,14 +137,14 @@ docker run -d \
   postgres:16-alpine
 ```
 
-| Flag | Meaning |
-|---|---|
-| `-d` | detached (runs in the background) |
-| `--name` | container name — also its DNS name on the network |
-| `--network` | attach to `cms-network` so others can reach it by name |
+| Flag              | Meaning                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `-d`              | detached (runs in the background)                                                                 |
+| `--name`          | container name — also its DNS name on the network                                                 |
+| `--network`       | attach to `cms-network` so others can reach it by name                                            |
 | `--env-file .env` | load all vars from `.env` (POSTGRES_USER/PASSWORD/DB) into the container — same file Compose uses |
-| `-p 5432:5432` | publish `host:container` port |
-| `-v name:/path` | mount the named volume at Postgres's data directory |
+| `-p 5432:5432`    | publish `host:container` port                                                                     |
+| `-v name:/path`   | mount the named volume at Postgres's data directory                                               |
 
 Wait until it's accepting connections (this is what Compose's healthcheck did for
 you):
@@ -248,7 +248,7 @@ docker volume rm members-db-data   # remove the volume — deletes DB data (like
 ### Why service names, not localhost
 
 Inside Docker, each container has its own network namespace, so `localhost` means
-*that container itself* — not your machine and not another container. Containers
+_that container itself_ — not your machine and not another container. Containers
 on a shared network reach each other by **container/service name**
 (`members-db`), which Docker's built-in DNS resolves to the right container.
 

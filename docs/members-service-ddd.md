@@ -52,18 +52,18 @@ graph TB
 
 ### What each layer does and what it knows about
 
-| Layer | Folder | Responsibility | Allowed to import from |
-|---|---|---|---|
-| **Domain** | `src/domain/` | Business rules and invariants | Nothing — zero external deps |
-| **Application** | `src/application/` | Orchestrates one use case per class | Domain only |
-| **Infrastructure** | `src/infrastructure/` | Talks to the database | Domain interfaces + Prisma |
-| **API** | `src/api/` | Translates HTTP ↔ use cases | Application + Infrastructure |
+| Layer              | Folder                | Responsibility                      | Allowed to import from       |
+| ------------------ | --------------------- | ----------------------------------- | ---------------------------- |
+| **Domain**         | `src/domain/`         | Business rules and invariants       | Nothing — zero external deps |
+| **Application**    | `src/application/`    | Orchestrates one use case per class | Domain only                  |
+| **Infrastructure** | `src/infrastructure/` | Talks to the database               | Domain interfaces + Prisma   |
+| **API**            | `src/api/`            | Translates HTTP ↔ use cases         | Application + Infrastructure |
 
 The dashed arrow (Infrastructure → Domain interface) is the key insight of this
 architecture, called **Dependency Inversion**:
 
-> The domain *defines* what storage it needs (`MemberRepository` interface).
-> Infrastructure *fulfils* that promise (`PrismaMemberRepository`).
+> The domain _defines_ what storage it needs (`MemberRepository` interface).
+> Infrastructure _fulfils_ that promise (`PrismaMemberRepository`).
 > The domain never imports Prisma — it doesn't know Prisma exists.
 
 ---
@@ -139,7 +139,7 @@ classDiagram
 ### Key concepts explained
 
 **Aggregate Root — `Member`**
-The central object that *owns and enforces* all invariants for a member.
+The central object that _owns and enforces_ all invariants for a member.
 Its constructor is `private`, so it can only be created through `Member.register()`,
 which validates inputs first. You can never accidentally create a `Member` in an
 invalid state — the type system prevents it.
@@ -147,7 +147,7 @@ invalid state — the type system prevents it.
 **Repository Interface — `MemberRepository`**
 A contract the domain defines for what storage capabilities it needs. Defined
 in the domain layer, implemented in infrastructure. The use cases hold a reference
-to this *interface*, not to `PrismaMemberRepository` directly. This means you
+to this _interface_, not to `PrismaMemberRepository` directly. This means you
 could swap Postgres for MongoDB and the use cases would not change at all.
 
 **Domain Events — `MemberRegistered`, `MemberUpdated`, `MemberArchived`**

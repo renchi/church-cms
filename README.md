@@ -14,15 +14,15 @@ keep the learning focused, we build a **two-service vertical slice first**
 (Members + Events, wired together over a NATS message bus and deployed to
 Kubernetes), then add the rest one at a time.
 
-| Service | Context | Status |
-|---------|---------|--------|
-| `apps/members-service` | Members (Core Domain) | 🟢 Active — built first |
-| `apps/events-service` | Events (Supporting) | 🟢 Active — second service, paired via events |
-| `apps/web` | Frontend (Next.js 15) | 🟢 Active |
-| `apps/identity-service` | Identity / Auth (Clerk) | ⏸️ Deferred |
-| `apps/finance-service` | Finance | ⏸️ Deferred |
-| `apps/communications-service` | Communications | ⏸️ Deferred |
-| `apps/groups-service` | Groups | ⏸️ Deferred |
+| Service                       | Context                 | Status                                        |
+| ----------------------------- | ----------------------- | --------------------------------------------- |
+| `apps/members-service`        | Members (Core Domain)   | 🟢 Active — built first                       |
+| `apps/events-service`         | Events (Supporting)     | 🟢 Active — second service, paired via events |
+| `apps/web`                    | Frontend (Next.js 15)   | 🟢 Active                                     |
+| `apps/identity-service`       | Identity / Auth (Clerk) | ⏸️ Deferred                                   |
+| `apps/finance-service`        | Finance                 | ⏸️ Deferred                                   |
+| `apps/communications-service` | Communications          | ⏸️ Deferred                                   |
+| `apps/groups-service`         | Groups                  | ⏸️ Deferred                                   |
 
 Deferred services are valuable but postponed until the Members + Events slice runs
 end-to-end on Kubernetes — see [ADR-0007](docs/adr/0007-learning-scope-and-roadmap.md).
@@ -33,15 +33,15 @@ Shared packages live under `packages/` (e.g. `@cms/events` for domain event type
 
 Build each stage in order; let each feel solid before the next.
 
-1. **Members service** — Fastify + Prisma with DDD layers *(DDD in code)*
-2. **Tests** for Members *(confidence to refactor)*
-3. **Containerize** — Dockerfile → docker-compose *(Docker)*
+1. **Members service** — Fastify + Prisma with DDD layers _(DDD in code)_
+2. **Tests** for Members _(confidence to refactor)_
+3. **Containerize** — Dockerfile → docker-compose _(Docker)_
 4. **Frontend** wired into the compose stack
-5. **Kubernetes** — minikube → manifests → Ingress → Helm *(K8s)*
+5. **Kubernetes** — minikube → manifests → Ingress → Helm _(K8s)_
 6. **CI/CD** — GitHub Actions
-7. **Observability** — Prometheus + Grafana *(operating distributed systems)*
+7. **Observability** — Prometheus + Grafana _(operating distributed systems)_
 8. **Events service** — repeat the DDD pattern in a second context
-9. **NATS** — wire async events between Members ↔ Events *(system design)*
+9. **NATS** — wire async events between Members ↔ Events _(system design)_
 
 ## Prerequisites
 

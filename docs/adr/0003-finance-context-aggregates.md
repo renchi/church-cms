@@ -21,19 +21,20 @@ Represents a single donation made by a member or anonymous donor.
 
 ```typescript
 class Offering {
-  id: string                    // UUID
-  donorMemberId: string | null  // null = anonymous/walk-in donor
-  amount: Money                 // value object
-  givingType: GivingType        // value object: tithe | offering | special
-  fundId: string                // reference to Fund aggregate
-  channel: ChannelType          // value object: online | cash | cheque | transfer
-  recordedAt: Date
-  recordedById: string          // admin who recorded it
-  transactionReference: string | null  // for online payments (Stripe ref)
+  id: string; // UUID
+  donorMemberId: string | null; // null = anonymous/walk-in donor
+  amount: Money; // value object
+  givingType: GivingType; // value object: tithe | offering | special
+  fundId: string; // reference to Fund aggregate
+  channel: ChannelType; // value object: online | cash | cheque | transfer
+  recordedAt: Date;
+  recordedById: string; // admin who recorded it
+  transactionReference: string | null; // for online payments (Stripe ref)
 }
 ```
 
 **Invariants:**
+
 - `amount.value` must be greater than zero
 - `fundId` must reference an existing, active `Fund`
 - `transactionReference` is required when `channel === 'online'`
@@ -52,16 +53,17 @@ Represents a named pool of money with a tracked balance.
 
 ```typescript
 class Fund {
-  id: string
-  name: string                  // e.g. "General", "Building", "Missions"
-  fundType: FundType            // value object: general | building | missions | youth | special
-  balance: Money                // derived — sum of offerings minus expenses
-  isActive: boolean
-  createdAt: Date
+  id: string;
+  name: string; // e.g. "General", "Building", "Missions"
+  fundType: FundType; // value object: general | building | missions | youth | special
+  balance: Money; // derived — sum of offerings minus expenses
+  isActive: boolean;
+  createdAt: Date;
 }
 ```
 
 **Invariants:**
+
 - `name` must be unique across all funds
 - An inactive `Fund` cannot receive new `Offering` records
 - `balance` is never stored directly — it is always derived from `Offering` and `Expense` records via a read model
@@ -80,19 +82,20 @@ Represents money paid out from a fund.
 
 ```typescript
 class Expense {
-  id: string
-  amount: Money
-  category: ExpenseCategory     // value object: utilities | salaries | events | maintenance | other
-  description: string
-  fundId: string                // which fund this is charged to
-  approvedById: string          // admin who approved it
-  receiptUrl: string | null     // optional supporting document
-  incurredAt: Date
-  recordedAt: Date
+  id: string;
+  amount: Money;
+  category: ExpenseCategory; // value object: utilities | salaries | events | maintenance | other
+  description: string;
+  fundId: string; // which fund this is charged to
+  approvedById: string; // admin who approved it
+  receiptUrl: string | null; // optional supporting document
+  incurredAt: Date;
+  recordedAt: Date;
 }
 ```
 
 **Invariants:**
+
 - `amount.value` must be greater than zero
 - `fundId` must reference an existing, active `Fund`
 - An `Expense` is immutable once recorded — same correction policy as `Offering`
@@ -107,33 +110,38 @@ class Expense {
 ## Value Objects
 
 ### `Money`
+
 ```typescript
 class Money {
-  amount: number   // stored in smallest currency unit (centavos/cents)
-  currency: string // ISO 4217 — e.g. "PHP", "USD"
+  amount: number; // stored in smallest currency unit (centavos/cents)
+  currency: string; // ISO 4217 — e.g. "PHP", "USD"
 }
 // Rules: amount must be integer >= 0; currency must be a valid ISO code
 ```
 
 ### `GivingType`
+
 ```typescript
-type GivingType = 'tithe' | 'offering' | 'special'
+type GivingType = "tithe" | "offering" | "special";
 // MVP: no pledge tracking. If pledge tracking is added, extract Tithe aggregate.
 ```
 
 ### `FundType`
+
 ```typescript
-type FundType = 'general' | 'building' | 'missions' | 'youth' | 'special'
+type FundType = "general" | "building" | "missions" | "youth" | "special";
 ```
 
 ### `ChannelType`
+
 ```typescript
-type ChannelType = 'online' | 'cash' | 'cheque' | 'transfer'
+type ChannelType = "online" | "cash" | "cheque" | "transfer";
 ```
 
 ### `ExpenseCategory`
+
 ```typescript
-type ExpenseCategory = 'utilities' | 'salaries' | 'events' | 'maintenance' | 'other'
+type ExpenseCategory = "utilities" | "salaries" | "events" | "maintenance" | "other";
 ```
 
 ---
@@ -141,19 +149,21 @@ type ExpenseCategory = 'utilities' | 'salaries' | 'events' | 'maintenance' | 'ot
 ## Domain Services
 
 ### `FundBalanceCalculator`
+
 Calculates the current balance of a fund by summing all `Offering` amounts minus all `Expense` amounts for that fund. This is a read-model concern — never stored on the `Fund` aggregate itself.
 
 ### `GivingStatementGenerator`
+
 Produces a year-end giving statement for a member by querying all `Offering` records with a matching `donorMemberId` within a date range. Returns a PDF-ready data structure.
 
 ---
 
 ## Cross-Context Integration
 
-| Direction | Event | Action |
-|---|---|---|
-| Consumes from Members | `MemberArchived` | Flag all `Offering` records for that `donorMemberId` as orphaned — do not delete |
-| Produces | `OfferingReceived` | Consumed by no context in Phase 1; reserved for Phase 3 analytics |
+| Direction             | Event              | Action                                                                           |
+| --------------------- | ------------------ | -------------------------------------------------------------------------------- |
+| Consumes from Members | `MemberArchived`   | Flag all `Offering` records for that `donorMemberId` as orphaned — do not delete |
+| Produces              | `OfferingReceived` | Consumed by no context in Phase 1; reserved for Phase 3 analytics                |
 
 ---
 
@@ -168,8 +178,8 @@ Produces a year-end giving statement for a member by querying all `Offering` rec
 
 ## Decision Log
 
-| Decision | Rationale |
-|---|---|
-| `balance` is derived, not stored | Prevents balance drift bugs; always computed from source records |
-| Offerings are immutable | Financial audit trail integrity — corrections are new records, not edits |
-| Single `Offering` aggregate for tithes and offerings | No pledge invariants in MVP; `GivingType` VO captures the distinction |
+| Decision                                             | Rationale                                                                |
+| ---------------------------------------------------- | ------------------------------------------------------------------------ |
+| `balance` is derived, not stored                     | Prevents balance drift bugs; always computed from source records         |
+| Offerings are immutable                              | Financial audit trail integrity — corrections are new records, not edits |
+| Single `Offering` aggregate for tithes and offerings | No pledge invariants in MVP; `GivingType` VO captures the distinction    |

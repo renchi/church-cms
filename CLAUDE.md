@@ -35,15 +35,15 @@ docs/adr/   # architecture decision records — read these before changing archi
 
 Only **two services** are in active development. Do not create or scaffold the others.
 
-| Service | Status |
-|---|---|
-| `apps/members-service` | Active — built first, the DDD anchor |
-| `apps/events-service` | Active — second service, paired via events |
-| `apps/web` | Active — Next.js 15 frontend |
-| `apps/identity-service` | **Deferred** |
-| `apps/finance-service` | **Deferred** |
-| `apps/communications-service` | **Deferred** |
-| `apps/groups-service` | **Deferred** |
+| Service                       | Status                                     |
+| ----------------------------- | ------------------------------------------ |
+| `apps/members-service`        | Active — built first, the DDD anchor       |
+| `apps/events-service`         | Active — second service, paired via events |
+| `apps/web`                    | Active — Next.js 15 frontend               |
+| `apps/identity-service`       | **Deferred**                               |
+| `apps/finance-service`        | **Deferred**                               |
+| `apps/communications-service` | **Deferred**                               |
+| `apps/groups-service`         | **Deferred**                               |
 
 ## Architecture: DDD bounded contexts
 
@@ -54,17 +54,23 @@ The full context map is in [`docs/adr/context-map.md`](docs/adr/context-map.md).
 **Each context owns its own database.** No context reads another's database directly. Two separate PostgreSQL instances (one per active service), not a shared one.
 
 **Cross-context communication:**
+
 - Phase 1 (now): synchronous HTTP between services
 - Phase 2 (later): async domain events over NATS
 
 **Anti-corruption layer (ACL) — enforced at all times:**
+
 ```typescript
 // ✅ Reference by ID only
-class Offering { donorMemberId: string }
+class Offering {
+  donorMemberId: string;
+}
 
 // ❌ Never import another context's aggregate
-import { Member } from '../members/domain/Member'
-class Offering { donor: Member }
+import { Member } from "../members/domain/Member";
+class Offering {
+  donor: Member;
+}
 ```
 
 When a context needs display data from another (e.g. a donor's name on a report), use a **read model** — a denormalised query at the infrastructure layer, not the domain layer.
@@ -78,11 +84,11 @@ These are the two cross-service flows to implement in NATS (stage 9 of the roadm
 
 ## Database strategy (ADR-0008)
 
-| Stage | Approach |
-|---|---|
-| Development | Postgres in Docker via docker-compose |
+| Stage                 | Approach                                                                      |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Development           | Postgres in Docker via docker-compose                                         |
 | Kubernetes (minikube) | Postgres as StatefulSet with PersistentVolume — intentional, for K8s learning |
-| Production (if ever) | Managed cloud Postgres (Neon / Supabase / RDS) |
+| Production (if ever)  | Managed cloud Postgres (Neon / Supabase / RDS)                                |
 
 ## DDD conventions (from ADRs)
 
@@ -93,11 +99,11 @@ These are the two cross-service flows to implement in NATS (stage 9 of the roadm
 
 ## Deployment targets
 
-| Layer | Service | Notes |
-|---|---|---|
-| Frontend (Next.js) | Vercel | Free tier; deploys from GitHub; the natural Next.js host |
-| Backend services (Fastify) | Railway or Render | Free/cheap tiers; deploy from GitHub; no server management |
-| Database (PostgreSQL) | Neon | Free managed Postgres; one connection string injected via env var / Secret |
+| Layer                      | Service           | Notes                                                                      |
+| -------------------------- | ----------------- | -------------------------------------------------------------------------- |
+| Frontend (Next.js)         | Vercel            | Free tier; deploys from GitHub; the natural Next.js host                   |
+| Backend services (Fastify) | Railway or Render | Free/cheap tiers; deploy from GitHub; no server management                 |
+| Database (PostgreSQL)      | Neon              | Free managed Postgres; one connection string injected via env var / Secret |
 
 This matches the "managed cloud Postgres for production" decision in ADR-0008 — Neon is the managed provider.
 
@@ -109,23 +115,23 @@ Each service receives its database connection string and any secrets via environ
 
 ADRs document deliberate "simple now, evolve later" decisions. When a business rule appears that was anticipated, check the relevant ADR first — the upgrade path is already designed. Do not pre-build it; implement only when the concrete rule exists.
 
-| Simple structure now | Trigger to evolve | ADR |
-|---|---|---|
-| `familyId` field on `Member` (no `Family` aggregate) | Household-level invariants emerge (joint giving, head-of-household approval) | context-map |
-| `Offering` covers tithes + offerings (no separate `Tithe` aggregate) | Pledge tracking / tithe commitment analysis is prioritised | 0003 |
-| `ServiceEvent` covers services + one-off events (no split aggregates) | Type-specific invariants appear in more than one or two places | 0004 |
-| `RecurrenceRule` absent; recurring events are individual instances | Recurrence scheduling is explicitly prioritised | 0004 |
-| Phase 1 uses sync HTTP between services | Stage 9 of the roadmap — wire NATS for async events | 0007 |
+| Simple structure now                                                  | Trigger to evolve                                                            | ADR         |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------- |
+| `familyId` field on `Member` (no `Family` aggregate)                  | Household-level invariants emerge (joint giving, head-of-household approval) | context-map |
+| `Offering` covers tithes + offerings (no separate `Tithe` aggregate)  | Pledge tracking / tithe commitment analysis is prioritised                   | 0003        |
+| `ServiceEvent` covers services + one-off events (no split aggregates) | Type-specific invariants appear in more than one or two places               | 0004        |
+| `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
+| Phase 1 uses sync HTTP between services                               | Stage 9 of the roadmap — wire NATS for async events                          | 0007        |
 
 ## ADR index
 
-| ADR | Decision |
-|---|---|
-| 0001 | GroupMembership is a separate aggregate root |
+| ADR  | Decision                                                             |
+| ---- | -------------------------------------------------------------------- |
+| 0001 | GroupMembership is a separate aggregate root                         |
 | 0002 | Groups drives MinistryLeader role assignment in Identity (via event) |
-| 0003 | Finance context aggregates & domain model |
-| 0004 | Events context aggregates & domain model |
-| 0005 | Communications context aggregates & domain model |
-| 0006 | Groups context aggregates & domain model |
-| 0007 | Learning scope & roadmap — two-service slice first |
-| 0008 | Database hosting strategy (Docker → minikube → managed cloud) |
+| 0003 | Finance context aggregates & domain model                            |
+| 0004 | Events context aggregates & domain model                             |
+| 0005 | Communications context aggregates & domain model                     |
+| 0006 | Groups context aggregates & domain model                             |
+| 0007 | Learning scope & roadmap — two-service slice first                   |
+| 0008 | Database hosting strategy (Docker → minikube → managed cloud)        |

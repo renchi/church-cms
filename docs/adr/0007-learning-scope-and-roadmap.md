@@ -15,7 +15,7 @@ minimizing maintenance. The explicit learning goals are:
 1. **Docker & containers** — images, multi-stage builds, compose
 2. **Kubernetes** — minikube, manifests, Helm, Ingress, autoscaling, observability
 3. **System design** — service boundaries, async events, eventual consistency
-4. **Software architecture / Domain-Driven Design** — *an emphasized priority*
+4. **Software architecture / Domain-Driven Design** — _an emphasized priority_
 5. **Using AI tools** — issue-driven development with Claude Code + Linear
 
 Given that goal, the microservices + K8s + NATS + DDD architecture defined in the
@@ -52,7 +52,7 @@ in Linear.
 
 The original plan had no observability, which leaves a hole in the Kubernetes and
 system-design learning goals. Add **Prometheus + Grafana** on minikube plus
-structured logging once the cluster is up. Operating a system you can *see* is one
+structured logging once the cluster is up. Operating a system you can _see_ is one
 of the highest-value K8s skills.
 
 ---
@@ -61,17 +61,17 @@ of the highest-value K8s skills.
 
 Each layer should feel solid before starting the next.
 
-| # | Stage | Linear | Skill unlocked |
-|---|---|---|---|
-| 1 | Build Members service (Fastify + Prisma, DDD layers) | CMS-5, CMS-6 | **DDD in code**, clean architecture |
-| 2 | Tests for Members | CMS-12 | TDD, confidence to refactor |
-| 3 | Containerize: Dockerfile → docker-compose | CMS-7, CMS-8 | **Docker mastery** |
-| 4 | Frontend + compose it in | CMS-9, CMS-10, CMS-11 | full local stack |
-| 5 | Kubernetes: minikube → manifests → Ingress → Helm | CMS-13, CMS-14, CMS-15 | **Kubernetes** |
-| 6 | CI/CD pipeline | CMS-16 | automation |
-| 7 | **Observability** (Prometheus + Grafana) | *new ticket* | operating distributed systems |
-| 8 | Build Events service | CMS-18 | repeat DDD pattern in a 2nd context |
-| 9 | Wire NATS between Members ↔ Events | CMS-22 | **system design / async events** |
+| #   | Stage                                                | Linear                 | Skill unlocked                      |
+| --- | ---------------------------------------------------- | ---------------------- | ----------------------------------- |
+| 1   | Build Members service (Fastify + Prisma, DDD layers) | CMS-5, CMS-6           | **DDD in code**, clean architecture |
+| 2   | Tests for Members                                    | CMS-12                 | TDD, confidence to refactor         |
+| 3   | Containerize: Dockerfile → docker-compose            | CMS-7, CMS-8           | **Docker mastery**                  |
+| 4   | Frontend + compose it in                             | CMS-9, CMS-10, CMS-11  | full local stack                    |
+| 5   | Kubernetes: minikube → manifests → Ingress → Helm    | CMS-13, CMS-14, CMS-15 | **Kubernetes**                      |
+| 6   | CI/CD pipeline                                       | CMS-16                 | automation                          |
+| 7   | **Observability** (Prometheus + Grafana)             | _new ticket_           | operating distributed systems       |
+| 8   | Build Events service                                 | CMS-18                 | repeat DDD pattern in a 2nd context |
+| 9   | Wire NATS between Members ↔ Events                   | CMS-22                 | **system design / async events**    |
 
 After stage 9 the learner has touched every goal end-to-end. The deferred contexts
 (Finance, Comms, Groups, Identity) can then be added one at a time as extra practice.
@@ -81,6 +81,7 @@ After stage 9 the learner has touched every goal end-to-end. The deferred contex
 ## Consequences
 
 **Positive**
+
 - Every learning goal is exercised with far less repetitive work.
 - A complete, observable, event-driven slice on K8s is more impressive — and more
   instructive — than six half-built services.
@@ -88,6 +89,7 @@ After stage 9 the learner has touched every goal end-to-end. The deferred contex
   which is exactly how the pattern is internalised.
 
 **Negative / trade-offs**
+
 - The app is not feature-complete as a church CMS. Acceptable — that was never the goal.
 - Cross-context patterns that only appear with 3+ services (e.g. a service consuming
   events from two upstreams) are deferred. Revisit when adding the next context.
@@ -96,9 +98,9 @@ After stage 9 the learner has touched every goal end-to-end. The deferred contex
 
 ## Decision Log
 
-| Decision | Rationale |
-|---|---|
-| Two-service slice (Members + Events) before the rest | Maximise learning per unit of effort; avoid building the same service six times |
-| Events chosen as 2nd service | Bidirectional events with Members = best async-choreography lesson |
-| Finance / Comms / Groups / Identity deferred (not cancelled) | Repetition once the pattern is learned; tagged `deferred` in Linear |
-| Add observability (Prometheus + Grafana) | Closes a gap in the K8s + system-design learning goals |
+| Decision                                                     | Rationale                                                                       |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| Two-service slice (Members + Events) before the rest         | Maximise learning per unit of effort; avoid building the same service six times |
+| Events chosen as 2nd service                                 | Bidirectional events with Members = best async-choreography lesson              |
+| Finance / Comms / Groups / Identity deferred (not cancelled) | Repetition once the pattern is learned; tagged `deferred` in Linear             |
+| Add observability (Prometheus + Grafana)                     | Closes a gap in the K8s + system-design learning goals                          |
