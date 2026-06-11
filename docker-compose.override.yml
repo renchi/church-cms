@@ -1,0 +1,51 @@
+# docker-compose.override.yml — development overrides for the web service.
+#
+# Docker Compose automatically merges this file with docker-compose.yml when
+# both exist in the same directory.  You never need to pass -f flags; just run:
+#   docker compose up --build
+#
+# This file replaces the production "next build + next start" setup with a
+# dev server that watches source files and reloads on every change.
+#
+# How the merge works:
+#   docker-compose.yml      — base config (production-shaped)
+#   docker-compose.override.yml — keys here WIN over the base file for the
+#                                  same service.  Keys that only appear in the
+#                                  base are kept unchanged.
+#
+# To use the production config (no override), run:
+#   docker compose -f docker-compose.yml up --build
+
+services:
+  web:
+    build:
+      # "target: builder" stops the multi-stage build at the builder stage and
+      # does NOT execute the runner stage.  The builder image is larger (it
+      # includes pnpm and all dev dependencies), but that is intentional here —
+      # we need pnpm to run "next dev", and we need dev dependencies for things
+      # like TypeScript type checking during development.
+      target: builder
+
+    # Override the CMD from the Dockerfile.
+    # In production (docker-compose.yml): next start -p 3000
+    # In development (this file):         next dev   -p 3000
+    #
+    # "next dev" watches your source files and:
+    #   • recompiles changed pages on the fly (no full rebuild)
+    #   • pushes updates to the browser via Fast Refresh (React hot-reload)
+    #   • shows detailed error overlays in the browser
+    command: ["pnpm", "--filter", "web", "dev"]
+
+    volumes:
+      # Mount the local apps/web source directory into the container.
+      # When you save a file on your machine, the change is immediately visible
+      # inside the container — "next dev" detects it and recompiles.
+      - ./apps/web:/repo/apps/web
+
+      # The two lines below are "anonymous volume overrides".  Without them,
+      # the bind mount above would REPLACE the entire /repo/apps/web directory,
+      # including node_modules and the .next cache built during the image build.
+      # These anonymous volumes tell Docker: "keep the container's own copy of
+      # these subdirectories; don't let the host bind mount overwrite them."
+      - /repo/apps/web/node_modules
+      - /repo/apps/web/.next

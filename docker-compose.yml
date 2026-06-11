@@ -8,8 +8,14 @@
 #   docker compose logs -f members-service   tail a single service's logs
 #
 # On startup the order is: members-db → members-migrate (applies the schema, then
-# exits) → members-service. So a fresh "docker compose up" gives you a working,
-# migrated database with no manual steps.
+# exits) → members-service → web. So a fresh "docker compose up" gives you a
+# working, migrated database and a running frontend with no manual steps.
+#
+# ── Hot-reload in development ────────────────────────────────────────────────
+# This file is production-shaped: "next build + next start" in a slim runner
+# image.  For hot-reload, create (or uncomment) docker-compose.override.yml.
+# Docker Compose automatically merges docker-compose.override.yml with this
+# file when both exist in the same directory — no extra flags needed.
 #
 # Credentials are read from .env in this directory (see .env.example).
 # Docker Compose automatically loads .env for ${VAR} substitution in this file.
@@ -28,6 +34,9 @@ x-members-base: &members-base
     # so we must build from here, not from apps/members-service/.
     context: .
     dockerfile: apps/members-service/Dockerfile
+    # host network for build steps — Docker's bridge DNS cannot reach npm or
+    # Alpine CDN on this machine; host network bypasses that for RUN steps.
+    network: host
   # Pin an explicit image name so both services share ONE built image instead
   # of each building their own. Compose builds it once and reuses it.
   image: church-cms-members-service:latest
@@ -117,6 +126,52 @@ services:
         # the migrate job depends on), so the app only starts once the database
         # exists, is reachable, AND has the current schema applied.
         condition: service_completed_successfully
+
+  # ─── Web frontend ───────────────────────────────────────────────────────────
+  web:
+    build:
+      # Build from the monorepo root — the Dockerfile needs the root
+      # pnpm-lock.yaml and workspace config to install dependencies correctly.
+      context: .
+      dockerfile: apps/web/Dockerfile
+      # "network: host" passes the host machine's network stack to each RUN step
+      # during "docker build".  Normally Docker uses an isolated bridge network
+      # for build steps; on this machine the bridge's DNS cannot resolve external
+      # registries (npm, Alpine CDN), so pnpm install fails.  host network mode
+      # bypasses that — build-time RUN steps use the host's DNS and routes.
+      # NOTE: this setting only affects the BUILD, not the running container.
+      network: host
+    # Pin a name so the image can be referenced in other contexts (e.g. a
+    # Kubernetes manifest that pulls from a local registry during minikube work).
+    image: church-cms-web:latest
+
+    ports:
+      # host-port:container-port — the frontend is available at localhost:3000.
+      - "3000:3000"
+
+    environment:
+      # NEXT_PUBLIC_MEMBERS_API_URL is read by the members page at request time.
+      # Inside Docker, services reach each other by service name — Docker's
+      # internal DNS resolves "members-service" to the right container IP.
+      # This URL is only valid server-side (inside the Docker network); browser
+      # requests go to localhost:3001 via the exposed port, not this address.
+      NEXT_PUBLIC_MEMBERS_API_URL: http://members-service:3001
+
+    # "init: true" tells Docker to inject its own tini binary (/usr/bin/docker-init)
+    # as PID 1 in this container.  This gives us signal forwarding and zombie
+    # reaping without needing "apk add tini" in the Dockerfile.  The members-service
+    # installs tini directly in its image (either approach is valid — see the
+    # Dockerfile for a full explanation of the trade-offs).
+    init: true
+
+    networks:
+      - cms-network
+
+    depends_on:
+      # Start after members-service is running. The members page handles API
+      # errors gracefully (shows a friendly message), so we only need
+      # "service_started" rather than waiting for a healthy check.
+      - members-service
 
   # ─── Adminer — lightweight DB browser ──────────────────────────────────────
   adminer:

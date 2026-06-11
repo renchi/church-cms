@@ -53,6 +53,9 @@ WORKDIR /repo
 # If we copied everything first, any source file change would bust this cache.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/members-service/package.json ./apps/members-service/package.json
+# pnpm validates the lockfile against every workspace package (apps/*).
+# Copy the web app's manifest so pnpm can resolve the full workspace graph.
+COPY apps/web/package.json             ./apps/web/package.json
 RUN pnpm install --frozen-lockfile
 # --frozen-lockfile = fail if pnpm-lock.yaml is out of date. Ensures the build
 # always uses exactly the versions that were tested, with no silent upgrades.
