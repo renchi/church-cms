@@ -11,11 +11,14 @@
 # exits) → members-service → web. So a fresh "docker compose up" gives you a
 # working, migrated database and a running frontend with no manual steps.
 #
-# ── Hot-reload in development ────────────────────────────────────────────────
-# This file is production-shaped: "next build + next start" in a slim runner
-# image.  For hot-reload, create (or uncomment) docker-compose.override.yml.
-# Docker Compose automatically merges docker-compose.override.yml with this
-# file when both exist in the same directory — no extra flags needed.
+# ── Production-shaped vs. dev hot-reload ─────────────────────────────────────
+# This file is production-shaped: the web service runs "next build + next start"
+# in a slim runner image.  But docker-compose.override.yml IS committed alongside
+# it, and Docker Compose automatically merges any docker-compose.override.yml in
+# the same directory — so the DEFAULT "docker compose up" runs the dev override
+# (hot-reload via "next dev"), not the production image.
+# To run the production-shaped stack instead, opt out of the override explicitly:
+#   docker compose -f docker-compose.yml up --build
 #
 # Credentials are read from .env in this directory (see .env.example).
 # Docker Compose automatically loads .env for ${VAR} substitution in this file.
@@ -168,10 +171,15 @@ services:
       - cms-network
 
     depends_on:
-      # Start after members-service is running. The members page handles API
-      # errors gracefully (shows a friendly message), so we only need
-      # "service_started" rather than waiting for a healthy check.
-      - members-service
+      members-service:
+        # Wait until members-service reports healthy (its Dockerfile defines a
+        # HEALTHCHECK that probes /health), not merely "started". This matches
+        # the readiness-gating used elsewhere in this file (members-db uses
+        # service_healthy, members-migrate uses service_completed_successfully)
+        # and avoids the frontend's first /members request landing on the error
+        # state before the API is actually serving. The page still degrades
+        # gracefully if the API drops later — this just removes the cold-start race.
+        condition: service_healthy
 
   # ─── Adminer — lightweight DB browser ──────────────────────────────────────
   adminer:
