@@ -62,9 +62,14 @@ pnpm install
 pnpm dev      # Start all services in parallel
 pnpm build    # Build all services
 pnpm lint     # Lint all services
-pnpm test     # Run all tests
+pnpm test     # Run all tests (DB-backed integration tests are skipped; see note)
 pnpm format   # Format all files with Prettier
 ```
+
+> **Integration tests are opt-in.** `pnpm test` runs the unit tests only; the
+> Testcontainers-backed integration tests are gated behind `RUN_DB_TESTS=1` and need
+> Docker running: `RUN_DB_TESTS=1 pnpm --filter members-service test`. See
+> [docs/study-guide.md](docs/study-guide.md) §4 for why.
 
 To run a single service:
 

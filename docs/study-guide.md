@@ -24,17 +24,17 @@ points at (`file_path:line`) and read the real code — that is where the learni
 
 The roadmap is a 9-stage sequence. **Stages 1–4 are done.** That is the scope of this guide.
 
-| #   | Stage                                         | Status        | What it taught                       |
-| --- | --------------------------------------------- | ------------- | ------------------------------------ |
-| 1   | Build Members service (Fastify + Prisma, DDD) | ✅ done       | DDD in code, clean architecture      |
-| 2   | Tests for Members                             | ✅ done       | TDD, unit vs. integration            |
-| 3   | Containerize (Dockerfile → docker-compose)    | ✅ done       | Docker mastery                       |
-| 4   | Frontend (Next.js) + compose it in            | ✅ done       | full local stack                     |
-| 5   | Kubernetes (minikube → manifests → Helm)      | ⬜ next       | Kubernetes                           |
-| 6   | CI/CD pipeline                                | ⬜            | automation                           |
-| 7   | Observability (Prometheus + Grafana)          | ⬜            | operating distributed systems        |
-| 8   | Build Events service                          | ⬜            | repeat the DDD pattern               |
-| 9   | Wire NATS between Members ↔ Events            | ⬜            | async events / eventual consistency  |
+| #   | Stage                                         | Status  | What it taught                      |
+| --- | --------------------------------------------- | ------- | ----------------------------------- |
+| 1   | Build Members service (Fastify + Prisma, DDD) | ✅ done | DDD in code, clean architecture     |
+| 2   | Tests for Members                             | ✅ done | TDD, unit vs. integration           |
+| 3   | Containerize (Dockerfile → docker-compose)    | ✅ done | Docker mastery                      |
+| 4   | Frontend (Next.js) + compose it in            | ✅ done | full local stack                    |
+| 5   | Kubernetes (minikube → manifests → Helm)      | ⬜ next | Kubernetes                          |
+| 6   | CI/CD pipeline                                | ⬜      | automation                          |
+| 7   | Observability (Prometheus + Grafana)          | ⬜      | operating distributed systems       |
+| 8   | Build Events service                          | ⬜      | repeat the DDD pattern              |
+| 9   | Wire NATS between Members ↔ Events            | ⬜      | async events / eventual consistency |
 
 Knowing what is **deliberately not built yet** is itself part of the learning: the
 architecture is sequenced so you learn each layer once, well, instead of building the
@@ -46,19 +46,19 @@ same service six times. That decision is ADR-0007 — read it.
 
 Everything below is in the repo today. Know what each tool _is_ and the _one job_ it does.
 
-| Layer            | Tool                          | Its one job                                                        |
-| ---------------- | ----------------------------- | ----------------------------------------------------------------- |
-| Language         | **TypeScript** (ES2022)       | JS + static types; catches errors before runtime                  |
-| Monorepo         | **pnpm workspaces**           | many packages in one repo, one lockfile, shared deps              |
-| API framework    | **Fastify**                   | HTTP server for the backend service                               |
-| ORM              | **Prisma**                    | typed database access + schema migrations                         |
-| Database         | **PostgreSQL 16**             | the relational store                                              |
-| Frontend         | **Next.js 15** (React 19)     | server-rendered React app (App Router)                            |
-| Styling          | **Tailwind CSS 4**            | utility-class styling, mobile-first                               |
-| Tests            | **Vitest** + **Testcontainers** | unit tests + real-Postgres integration tests                    |
-| Lint/format      | **ESLint 9** + **Prettier**   | consistency and catching mistakes                                 |
-| Containers       | **Docker** + **Compose**      | package and run the whole stack identically anywhere              |
-| Decisions        | **ADRs** (`docs/adr/`)        | written record of _why_ each architectural choice was made        |
+| Layer         | Tool                            | Its one job                                                |
+| ------------- | ------------------------------- | ---------------------------------------------------------- |
+| Language      | **TypeScript** (ES2022)         | JS + static types; catches errors before runtime           |
+| Monorepo      | **pnpm workspaces**             | many packages in one repo, one lockfile, shared deps       |
+| API framework | **Fastify**                     | HTTP server for the backend service                        |
+| ORM           | **Prisma**                      | typed database access + schema migrations                  |
+| Database      | **PostgreSQL 16**               | the relational store                                       |
+| Frontend      | **Next.js 15** (React 19)       | server-rendered React app (App Router)                     |
+| Styling       | **Tailwind CSS 4**              | utility-class styling, mobile-first                        |
+| Tests         | **Vitest** + **Testcontainers** | unit tests + real-Postgres integration tests               |
+| Lint/format   | **ESLint 9** + **Prettier**     | consistency and catching mistakes                          |
+| Containers    | **Docker** + **Compose**        | package and run the whole stack identically anywhere       |
+| Decisions     | **ADRs** (`docs/adr/`)          | written record of _why_ each architectural choice was made |
 
 ### 1.1 The monorepo (pnpm workspaces)
 
@@ -174,7 +174,7 @@ Concepts demonstrated, each commented inline:
   - `service_healthy` (wait for the DB's `pg_isready` healthcheck),
   - `service_completed_successfully` (wait for the migrate job to finish, exit 0),
   - `service_healthy` again (web waits for the API's `/health`).
-  This removes cold-start races.
+    This removes cold-start races.
 - **The migrate-then-run pattern** — migrations run as a **separate one-shot job**
   (`prisma migrate deploy`), not inside the app. The app image deliberately does not
   migrate. This maps directly to a **Kubernetes init container / Job** later (stage 5).
@@ -327,9 +327,20 @@ serialisation, status codes) that mocks hide. The injectable `repo` and port-les
 Run them:
 
 ```bash
-pnpm --filter members-service test            # all tests
-pnpm --filter members-service test:coverage   # with coverage
+pnpm --filter members-service test            # unit tests (integration auto-skips)
+pnpm --filter members-service test:coverage   # unit tests with coverage
+
+# Integration tests are opt-in — they need Docker running:
+RUN_DB_TESTS=1 pnpm --filter members-service test
 ```
+
+**Why integration tests are opt-in.** They are gated behind the `RUN_DB_TESTS=1`
+environment variable, so a plain `pnpm test` runs only the unit tests and reports the
+integration ones as _skipped_. This is deliberate: the current dev host has a broken
+host→container Docker network path (a connection can't complete from the host to a
+container's Postgres), so the integration tests can only run in CI or on a machine where
+that path works. Set `RUN_DB_TESTS=1` (with Docker running) to include them.
+Tracked for removal once the infra supports it: **CMS-25**.
 
 ---
 
@@ -399,6 +410,7 @@ If you can answer these from memory, you've absorbed what's been built. If not, 
 in parentheses (and the file it links) is where to look.
 
 **Docker**
+
 - [ ] What does a multi-stage build save you, concretely? (§2.2)
 - [ ] Why copy `package.json` before the source code? (§2.2 layer caching)
 - [ ] How does `members-service` find the database — and why not `localhost`? (§2.4)
@@ -406,6 +418,7 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why run migrations as a separate job instead of in the app? (§2.4)
 
 **DDD**
+
 - [ ] Why is `Member`'s constructor private? (§3.2)
 - [ ] Where do business invariants live, and where do they _not_? (§3.2, §3.6)
 - [ ] What is the repository pattern buying you? (§3.4)
@@ -413,6 +426,7 @@ in parentheses (and the file it links) is where to look.
 - [ ] What is the ACL rule, and what's a read model? (§3.7)
 
 **Stack & system design**
+
 - [ ] What problem do pnpm workspaces solve? (§1.1)
 - [ ] Why `.js` extensions in TypeScript imports? (§1.2)
 - [ ] Unit vs. integration test — what does each catch that the other misses? (§4)
@@ -435,5 +449,5 @@ Read, in this order, to go deeper than this guide:
 2. [`docker-local-dev.md`](docker-local-dev.md) — the container workflow, hands-on
 3. [`adr/0007-learning-scope-and-roadmap.md`](adr/0007-learning-scope-and-roadmap.md) — the why behind the sequencing
 4. [`adr/context-map.md`](adr/context-map.md) — the strategic DDD picture
-</content>
-</invoke>
+   </content>
+   </invoke>
