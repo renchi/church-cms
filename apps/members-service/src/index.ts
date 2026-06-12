@@ -1,24 +1,7 @@
-import Fastify from "fastify";
-import { memberRoutes } from "./api/memberRoutes.js";
+import { buildApp } from "./app.js";
 import { prisma } from "./infrastructure/prisma.js";
 
-const app = Fastify({ logger: true });
-
-// Root route — a friendly "it's working" landing page so opening the service URL
-// in a browser confirms it's up, instead of returning a bare 404.
-app.get("/", async () => {
-  return {
-    service: "members-service",
-    status: "ok",
-    endpoints: ["/health", "/members"],
-  };
-});
-
-app.get("/health", async () => {
-  return { status: "ok" };
-});
-
-app.register(memberRoutes);
+const app = buildApp({ logger: true });
 
 app.addHook("onClose", async () => {
   await prisma.$disconnect();

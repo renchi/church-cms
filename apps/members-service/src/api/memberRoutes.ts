@@ -3,7 +3,14 @@ import { ArchiveMemberUseCase } from "../application/ArchiveMemberUseCase.js";
 import { RegisterMemberUseCase } from "../application/RegisterMemberUseCase.js";
 import { UpdateMemberUseCase } from "../application/UpdateMemberUseCase.js";
 import { ConflictError, DomainError, NotFoundError } from "../domain/errors.js";
+import type { MemberRepository } from "../domain/MemberRepository.js";
 import { PrismaMemberRepository } from "../infrastructure/PrismaMemberRepository.js";
+
+export interface MemberRoutesOptions {
+  // Injectable so integration tests can supply a repository backed by a
+  // throwaway database. Defaults to the Prisma-backed repository.
+  repo?: MemberRepository;
+}
 
 function handleError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof NotFoundError) return reply.status(404).send({ error: err.message });
@@ -12,8 +19,11 @@ function handleError(reply: FastifyReply, err: unknown): FastifyReply {
   throw err;
 }
 
-export async function memberRoutes(app: FastifyInstance): Promise<void> {
-  const repo = new PrismaMemberRepository();
+export async function memberRoutes(
+  app: FastifyInstance,
+  opts: MemberRoutesOptions = {}
+): Promise<void> {
+  const repo = opts.repo ?? new PrismaMemberRepository();
   const registerMember = new RegisterMemberUseCase(repo);
   const updateMember = new UpdateMemberUseCase(repo);
   const archiveMember = new ArchiveMemberUseCase(repo);
