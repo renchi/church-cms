@@ -3,19 +3,10 @@
     "allow": [
       "Bash(npm install *)",
       "Bash(npx --version)",
-      "Bash(ls /usr/local/bin/ | grep -E \"node|npm|pnpm\" && ls ~/.local/bin/ 2>/dev/null | grep -E \"node|npm|pnpm\")",
-      "Read(//usr/local/bin/**)",
-      "Read(//home/chito/.local/bin/**)",
+      "Bash(gh pr *)",
+      "Bash(git fetch *)",
       "mcp__claude_ai_Linear__save_issue",
-      "Bash(rm -rf /home/chito/church-cms/gh_2.72.0_linux_amd64.tar.gz /home/chito/church-cms/gh_2.93.0_linux_amd64.tar.gz /home/chito/church-cms/gh_2.93.0_linux_amd64 /home/chito/church-cms/gh_2.93.0_linux_arm64.tar.gz /home/chito/church-cms/gh_2.93.0_linux_arm64)",
-      "mcp__claude_ai_Linear__get_issue",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:d.get\\(k\\) for k in ['version','main','exports']}, indent=2\\)\\)\")",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('devDependencies', {}\\), indent=2\\)\\)\")",
-      "Bash(git -C /home/chito/church-cms status)",
-      "Bash(git -C /home/chito/church-cms log --oneline -3)"
-    ],
-    "additionalDirectories": [
-      "/home/chito/church-cms"
+      "mcp__claude_ai_Linear__get_issue"
     ]
   }
 }
