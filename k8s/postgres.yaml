@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: members-postgres-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: members-postgres
+spec:
+  selector:
+    matchLabels:
+      app: members-postgres
+  template:
+    metadata:
+      labels:
+        app: members-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_DB
+              value: members_db
+            - name: POSTGRES_USER
+              value: cms_user
+            - name: POSTGRES_PASSWORD
+              value: cms_password
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: members-postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: members-postgres
+spec:
+  selector:
+    app: members-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

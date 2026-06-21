@@ -1,0 +1,7 @@
+apiVersion: v2
+name: members-service
+description: Church CMS Members Service
+type: application
+version: 0.1.0        # chart version — bump this when you change the chart
+appVersion: "1.0.0"   # your app's version — informational only
+

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "members-service.fullname" . }}
+  labels:
+    {{- include "members-service.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}    # ClusterIP
+  selector:
+    {{- include "members-service.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ .Values.service.port }}        # port the Service exposes (3001)
+      targetPort: http                         # references the container port named "http" above
+

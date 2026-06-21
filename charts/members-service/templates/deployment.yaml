@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "members-service.fullname" . }}
+  labels:
+    {{- include "members-service.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "members-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "members-service.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: members-service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+
+          # Environment variables from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: {{ include "members-service.fullname" . }}-config
+
+          # DB URL from Secret (injected as a single env var)
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.secretName }}
+                  key: {{ .Values.database.secretKey }}
+
+          # Liveness probe: if this fails N times, Kubernetes RESTARTS the container
+          # Use this for "the app is deadlocked / permanently broken"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10   # wait 10s before first check (app boot time)
+            periodSeconds: 15         # check every 15s
+            failureThreshold: 3       # restart after 3 consecutive failures
+
+          # Readiness probe: if this fails, Kubernetes REMOVES the Pod from the
+          # Service's endpoint list (stops sending traffic) but does NOT restart it
+          # Use this for "the app is temporarily overloaded / not ready yet"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
+

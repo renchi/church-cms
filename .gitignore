@@ -10,3 +10,7 @@ dist/
 *.tsbuildinfo
 coverage/
 .claude/settings.local.json
+
+# Downloaded binaries (minikube, kubectl)
+minikube-linux-*
+kubectl.sha256
