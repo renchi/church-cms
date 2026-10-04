@@ -33,6 +33,7 @@ database:
   secretKey: DATABASE_URL
 
 ingress:
-  enabled: false    # flip to true when you want external HTTP access
-  host: members.local
+  enabled: false    # flip to true at deploy time: --set ingress.enabled=true
+  host: cms.local
+  path: /api/members
 

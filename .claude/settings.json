@@ -6,7 +6,40 @@
       "Bash(gh pr *)",
       "Bash(git fetch *)",
       "mcp__claude_ai_Linear__save_issue",
-      "mcp__claude_ai_Linear__get_issue"
+      "mcp__claude_ai_Linear__get_issue",
+      "Bash(gh issue *)",
+      "Bash(git checkout *)",
+      "Bash(git pull *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(minikube status *)",
+      "Bash(curl -sI --max-time 5 http://cms.local)",
+      "Bash(curl -sI --max-time 5 http://traefik.cms.local/dashboard/)",
+      "Bash(curl -s --max-time 5 http://cms.local/api/members/health)",
+      "Bash(kubectl describe *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/chito/church-cms && pnpm lint --silent 2>&1 | head -20"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '--- session ended ---'"
+          }
+        ]
+      }
     ]
   }
 }

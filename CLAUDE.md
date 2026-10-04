@@ -20,6 +20,33 @@ pnpm --filter members-service dev     # run a single service
 pnpm --filter members-service test    # run tests for a single service
 ```
 
+## Session startup
+
+Every session — human or agent — follows this sequence before writing any code.
+
+**Before starting:**
+1. `git checkout main && git pull` — sync with remote
+2. Check Linear for the next Backlog ticket — read the description and acceptance criteria
+3. Read the ADR(s) relevant to the ticket (listed in the ADR index below)
+4. `git checkout -b cms-{number}/{two-to-four-word-slug}` — always work on a branch, never directly on main
+   - Example: `git checkout -b cms-15/traefik-ingress`
+5. If the task touches more than two files or involves an architectural decision, run `/plan` before implementing
+
+**Per-ticket loop:**
+
+| Step | How | When |
+|------|-----|------|
+| Plan | `/plan` | Non-trivial tasks — architectural decisions, >2 files |
+| Implement | Normal editing | After plan is approved |
+| Verify | `/verify` | After implementation — confirms the feature works in the running app |
+| Review | `/code-review` | Before opening a PR |
+
+**After finishing:**
+1. Run `/verify` — confirm the feature works in the running app
+2. Run `/code-review` — fix all findings before proceeding
+3. Mark the Linear ticket In Progress → Done
+4. `gh pr create` — reference the ticket number in the PR body
+
 ## Monorepo structure
 
 ```

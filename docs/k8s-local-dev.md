@@ -1,6 +1,6 @@
 # Kubernetes Local Dev Runbook
 
-This guide walks through deploying the Members service to a local minikube cluster from scratch. Follow it top to bottom — each step depends on the previous one.
+This guide walks through deploying the full church-cms stack (Members service + web frontend) to a local minikube cluster with Traefik as the Ingress controller. Follow it top to bottom — each step depends on the previous one.
 
 ---
 
@@ -37,30 +37,90 @@ kubectl get nodes
 
 ---
 
-## 2. Build the Docker image inside minikube
+## 2. Install Traefik (Ingress controller)
 
-Minikube runs its own Docker daemon, separate from your host machine. You must build the image inside it — otherwise Kubernetes can't find it.
+Traefik is the Ingress controller — it watches Ingress resources and routes external traffic into the cluster.
+
+```bash
+helm repo add traefik https://traefik.github.io/charts
+helm repo update
+
+helm install traefik traefik/traefik \
+  --namespace traefik --create-namespace \
+  --set ports.traefik.expose.default=true \
+  --set ingressRoute.dashboard.enabled=false \
+  --set api.insecure=true
+```
+
+Wait for Traefik to be ready:
+
+```bash
+kubectl -n traefik rollout status deployment/traefik
+# deployment "traefik" successfully rolled out
+```
+
+> **What `ports.traefik.expose.default=true` does:** Exposes the Traefik API/dashboard port (8080) so we can route to it via Ingress. `ingressRoute.dashboard.enabled=false` disables Traefik's own self-generated IngressRoute so we can manage routing ourselves with a standard Ingress.
+
+---
+
+## 3. Configure /etc/hosts and minikube tunnel
+
+Minikube's Docker driver does not expose port 80 directly from the host. You need two things: an `/etc/hosts` entry and `minikube tunnel` running in a background terminal.
+
+**Step A — start the tunnel** (keep this terminal open the entire session):
+
+```bash
+sudo -E minikube tunnel
+# Prompts for sudo password, then sits running — leave it open
+```
+
+`minikube tunnel` assigns `127.0.0.1` as the external IP for LoadBalancer services (including Traefik), making port 80 accessible from the host.
+
+**Step B — add the hostname** (run once):
+
+```bash
+echo "127.0.0.1  cms.local traefik.cms.local" | sudo tee -a /etc/hosts
+```
+
+Verify:
+
+```bash
+ping -c 1 cms.local
+# PING cms.local (127.0.0.1): ...
+```
+
+> **Note:** The tunnel must be running whenever you want to use `http://cms.local`. If you stop and restart minikube, simply restart the tunnel too.
+
+---
+
+## 4. Build Docker images inside minikube
+
+Minikube runs its own Docker daemon, separate from your host machine. You must build images inside it — otherwise Kubernetes can't find them.
 
 ```bash
 # Point your shell's Docker CLI at minikube's daemon
 eval $(minikube docker-env)
 
-# Build from the repo root (the Dockerfile requires monorepo context)
+# Build members-service
 docker build -f apps/members-service/Dockerfile -t members-service:local .
+
+# Build web frontend
+docker build -f apps/web/Dockerfile -t church-cms-web:local .
 ```
 
-Verify the image is visible to minikube:
+Verify both images are visible to minikube:
 
 ```bash
-docker images | grep members-service
-# members-service   local   <id>   ...
+docker images | grep -E "members-service|church-cms-web"
+# members-service    local   <id>   ...
+# church-cms-web     local   <id>   ...
 ```
 
 > **Note:** `eval $(minikube docker-env)` only lasts for the current terminal session. If you open a new terminal you must run it again before any `docker` commands.
 
 ---
 
-## 3. Deploy Postgres
+## 5. Deploy Postgres
 
 Postgres runs as a plain Kubernetes Deployment (not via Helm — it's infrastructure, not the app).
 
@@ -80,7 +140,7 @@ kubectl get pods -l app=members-postgres --watch
 
 ---
 
-## 4. Run Prisma migrations
+## 6. Run Prisma migrations
 
 The database schema must be applied before the Members service starts. Port-forward Postgres to localhost temporarily, run the migration, then close the tunnel.
 
@@ -105,10 +165,13 @@ All migrations have been successfully applied.
 
 ---
 
-## 5. Install the Helm chart
+## 7. Deploy Members service
 
 ```bash
-helm install members-service ./charts/members-service
+helm upgrade --install members-service ./charts/members-service \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true
 ```
 
 Expected output:
@@ -118,72 +181,117 @@ STATUS: deployed
 REVISION: 1
 ```
 
-> **If you get "cannot reuse a name that is still in use":** a previous install is still tracked. Run `helm uninstall members-service` then retry.
+> **`helm upgrade --install`** is idempotent — it installs on first run and upgrades on subsequent runs. Prefer it over bare `helm install`.
 
 ---
 
-## 6. Verify the deployment
+## 8. Deploy web frontend
 
 ```bash
-# All three pods should be Running: 1 postgres + 2 members-service
+helm upgrade --install web ./charts/web \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true
+```
+
+---
+
+## 9. Apply Traefik dashboard Ingress
+
+```bash
+kubectl apply -f k8s/traefik-dashboard-ingress.yaml
+```
+
+---
+
+## 10. Verify the full stack
+
+```bash
+# All pods should be Running
 kubectl get pods
+# members-postgres-xxx                1/1   Running
+# members-service-members-service-xxx 1/1   Running   (x2, HPA managed)
+# web-web-xxx                         1/1   Running
 
-# Check the HPA is wired up
-kubectl get hpa
+# All ingress resources should be present
+kubectl get ingress
+# NAME                      CLASS     HOSTS       ...
+# members-service-...       traefik   cms.local   ...
+# web-web                   traefik   cms.local   ...
 
-# Check the Service exists
-kubectl get svc
+kubectl get ingress -n traefik
+# traefik-dashboard         traefik   traefik.cms.local ...
 ```
 
-Expected pods:
-```
-members-postgres-xxx                    1/1   Running
-members-service-members-service-xxx     1/1   Running
-members-service-members-service-xxx     1/1   Running
+### Acceptance criteria
+
+```bash
+# 1. Members API health
+curl http://cms.local/api/members/health
+# Expected: {"status":"ok"}
+
+# 2. Frontend (should return HTML)
+curl -I http://cms.local
+# Expected: HTTP/1.1 200 OK
+
+# 3. Traefik dashboard
+curl -I http://traefik.cms.local/dashboard/
+# Expected: HTTP/1.1 200 OK
+# Or open in browser: http://traefik.cms.local/dashboard/
 ```
 
 ---
 
-## 7. Test the health endpoint
+## How Traefik routing works
 
-Port 3001 may already be in use on your machine. Use 3002 to be safe:
-
-```bash
-kubectl port-forward svc/members-service-members-service 3002:3001
+```
+Browser / curl
+     │
+     ▼
+minikube IP (cms.local)
+     │
+     ▼
+Traefik (Ingress controller, namespace: traefik)
+     │
+     ├── /api/members/* ──[StripPrefix /api/members]──► members-service:3001
+     │                                                     /health, /members, ...
+     │
+     └── /*  ─────────────────────────────────────────► web:3000
 ```
 
-In a second terminal:
-
-```bash
-curl http://localhost:3002/health
-# {"status":"ok"}
-```
-
-Press `Ctrl+C` in the first terminal to close the port-forward when done.
+The **StripPrefix middleware** (`charts/members-service/templates/middleware.yaml`) rewrites the path before forwarding: `cms.local/api/members/health` → members-service at `/health`.
 
 ---
 
 ## Upgrading after a chart change
 
 ```bash
-helm upgrade members-service ./charts/members-service
-```
+# Re-deploy members-service after chart or image change
+helm upgrade --install members-service ./charts/members-service \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true
 
-To override a value without editing `values.yaml`:
-
-```bash
-helm upgrade members-service ./charts/members-service --set replicaCount=3
+# Re-deploy web after chart or image change
+helm upgrade --install web ./charts/web \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true
 ```
 
 ---
 
 ## Teardown
 
-Remove the Helm release and Postgres:
+Remove all Helm releases, Postgres, and Traefik:
 
 ```bash
 helm uninstall members-service
+helm uninstall web
+helm uninstall traefik -n traefik
 kubectl delete -f k8s/postgres.yaml
+kubectl delete -f k8s/traefik-dashboard-ingress.yaml
+kubectl delete namespace traefik
 ```
 
 Stop minikube (preserves the cluster state — faster to restart next time):
@@ -208,6 +316,9 @@ minikube delete
 | Pod in `CrashLoopBackOff` | `kubectl logs <pod-name>` |
 | `ImagePullBackOff` | `docker images \| grep members-service` (with minikube docker-env active) |
 | `pnpm: command not found` | `source ~/.nvm/nvm.sh` |
-| Port already in use | Use a different local port: `port-forward ... 3002:3001` |
-| `cannot reuse a name` | `helm uninstall members-service` then reinstall |
+| `curl cms.local` connection refused | Traefik not running — `kubectl -n traefik get pods` |
+| Ingress not routing | `kubectl describe ingress <name>` → check backend service name |
+| Middleware not applying | `kubectl get middleware` — must exist in `default` namespace |
+| `/etc/hosts` stale after `minikube delete` | Re-run step 3 with new `minikube ip` |
+| `cannot reuse a name` | `helm uninstall <name>` then reinstall |
 | minikube unreachable | `minikube status` → if Stopped, run `minikube start` |
