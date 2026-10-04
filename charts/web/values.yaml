@@ -1,0 +1,21 @@
+replicaCount: 1
+
+image:
+  repository: church-cms-web
+  tag: local
+  pullPolicy: Never   # Never = use local minikube image
+
+service:
+  type: ClusterIP
+  port: 3000
+
+config:
+  nodeEnv: production
+  port: "3000"
+  # Members API URL as seen from within the cluster
+  membersServiceUrl: http://members-service-members-service:3001
+
+ingress:
+  enabled: false    # flip to true at deploy time: --set ingress.enabled=true
+  host: cms.local
+  path: /

@@ -2,12 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "members-service.fullname" . }}
+  name: {{ .Release.Name }}-web
   labels:
-    {{- include "members-service.labels" . | nindent 4 }}
-  annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: >-
-      default-{{ include "members-service.fullname" . }}-strip@kubernetescrd
+    app: {{ .Release.Name }}-web
 spec:
   ingressClassName: traefik
   rules:
@@ -18,8 +15,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "members-service.fullname" . }}
+                name: {{ .Release.Name }}-web
                 port:
                   number: {{ .Values.service.port }}
 {{- end }}
-
