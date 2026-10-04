@@ -12,8 +12,6 @@ service:
 config:
   nodeEnv: production
   port: "3000"
-  # Members API URL as seen from within the cluster
-  membersServiceUrl: http://members-service-members-service:3001
 
 ingress:
   enabled: false    # flip to true at deploy time: --set ingress.enabled=true

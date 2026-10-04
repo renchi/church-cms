@@ -42,9 +42,10 @@ Every session — human or agent — follows this sequence before writing any co
 | Review | `/code-review` | Before opening a PR |
 
 **After finishing:**
-1. Mark the Linear ticket In Progress → Done
-2. `gh pr create` — reference the ticket number in the PR body
-3. Run `/code-review` before merging
+1. Run `/verify` — confirm the feature works in the running app
+2. Run `/code-review` — fix all findings before proceeding
+3. Mark the Linear ticket In Progress → Done
+4. `gh pr create` — reference the ticket number in the PR body
 
 ## Monorepo structure
 

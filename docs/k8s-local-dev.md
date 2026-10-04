@@ -59,7 +59,7 @@ kubectl -n traefik rollout status deployment/traefik
 # deployment "traefik" successfully rolled out
 ```
 
-> **What `ports.traefik.expose.default=true` does:** Exposes the Traefik API/dashboard port (9000) so we can route to it via Ingress. `ingressRoute.dashboard.enabled=false` disables Traefik's own self-generated IngressRoute so we can manage routing ourselves with a standard Ingress.
+> **What `ports.traefik.expose.default=true` does:** Exposes the Traefik API/dashboard port (8080) so we can route to it via Ingress. `ingressRoute.dashboard.enabled=false` disables Traefik's own self-generated IngressRoute so we can manage routing ourselves with a standard Ingress.
 
 ---
 
@@ -70,7 +70,7 @@ Minikube's Docker driver does not expose port 80 directly from the host. You nee
 **Step A — start the tunnel** (keep this terminal open the entire session):
 
 ```bash
-sudo minikube tunnel
+sudo -E minikube tunnel
 # Prompts for sudo password, then sits running — leave it open
 ```
 
