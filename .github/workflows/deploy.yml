@@ -1,0 +1,141 @@
+#
+# Deploy — on every push to main: build the image for each changed service,
+# push it to GitHub Container Registry (ghcr.io), then "helm upgrade" it into
+# the local minikube cluster.
+#
+# Why a self-hosted runner? minikube runs on a developer machine (Docker driver,
+# private IP), so GitHub's cloud runners cannot reach its API server. A runner
+# registered on that same machine can: it uses the local Docker daemon and the
+# local ~/.kube/config. See docs/ci-cd.md for how to register it.
+#
+# Security: this workflow never runs on pull_request, so code from a fork PR can
+# never execute on the self-hosted machine.
+#
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Deploys run one at a time, in order. Never cancel a deploy half-way through.
+concurrency:
+  group: deploy-minikube
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write # push images to ghcr.io with GITHUB_TOKEN
+
+jobs:
+  # Work out which services changed, so we only rebuild and redeploy those.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.pick.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          # Filter names match the folder names under apps/ and charts/.
+          # Shared files (lockfile, base tsconfig, shared packages) affect both.
+          filters: |
+            shared: &shared
+              - pnpm-lock.yaml
+              - package.json
+              - pnpm-workspace.yaml
+              - tsconfig.base.json
+              - packages/**
+              - .github/workflows/deploy.yml
+            members-service:
+              - *shared
+              - apps/members-service/**
+              - charts/members-service/**
+            web:
+              - *shared
+              - apps/web/**
+              - charts/web/**
+      # A manual run redeploys everything. Otherwise use the changed list,
+      # minus the "shared" helper filter.
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGES: ${{ steps.filter.outputs.changes }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            services='["members-service","web"]'
+          else
+            services=$(echo "$CHANGES" | jq -c 'map(select(. != "shared"))')
+          fi
+          echo "Services to deploy: $services"
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: changes
+    if: needs.changes.outputs.services != '[]'
+    runs-on: [self-hosted, linux, ARM64, minikube]
+    strategy:
+      # One service failing to deploy should not cancel the other.
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    env:
+      # Naming convention: apps/<service>/Dockerfile, charts/<service>, Helm
+      # release <service>, image ghcr.io/<owner>/<repo>/<service>.
+      IMAGE: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+      TAG: ${{ github.sha }}
+    steps:
+      - name: Record start time
+        run: echo "STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Plain "docker build" on the self-hosted runner reuses the machine's
+      # layer cache between runs, which keeps rebuilds fast. The runner is
+      # arm64, so the image is built natively for minikube's arm64 node.
+      #
+      # The source label links the package to this repo on ghcr.io, so it
+      # inherits the repo's visibility and GITHUB_TOKEN can keep pushing to it.
+      - name: Build image
+        run: |
+          docker build \
+            -f "apps/${{ matrix.service }}/Dockerfile" \
+            -t "$IMAGE:$TAG" \
+            -t "$IMAGE:main" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=$TAG" \
+            .
+
+      - name: Push image
+        run: |
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:main"
+
+      # --wait   : don't return until the new Pods pass their readiness probes
+      # --atomic : if they never do, roll back to the previous release
+      # The SHA tag means every deploy is a new, traceable image (never "latest").
+      - name: Helm upgrade
+        run: |
+          helm upgrade --install "${{ matrix.service }}" "./charts/${{ matrix.service }}" \
+            --set image.repository="$IMAGE" \
+            --set image.tag="$TAG" \
+            --set image.pullPolicy=IfNotPresent \
+            --set ingress.enabled=true \
+            --wait --atomic --timeout 4m
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.service }}"
+            echo "- Image: \`$IMAGE:$TAG\`"
+            echo "- Result: ${{ job.status }}"
+            echo "- Duration: $(( $(date +%s) - STARTED_AT ))s"
+          } >> "$GITHUB_STEP_SUMMARY"
