@@ -24,6 +24,11 @@ spec:
       #
       # Every replica runs this, which is safe: "migrate deploy" takes a Postgres
       # advisory lock and is a no-op when nothing is pending.
+      #
+      # Caveat: migrations are forward-only. If the new Pods then fail readiness,
+      # "helm --atomic" rolls back the IMAGE but NOT the schema, so every
+      # migration must stay compatible with the previous release (expand/contract:
+      # add first, drop in a later release). See docs/ci-cd.md.
       initContainers:
         - name: migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

@@ -39,6 +39,9 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Without a generated client, PrismaClient is typed as "any" and typecheck
+      # would silently accept repository code that no longer matches the schema.
+      - run: pnpm --filter members-service exec prisma generate
       - run: pnpm lint
       - run: pnpm -r typecheck
       - run: pnpm build

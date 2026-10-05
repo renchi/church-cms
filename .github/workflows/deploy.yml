@@ -1,5 +1,5 @@
 #
-# Deploy — on every push to main: build the image for each changed service,
+# Deploy — after CI passes on main: build the image for each changed service,
 # push it to GitHub Container Registry (ghcr.io), then "helm upgrade" it into
 # the local minikube cluster.
 #
@@ -14,7 +14,11 @@
 name: Deploy
 
 on:
-  push:
+  # Chained to CI: Deploy starts when the CI workflow finishes on main, so a
+  # commit whose tests fail is never deployed.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -27,17 +31,40 @@ permissions:
   contents: read
   packages: write # push images to ghcr.io with GITHUB_TOKEN
 
+env:
+  # The commit to deploy. For workflow_run, github.sha is just the latest commit
+  # on main — the commit CI actually tested is workflow_run.head_sha.
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
 jobs:
   # Work out which services changed, so we only rebuild and redeploy those.
   changes:
     runs-on: ubuntu-latest
+    # Only deploy a CI run that (a) passed and (b) came from a push to main in
+    # THIS repo. The branches filter alone isn't enough: a fork PR whose branch
+    # happens to be called "main" would also match it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     outputs:
       services: ${{ steps.pick.outputs.services }}
     steps:
+      # fetch-depth 2 brings in the parent commit so we can diff against it.
+      # Merges into main are single commits (merge or squash), so "parent → this
+      # commit" is exactly what the merge changed.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 2
+      - id: parent
+        run: echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
       - id: filter
         uses: dorny/paths-filter@v3
         with:
+          base: ${{ steps.parent.outputs.sha }}
+          ref: ${{ env.DEPLOY_SHA }}
           # Filter names match the folder names under apps/ and charts/.
           # Shared files (lockfile, base tsconfig, shared packages) affect both.
           filters: |
@@ -84,12 +111,14 @@ jobs:
       # Naming convention: apps/<service>/Dockerfile, charts/<service>, Helm
       # release <service>, image ghcr.io/<owner>/<repo>/<service>.
       IMAGE: ghcr.io/${{ github.repository }}/${{ matrix.service }}
-      TAG: ${{ github.sha }}
+      TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - name: Record start time
         run: echo "STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - uses: docker/login-action@v3
         with:

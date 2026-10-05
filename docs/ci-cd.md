@@ -5,11 +5,11 @@ Two GitHub Actions workflows automate checking and shipping the code:
 | Workflow | File | Trigger | Runs on | Does |
 |---|---|---|---|---|
 | **CI** | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | every PR to `main` (and pushes to `main`) | GitHub-hosted `ubuntu-latest` | lint, typecheck, build, unit tests, integration tests |
-| **Deploy** | [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | push to `main` (i.e. a merge), or manual | **self-hosted** runner on the minikube machine | build image → push to ghcr.io → `helm upgrade` into minikube |
+| **Deploy** | [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | CI **passing** on `main` (i.e. after a merge), or manual | **self-hosted** runner on the minikube machine | build image → push to ghcr.io → `helm upgrade` into minikube |
 
 ```
- PR opened / updated                         Merge to main
-        │                                          │
+ PR opened / updated                         Merge to main → CI passes on main
+        │                                          │  (workflow_run)
         ▼                                          ▼
  ┌──────────────── CI (GitHub cloud) ───┐   ┌── Deploy ─────────────────────────────────┐
  │ lint-typecheck   unit-tests          │   │ changes (cloud): which services changed?  │
@@ -119,6 +119,18 @@ Only services whose files changed are rebuilt:
 - A manual run always deploys both.
 
 Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA tag makes it obvious which commit is running and makes every deploy a real change that Kubernetes rolls out.
+
+### Migrations and rollbacks (expand/contract)
+
+The members-service `migrate` init container applies migrations **before** the new Pods are known to be healthy. If they then fail readiness, `helm --atomic` rolls back the image, but **not the schema**. The old code then runs against the new schema.
+
+So every migration must work with **both** the old and new code:
+
+| Change | Release N (expand) | Release N+1 (contract) |
+|---|---|---|
+| Add a column | add it nullable / with a default | make it required, if needed |
+| Rename a column | add new column, write to both, backfill | read from new, drop old |
+| Drop a column | stop reading/writing it in code | drop it |
 
 ---
 
