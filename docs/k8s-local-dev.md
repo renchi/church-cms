@@ -140,9 +140,18 @@ kubectl get pods -l app=members-postgres --watch
 
 ---
 
-## 6. Run Prisma migrations
+## 6. Prisma migrations (automatic)
 
-The database schema must be applied before the Members service starts. Port-forward Postgres to localhost temporarily, run the migration, then close the tunnel.
+Migrations now run automatically: each members-service Pod has a `migrate` init container that runs `prisma migrate deploy` before the app starts (`migrations.enabled` in `charts/members-service/values.yaml`). You can skip straight to step 7.
+
+Check what it did:
+
+```bash
+kubectl logs <members-service-pod> -c migrate
+# No pending migrations to apply.   (or "All migrations have been successfully applied.")
+```
+
+**Manual fallback** (e.g. with `--set migrations.enabled=false`): port-forward Postgres to localhost temporarily, run the migration, then close the tunnel.
 
 > **nvm users:** nvm is not loaded in non-interactive shells. Run `source ~/.nvm/nvm.sh` first if `pnpm` is not found.
 

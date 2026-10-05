@@ -32,6 +32,10 @@ database:
   secretName: members-service-db-secret
   secretKey: DATABASE_URL
 
+# Runs "prisma migrate deploy" in an init container before the app starts
+migrations:
+  enabled: true
+
 ingress:
   enabled: false    # flip to true at deploy time: --set ingress.enabled=true
   host: cms.local

@@ -14,6 +14,30 @@ spec:
       labels:
         {{- include "members-service.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if .Values.migrations.enabled }}
+      # Init containers run to completion BEFORE the app container starts. If this
+      # one fails, the Pod never becomes Ready, so a deploy with a broken migration
+      # stops here instead of serving traffic against the wrong schema.
+      #
+      # Why not a Helm pre-install hook Job? The DB Secret is created by this same
+      # chart, and a pre-install hook runs before the Secret exists.
+      #
+      # Every replica runs this, which is safe: "migrate deploy" takes a Postgres
+      # advisory lock and is a no-op when nothing is pending.
+      initContainers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # .bin/prisma is a pnpm shell shim, so it is run as a command (through
+          # the image's tini ENTRYPOINT), not passed to node.
+          args: ["node_modules/.bin/prisma", "migrate", "deploy"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.secretName }}
+                  key: {{ .Values.database.secretKey }}
+      {{- end }}
       containers:
         - name: members-service
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
