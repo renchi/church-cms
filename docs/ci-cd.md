@@ -18,7 +18,7 @@ Two GitHub Actions workflows automate checking and shipping the code:
                 │ all green?                │ deploy (self-hosted, this machine):       │
                 ▼                           │   docker build  → ghcr.io/…/<svc>:<sha>   │
    branch protection allows merge           │   docker push                             │
-                                            │   helm upgrade --install --wait --atomic  │
+                                            │   helm upgrade --rollback-on-failure      │
                                             │     └─ init container: prisma migrate     │
                                             └───────────────────────────────────────────┘
 ```
@@ -122,7 +122,7 @@ Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA
 
 ### Migrations and rollbacks (expand/contract)
 
-The members-service `migrate` init container applies migrations **before** the new Pods are known to be healthy. If they then fail readiness, `helm --atomic` rolls back the image, but **not the schema**. The old code then runs against the new schema.
+The members-service `migrate` init container applies migrations **before** the new Pods are known to be healthy. If they then fail readiness, `helm --rollback-on-failure` rolls back the image, but **not the schema**. The old code then runs against the new schema.
 
 So every migration must work with **both** the old and new code:
 

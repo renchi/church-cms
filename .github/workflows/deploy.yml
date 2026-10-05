@@ -21,9 +21,6 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
-  # TEMP (CMS-16 verification): deploy from the feature branch before merge. REMOVE before merging.
-  push:
-    branches: ['cms-16/**']
 
 # Deploys run one at a time, in order. Never cancel a deploy half-way through.
 concurrency:
@@ -48,7 +45,6 @@ jobs:
     # happens to be called "main" would also match it.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
@@ -152,7 +148,8 @@ jobs:
           docker push "$IMAGE:main"
 
       # --wait   : don't return until the new Pods pass their readiness probes
-      # --atomic : if they never do, roll back to the previous release
+      # --rollback-on-failure : if they never do, roll back to the previous release
+      #                         (Helm 4's name for the old --atomic flag)
       # The SHA tag means every deploy is a new, traceable image (never "latest").
       - name: Helm upgrade
         run: |
@@ -161,7 +158,7 @@ jobs:
             --set image.tag="$TAG" \
             --set image.pullPolicy=IfNotPresent \
             --set ingress.enabled=true \
-            --wait --atomic --timeout 4m
+            --wait --rollback-on-failure --timeout 4m
 
       - name: Summary
         if: always()

@@ -26,7 +26,7 @@ spec:
       # advisory lock and is a no-op when nothing is pending.
       #
       # Caveat: migrations are forward-only. If the new Pods then fail readiness,
-      # "helm --atomic" rolls back the IMAGE but NOT the schema, so every
+      # "helm --rollback-on-failure" rolls back the IMAGE but NOT the schema, so every
       # migration must stay compatible with the previous release (expand/contract:
       # add first, drop in a later release). See docs/ci-cd.md.
       initContainers:
