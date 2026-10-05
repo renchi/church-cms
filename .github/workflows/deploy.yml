@@ -21,6 +21,9 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+  # TEMP (CMS-16 verification): deploy from the feature branch before merge. REMOVE before merging.
+  push:
+    branches: ['cms-16/**']
 
 # Deploys run one at a time, in order. Never cancel a deploy half-way through.
 concurrency:
@@ -45,6 +48,7 @@ jobs:
     # happens to be called "main" would also match it.
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
