@@ -330,24 +330,22 @@ serialisation, status codes) that mocks hide. The injectable `repo` and port-les
 Run them:
 
 ```bash
-pnpm --filter members-service test            # unit tests (integration auto-skips)
-pnpm --filter members-service test:coverage   # unit tests with coverage
-
-# Integration tests are opt-in — they need Docker running:
-RUN_DB_TESTS=1 pnpm --filter members-service test
+pnpm --filter members-service test            # everything: unit + integration (needs Docker)
+pnpm --filter members-service test:unit       # unit tests only: fast, no Docker
+pnpm --filter members-service test:coverage   # everything, with the 70% coverage gate
 ```
 
-**Why integration tests are opt-in.** They are gated behind the `RUN_DB_TESTS=1`
-environment variable, so a plain `pnpm test` runs only the unit tests and reports the
-integration ones as _skipped_. This is deliberate: the current dev host has a broken
-host→container Docker network path (a connection can't complete from the host to a
-container's Postgres), so the integration tests can only run in CI or on a machine where
-that path works. Set `RUN_DB_TESTS=1` (with Docker running) to include them.
+**The same split in CI** (§8): the `unit-tests` job runs `test:unit`, and the
+`integration-tests` job runs `test:coverage` (unit + integration + coverage
+thresholds). Both are required checks before a PR can merge.
 
-**In CI they always run.** The `integration-tests` job (§8) sets `RUN_DB_TESTS=1` on
-GitHub's runners, which have working Docker, and also enforces the 70% coverage
-thresholds. It is one of the three checks a PR must pass before it can merge.
-Tracked for removal once the infra supports it: **CMS-25**.
+**History: they used to be opt-in.** Until CMS-25, the integration tests were gated
+behind a `RUN_DB_TESTS=1` environment variable. The dev host had a broken
+host→container Docker network path: a connection to a container's Postgres would
+start but never complete. Once that was fixed (verified with three clean local runs),
+the gate was removed, so a plain `pnpm test` locally runs exactly what CI runs. The
+lesson: an environment workaround should come with a ticket to remove it, otherwise it
+quietly becomes permanent.
 
 ---
 

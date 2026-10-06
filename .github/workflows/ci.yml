@@ -59,7 +59,8 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      # Unit tests only; the integration tests have their own job below.
+      - run: pnpm -r --if-present test:unit
 
   integration-tests:
     name: integration-tests
@@ -74,8 +75,7 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # GitHub's ubuntu runners have Docker, so Testcontainers can start a real
-      # Postgres. test:coverage also enforces the 70% thresholds in vitest.config.ts.
+      # The full suite (unit + integration). GitHub's ubuntu runners have Docker,
+      # so Testcontainers can start a real Postgres. test:coverage also enforces
+      # the 70% thresholds in vitest.config.ts.
       - run: pnpm --filter members-service test:coverage
-        env:
-          RUN_DB_TESTS: "1"

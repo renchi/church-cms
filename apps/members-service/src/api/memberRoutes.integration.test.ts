@@ -9,21 +9,15 @@ import { buildApp } from "../app.js";
 import { PrismaMemberRepository } from "../infrastructure/PrismaMemberRepository.js";
 
 // Integration tests: real HTTP -> use case -> Prisma -> Postgres against a
-// throwaway database (Testcontainers). They need Docker AND a working
-// host->container network path, so they are gated behind RUN_DB_TESTS and run
-// in CI rather than on every local `pnpm test`.
-//
-// Why gated: this project's primary dev host has a broken host->container Docker
-// data path (TCP handshake succeeds but no client can complete a session), so
-// these can't run locally. CI provides a normal Docker environment.
-// Follow-up to make them always-on once infra supports it: CMS-25.
-const runDbTests = process.env.RUN_DB_TESTS === "1";
+// throwaway database (Testcontainers). They run on every `pnpm test` and need
+// Docker running. (They were once opt-in behind an env flag because of a broken
+// host->container network path on the dev host; the gate was removed in CMS-25.)
 
 // The members-service folder (this file is in src/api/, so go up two levels).
 // Needed because ES modules don't have the classic `__dirname` variable.
 const serviceDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-describe.runIf(runDbTests)("Members API (integration)", () => {
+describe("Members API (integration)", () => {
   let container: StartedPostgreSqlContainer;
   let prisma: PrismaClient;
   let app: FastifyInstance;
