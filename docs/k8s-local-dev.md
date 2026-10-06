@@ -11,7 +11,7 @@ Make sure these are installed before starting:
 ```bash
 minikube version   # v1.30+
 kubectl version    # v1.27+
-helm version       # v3.x
+helm version       # v4.x
 ```
 
 ---
@@ -273,6 +273,8 @@ The **StripPrefix middleware** (`charts/members-service/templates/middleware.yam
 ---
 
 ## Upgrading after a chart change
+
+> **With CI/CD set up, you usually don't need this section.** Merging to `main` builds and deploys changed services automatically. See [ci-cd.md](ci-cd.md). Use the commands below only to try out an unmerged change by hand. Note that a manual deploy replaces the pipeline's `ghcr.io/…:<sha>` image with your `:local` one until the next merge deploys again.
 
 ```bash
 # Re-deploy members-service after chart or image change
