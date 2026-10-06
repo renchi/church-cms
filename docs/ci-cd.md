@@ -103,6 +103,8 @@ The runner deploys into whatever `kubectl` points at, so minikube must be runnin
 
 ## Day-to-day
 
+All the places to watch the pipeline and cluster (URLs, dashboards, commands) are collected in [status-dashboards.md](status-dashboards.md).
+
 | I want to… | Do |
 |---|---|
 | See CI on my PR | `gh pr checks --watch` |

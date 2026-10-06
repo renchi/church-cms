@@ -112,7 +112,7 @@ learning exercise — see [docs/docker-local-dev.md](docs/docker-local-dev.md).
   `main`. It builds images for the changed services, pushes them to ghcr.io and
   `helm upgrade`s them into minikube through a self-hosted runner.
 
-Setup and debugging: [docs/ci-cd.md](docs/ci-cd.md).
+Setup and debugging: [docs/ci-cd.md](docs/ci-cd.md). Where to watch it: [docs/status-dashboards.md](docs/status-dashboards.md).
 
 ## Docs
 
@@ -120,4 +120,5 @@ Setup and debugging: [docs/ci-cd.md](docs/ci-cd.md).
   with Docker (Compose workflow + raw `docker` equivalents)
 - [docs/k8s-local-dev.md](docs/k8s-local-dev.md) — deploying to minikube with Helm + Traefik
 - [docs/ci-cd.md](docs/ci-cd.md) — GitHub Actions CI/CD pipeline and self-hosted runner
+- [docs/status-dashboards.md](docs/status-dashboards.md) — URLs and commands to check the pipeline and the cluster
 - Architecture Decision Records are in [`docs/adr/`](docs/adr/).
