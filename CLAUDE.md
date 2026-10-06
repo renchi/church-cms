@@ -40,12 +40,14 @@ Every session — human or agent — follows this sequence before writing any co
 | Implement | Normal editing | After plan is approved |
 | Verify | `/verify` | After implementation — confirms the feature works in the running app |
 | Review | `/code-review` | Before opening a PR |
+| CI | `gh pr checks --watch` | After opening a PR — all checks must be green before merge (enforced by branch protection) |
 
 **After finishing:**
 1. Run `/verify` — confirm the feature works in the running app
 2. Run `/code-review` — fix all findings before proceeding
 3. Mark the Linear ticket In Progress → Done
 4. `gh pr create` — reference the ticket number in the PR body
+5. `gh pr checks --watch` — CI must be green; after merge, the Deploy workflow ships changed services to minikube (see `docs/ci-cd.md`)
 
 ## Monorepo structure
 

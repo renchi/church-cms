@@ -1,5 +1,7 @@
 # Church CMS
 
+[![CI](https://github.com/renchi/church-cms/actions/workflows/ci.yml/badge.svg)](https://github.com/renchi/church-cms/actions/workflows/ci.yml)
+
 A church management system built as a microservices monorepo using Domain-Driven Design.
 
 > **This is a learning project.** Its goal is to learn Docker, Kubernetes, system
@@ -101,8 +103,21 @@ docker compose down -v      # stop and wipe the database volume
 For the full workflow — plus the equivalent **raw `docker` commands** as a
 learning exercise — see [docs/docker-local-dev.md](docs/docker-local-dev.md).
 
+## CI/CD
+
+- **CI** ([`ci.yml`](.github/workflows/ci.yml)) runs lint, typecheck, build, unit
+  tests and integration tests on every PR. All three checks must pass before a PR
+  can merge into `main`.
+- **Deploy** ([`deploy.yml`](.github/workflows/deploy.yml)) runs on every merge to
+  `main`. It builds images for the changed services, pushes them to ghcr.io and
+  `helm upgrade`s them into minikube through a self-hosted runner.
+
+Setup and debugging: [docs/ci-cd.md](docs/ci-cd.md).
+
 ## Docs
 
 - [docs/docker-local-dev.md](docs/docker-local-dev.md) — running the stack locally
   with Docker (Compose workflow + raw `docker` equivalents)
+- [docs/k8s-local-dev.md](docs/k8s-local-dev.md) — deploying to minikube with Helm + Traefik
+- [docs/ci-cd.md](docs/ci-cd.md) — GitHub Actions CI/CD pipeline and self-hosted runner
 - Architecture Decision Records are in [`docs/adr/`](docs/adr/).

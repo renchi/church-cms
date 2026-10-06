@@ -1,0 +1,5 @@
+# Custom labels of our self-hosted runner (see docs/ci-cd.md), so actionlint
+# accepts "runs-on: [self-hosted, linux, ARM64, minikube]".
+self-hosted-runner:
+  labels:
+    - minikube

@@ -1,0 +1,81 @@
+#
+# CI — runs on every pull request (and on main after merge).
+#
+# Three independent jobs run in parallel on GitHub-hosted runners. Their job
+# names (lint-typecheck, unit-tests, integration-tests) are the "required status
+# checks" in main's branch protection, so a red job blocks the merge.
+#
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch cancels the older, now-stale run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the code.
+permissions:
+  contents: read
+
+jobs:
+  lint-typecheck:
+    name: lint-typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm 9 matches the lockfile (and the Dockerfiles' corepack pin).
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      # cache: pnpm caches the pnpm store between runs, keyed on pnpm-lock.yaml.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Without a generated client, PrismaClient is typed as "any" and typecheck
+      # would silently accept repository code that no longer matches the schema.
+      - run: pnpm --filter members-service exec prisma generate
+      - run: pnpm lint
+      - run: pnpm -r typecheck
+      - run: pnpm build
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # GitHub's ubuntu runners have Docker, so Testcontainers can start a real
+      # Postgres. test:coverage also enforces the 70% thresholds in vitest.config.ts.
+      - run: pnpm --filter members-service test:coverage
+        env:
+          RUN_DB_TESTS: "1"

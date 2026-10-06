@@ -1,0 +1,171 @@
+#
+# Deploy — after CI passes on main: build the image for each changed service,
+# push it to GitHub Container Registry (ghcr.io), then "helm upgrade" it into
+# the local minikube cluster.
+#
+# Why a self-hosted runner? minikube runs on a developer machine (Docker driver,
+# private IP), so GitHub's cloud runners cannot reach its API server. A runner
+# registered on that same machine can: it uses the local Docker daemon and the
+# local ~/.kube/config. See docs/ci-cd.md for how to register it.
+#
+# Security: this workflow never runs on pull_request, so code from a fork PR can
+# never execute on the self-hosted machine.
+#
+name: Deploy
+
+on:
+  # Chained to CI: Deploy starts when the CI workflow finishes on main, so a
+  # commit whose tests fail is never deployed.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# Deploys run one at a time, in order. Never cancel a deploy half-way through.
+concurrency:
+  group: deploy-minikube
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write # push images to ghcr.io with GITHUB_TOKEN
+
+env:
+  # The commit to deploy. For workflow_run, github.sha is just the latest commit
+  # on main — the commit CI actually tested is workflow_run.head_sha.
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  # Work out which services changed, so we only rebuild and redeploy those.
+  changes:
+    runs-on: ubuntu-latest
+    # Only deploy a CI run that (a) passed and (b) came from a push to main in
+    # THIS repo. The branches filter alone isn't enough: a fork PR whose branch
+    # happens to be called "main" would also match it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    outputs:
+      services: ${{ steps.pick.outputs.services }}
+    steps:
+      # fetch-depth 2 brings in the parent commit so we can diff against it.
+      # Merges into main are single commits (merge or squash), so "parent → this
+      # commit" is exactly what the merge changed.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 2
+      - id: parent
+        run: echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ steps.parent.outputs.sha }}
+          ref: ${{ env.DEPLOY_SHA }}
+          # Filter names match the folder names under apps/ and charts/.
+          # Shared files (lockfile, base tsconfig, shared packages) affect both.
+          filters: |
+            shared: &shared
+              - pnpm-lock.yaml
+              - package.json
+              - pnpm-workspace.yaml
+              - tsconfig.base.json
+              - packages/**
+              - .github/workflows/deploy.yml
+            members-service:
+              - *shared
+              - apps/members-service/**
+              - charts/members-service/**
+            web:
+              - *shared
+              - apps/web/**
+              - charts/web/**
+      # A manual run redeploys everything. Otherwise use the changed list,
+      # minus the "shared" helper filter.
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGES: ${{ steps.filter.outputs.changes }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            services='["members-service","web"]'
+          else
+            services=$(echo "$CHANGES" | jq -c 'map(select(. != "shared"))')
+          fi
+          echo "Services to deploy: $services"
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: changes
+    if: needs.changes.outputs.services != '[]'
+    runs-on: [self-hosted, linux, ARM64, minikube]
+    strategy:
+      # One service failing to deploy should not cancel the other.
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    env:
+      # Naming convention: apps/<service>/Dockerfile, charts/<service>, Helm
+      # release <service>, image ghcr.io/<owner>/<repo>/<service>.
+      IMAGE: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+      TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Record start time
+        run: echo "STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Plain "docker build" on the self-hosted runner reuses the machine's
+      # layer cache between runs, which keeps rebuilds fast. The runner is
+      # arm64, so the image is built natively for minikube's arm64 node.
+      #
+      # The source label links the package to this repo on ghcr.io, so it
+      # inherits the repo's visibility and GITHUB_TOKEN can keep pushing to it.
+      - name: Build image
+        run: |
+          docker build \
+            -f "apps/${{ matrix.service }}/Dockerfile" \
+            -t "$IMAGE:$TAG" \
+            -t "$IMAGE:main" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=$TAG" \
+            .
+
+      - name: Push image
+        run: |
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:main"
+
+      # --wait   : don't return until the new Pods pass their readiness probes
+      # --rollback-on-failure : if they never do, roll back to the previous release
+      #                         (Helm 4's name for the old --atomic flag)
+      # The SHA tag means every deploy is a new, traceable image (never "latest").
+      - name: Helm upgrade
+        run: |
+          helm upgrade --install "${{ matrix.service }}" "./charts/${{ matrix.service }}" \
+            --set image.repository="$IMAGE" \
+            --set image.tag="$TAG" \
+            --set image.pullPolicy=IfNotPresent \
+            --set ingress.enabled=true \
+            --wait --rollback-on-failure --timeout 4m
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.service }}"
+            echo "- Image: \`$IMAGE:$TAG\`"
+            echo "- Result: ${{ job.status }}"
+            echo "- Duration: $(( $(date +%s) - STARTED_AT ))s"
+          } >> "$GITHUB_STEP_SUMMARY"
