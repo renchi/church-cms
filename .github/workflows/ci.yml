@@ -59,7 +59,22 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      # Convention: a package with a "test" script must also define "test:unit".
+      # Without this check, the --if-present below would silently skip a package
+      # whose tests have no test:unit alias, and this required check would pass.
+      - name: Check every tested package defines test:unit
+        run: |
+          missing=0
+          for pkg in apps/*/package.json packages/*/package.json; do
+            [ -f "$pkg" ] || continue
+            if jq -e '.scripts.test and (.scripts["test:unit"] | not)' "$pkg" > /dev/null; then
+              echo "::error file=$pkg::has a \"test\" script but no \"test:unit\" script"
+              missing=1
+            fi
+          done
+          exit $missing
+      # Unit tests only; the integration tests have their own job below.
+      - run: pnpm -r --if-present test:unit
 
   integration-tests:
     name: integration-tests
@@ -74,8 +89,7 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # GitHub's ubuntu runners have Docker, so Testcontainers can start a real
-      # Postgres. test:coverage also enforces the 70% thresholds in vitest.config.ts.
+      # The full suite (unit + integration). GitHub's ubuntu runners have Docker,
+      # so Testcontainers can start a real Postgres. test:coverage also enforces
+      # the 70% thresholds in vitest.config.ts.
       - run: pnpm --filter members-service test:coverage
-        env:
-          RUN_DB_TESTS: "1"
