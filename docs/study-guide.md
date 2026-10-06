@@ -16,6 +16,7 @@ This guide is the **map**. Two companion docs are the **detail**:
 - [`docker-local-dev.md`](docker-local-dev.md) — running the stack, Compose vs. raw `docker`
 - [`k8s-local-dev.md`](k8s-local-dev.md) — deploying to minikube with Helm + Traefik, step by step
 - [`ci-cd.md`](ci-cd.md) — the GitHub Actions pipeline, self-hosted runner, debugging
+- [`status-dashboards.md`](status-dashboards.md) — where to watch the pipeline and the cluster
 
 Read this top to bottom once. Then, whenever a section feels thin, open the file it
 points at (`file_path:line`) and read the real code — that is where the learning sticks.
