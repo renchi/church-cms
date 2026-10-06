@@ -46,7 +46,7 @@ Prerequisites on the machine, for the user the runner will run as:
 ```bash
 docker ps                 # works without sudo (user is in the "docker" group)
 kubectl get nodes         # ~/.kube/config points at minikube
-helm version              # v3.x on PATH
+helm version              # v4.x on PATH (deploy uses --rollback-on-failure, a Helm 4 flag)
 ```
 
 Then on GitHub, go to **Settings → Actions → Runners → New self-hosted runner**, choose **Linux / ARM64**, and run the commands it shows (download, extract, `./config.sh …`). When `config.sh` asks for extra labels, enter:
@@ -97,7 +97,7 @@ The first push creates two packages: `ghcr.io/renchi/church-cms/members-service`
 
 ### 4. Start minikube
 
-The runner deploys into whatever `kubectl` points at, so minikube must be running (`minikube start`). Postgres and Traefik must be installed too; see [k8s-local-dev.md](k8s-local-dev.md).
+The runner deploys into whatever `kubectl` points at, so minikube must be running (`minikube start`). The runner service starts by itself at boot, but **minikube does not**: after a reboot, run `minikube start` again. Postgres and Traefik must be installed too; see [k8s-local-dev.md](k8s-local-dev.md).
 
 ---
 
@@ -146,3 +146,5 @@ So every migration must work with **both** the old and new code:
 | Helm "UPGRADE FAILED … rolled back" | New Pods never became Ready. Check `kubectl describe pod` and `kubectl logs <pod> -c migrate` |
 | `denied: permission_denied` on push | Package not linked to the repo. In package settings → **Manage Actions access**, add `church-cms` with write access |
 | CI `integration-tests` fails, others pass | Testcontainers couldn't start Postgres. Check the job log for Docker errors |
+| CI jobs **cancelled** with "The job was not acquired by Runner of type hosted" | A GitHub Actions outage (check <https://www.githubstatus.com>), not a test failure. Re-run once it recovers: `gh run rerun <id> --failed` |
+| `failed to run git: not a git repository` from `gh` | The terminal isn't inside the repo. `cd ~/church-cms`, or add `-R renchi/church-cms` |

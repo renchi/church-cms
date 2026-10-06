@@ -5,7 +5,7 @@ exercised, mapped to the **five learning goals** in
 [ADR-0007](adr/0007-learning-scope-and-roadmap.md):
 
 1. **Docker & containers**
-2. **Kubernetes** _(not started yet — roadmap stages 5–7)_
+2. **Kubernetes** _(stage 5 done; observability, stage 7, is next)_
 3. **System design**
 4. **Domain-Driven Design (DDD)** — the emphasised priority
 5. **Using AI tools** — issue-driven development
@@ -14,6 +14,8 @@ This guide is the **map**. Two companion docs are the **detail**:
 
 - [`members-service-ddd.md`](members-service-ddd.md) — the DDD layering, with diagrams
 - [`docker-local-dev.md`](docker-local-dev.md) — running the stack, Compose vs. raw `docker`
+- [`k8s-local-dev.md`](k8s-local-dev.md) — deploying to minikube with Helm + Traefik, step by step
+- [`ci-cd.md`](ci-cd.md) — the GitHub Actions pipeline, self-hosted runner, debugging
 
 Read this top to bottom once. Then, whenever a section feels thin, open the file it
 points at (`file_path:line`) and read the real code — that is where the learning sticks.
@@ -22,7 +24,7 @@ points at (`file_path:line`) and read the real code — that is where the learni
 
 ## 0. Where we are on the roadmap
 
-The roadmap is a 9-stage sequence. **Stages 1–4 are done.** That is the scope of this guide.
+The roadmap is a 9-stage sequence. **Stages 1–6 are done.** That is the scope of this guide.
 
 | #   | Stage                                         | Status  | What it taught                      |
 | --- | --------------------------------------------- | ------- | ----------------------------------- |
@@ -30,9 +32,9 @@ The roadmap is a 9-stage sequence. **Stages 1–4 are done.** That is the scope 
 | 2   | Tests for Members                             | ✅ done | TDD, unit vs. integration           |
 | 3   | Containerize (Dockerfile → docker-compose)    | ✅ done | Docker mastery                      |
 | 4   | Frontend (Next.js) + compose it in            | ✅ done | full local stack                    |
-| 5   | Kubernetes (minikube → manifests → Helm)      | ⬜ next | Kubernetes                          |
-| 6   | CI/CD pipeline                                | ⬜      | automation                          |
-| 7   | Observability (Prometheus + Grafana)          | ⬜      | operating distributed systems       |
+| 5   | Kubernetes (minikube → manifests → Helm)      | ✅ done | Kubernetes                          |
+| 6   | CI/CD pipeline                                | ✅ done | automation                          |
+| 7   | Observability (Prometheus + Grafana)          | ⬜ next | operating distributed systems       |
 | 8   | Build Events service                          | ⬜      | repeat the DDD pattern              |
 | 9   | Wire NATS between Members ↔ Events            | ⬜      | async events / eventual consistency |
 
@@ -340,6 +342,10 @@ integration ones as _skipped_. This is deliberate: the current dev host has a br
 host→container Docker network path (a connection can't complete from the host to a
 container's Postgres), so the integration tests can only run in CI or on a machine where
 that path works. Set `RUN_DB_TESTS=1` (with Docker running) to include them.
+
+**In CI they always run.** The `integration-tests` job (§8) sets `RUN_DB_TESTS=1` on
+GitHub's runners, which have working Docker, and also enforces the 70% coverage
+thresholds. It is one of the three checks a PR must pass before it can merge.
 Tracked for removal once the infra supports it: **CMS-25**.
 
 ---
@@ -380,14 +386,155 @@ Even at two services, several distributed-systems ideas are already in play:
 - **Health checks & readiness gating** — `/health` endpoints and Compose `depends_on`
   conditions are the same primitives Kubernetes uses for liveness/readiness probes (stage 5).
 - **Migration as a separate step** — decoupling schema changes from app startup is a
-  production pattern that maps to K8s Jobs.
+  production pattern. In Compose it is a one-shot job; on Kubernetes it became an
+  **init container** (§7.5).
 
 You haven't built the async half yet — but the seams (domain events, per-service DB, health
 endpoints) are deliberately in place so stage 9 is a wiring exercise, not a rewrite.
 
 ---
 
-## 7. Using AI tools (learning goal #5)
+## 7. Kubernetes (roadmap stage 5)
+
+The same container images from §2 now run on a local **minikube** cluster. The hands-on
+runbook is [`k8s-local-dev.md`](k8s-local-dev.md); this section is the concepts.
+
+### 7.1 The objects, and where each one lives
+
+| Object | What it does | In this repo |
+| --- | --- | --- |
+| **Pod** | One or more containers scheduled together; the unit K8s runs | created by the Deployments below |
+| **Deployment** | Keeps N identical Pods running; replaces them gradually on change (rolling update) | [members-service](../charts/members-service/templates/deployment.yaml), [web](../charts/web/templates/deployment.yaml), [postgres](../k8s/postgres.yaml) |
+| **Service** | A stable DNS name + IP in front of changing Pods | `members-service-members-service`, `web-web`, `members-postgres` |
+| **ConfigMap / Secret** | Configuration and credentials injected as env vars | [configmap.yaml](../charts/members-service/templates/configmap.yaml), [secret.yaml](../charts/members-service/templates/secret.yaml) |
+| **PersistentVolumeClaim** | Disk that survives Pod restarts | Postgres data, in [k8s/postgres.yaml](../k8s/postgres.yaml) |
+| **Ingress** | HTTP routing from outside the cluster to Services | [members ingress](../charts/members-service/templates/ingress.yaml), [web ingress](../charts/web/templates/ingress.yaml) |
+| **HorizontalPodAutoscaler** | Adds or removes replicas based on CPU | [hpa.yaml](../charts/members-service/templates/hpa.yaml) (2–5 replicas) |
+
+The habit to build: **you don't start containers, you declare the desired state** and
+the cluster keeps reconciling towards it. Delete a Pod and the Deployment makes a new one.
+
+### 7.2 Helm — templated, versioned deploys
+
+A **chart** ([charts/members-service](../charts/members-service)) is a folder of
+templated manifests plus [`values.yaml`](../charts/members-service/values.yaml) defaults.
+`--set image.tag=…` overrides a value per deploy, which is how the same chart deploys
+`members-service:local` by hand and `ghcr.io/…:<sha>` from CI.
+
+- `helm upgrade --install` is idempotent: it installs the first time and upgrades after that.
+- Every deploy is a numbered **release revision**: `helm history members-service`, and
+  `helm rollback members-service <rev>` to go back.
+
+### 7.3 Probes — how K8s knows a Pod is healthy
+
+- **Readiness** (`/health`): "send me traffic yet?" A Pod that isn't Ready is taken out
+  of the Service, and a rolling update waits for new Pods to be Ready before removing the
+  old ones. This is what makes a bad deploy stop instead of taking the site down.
+- **Liveness** (`/health`): "am I stuck?" Failing it repeatedly makes K8s **restart**
+  the container.
+
+These are the Kubernetes version of the Compose healthchecks from §2.4.
+
+### 7.4 Ingress with Traefik
+
+**Traefik** is the Ingress *controller*, the actual proxy that reads Ingress objects.
+`cms.local/api/members/*` goes to members-service and `cms.local/*` goes to web. A Traefik
+**StripPrefix** [middleware](../charts/members-service/templates/middleware.yaml) removes
+`/api/members`, so the service still sees plain `/health` and `/members`. Locally,
+`minikube tunnel` plus an `/etc/hosts` entry makes `cms.local` reachable.
+
+### 7.5 Migrations as an init container
+
+An **init container** runs to completion *before* the app container starts. The
+members-service Pod has one called `migrate` that runs `prisma migrate deploy`
+([deployment.yaml](../charts/members-service/templates/deployment.yaml)). If it fails, the
+Pod never becomes Ready, so a broken migration stops the rollout.
+
+- **Safe across replicas:** each replica runs it, and Prisma takes a Postgres advisory
+  lock, so only one applies changes; the rest find "No pending migrations".
+- **Rollbacks don't undo schemas.** If new Pods fail after migrating, Helm rolls back the
+  *image* but not the *database*. So every migration must also work with the previous
+  release: the **expand/contract** pattern. Add first, remove a release later. The table
+  is in [ci-cd.md](ci-cd.md#migrations-and-rollbacks-expandcontract).
+- **Why not a Helm hook Job?** The DB Secret is created by the same chart, and a
+  `pre-install` hook would run before the Secret exists.
+
+### 7.6 Known gaps (deliberate or not yet done)
+
+- **Postgres runs as a Deployment + PVC, not a StatefulSet** as ADR-0008 describes.
+  It works for a single dev instance. A StatefulSet adds stable identity and per-replica
+  volumes, which matter once a database has replicas.
+- **The HPA can't scale yet.** It needs CPU metrics, and minikube's `metrics-server`
+  addon is disabled, so the HPA logs `FailedGetResourceMetric` and stays at 2 replicas.
+  `minikube addons enable metrics-server` fixes it, which fits stage 7 (observability).
+- **Dev credentials live in the chart's Secret template.** That's fine for local
+  learning. Real deployments inject them from outside (platform secrets, External
+  Secrets, Sealed Secrets).
+
+---
+
+## 8. CI/CD (roadmap stage 6)
+
+Two GitHub Actions workflows: **CI** proves a change is good, and **CD** ships it. Full setup
+and debugging: [`ci-cd.md`](ci-cd.md). Visual overview: the pipeline diagram page shared
+from CMS-16.
+
+### 8.1 CI — every pull request
+
+[`ci.yml`](../.github/workflows/ci.yml) runs three jobs in parallel on GitHub's machines:
+
+- `lint-typecheck`: lint, Prisma client generation, typecheck, build
+- `unit-tests`
+- `integration-tests`: real Postgres via Testcontainers, plus the coverage gate
+
+**Branch protection** on `main` lists those three as *required checks*. While any is
+red, GitHub marks the PR `BLOCKED` and the merge button is disabled, for admins too.
+`strict` mode also requires the branch to be up to date with `main`, so what was
+tested is what gets merged. This was verified with a deliberately failing test.
+
+### 8.2 CD — after a merge
+
+[`deploy.yml`](../.github/workflows/deploy.yml) does not run on the push itself. It is
+**chained to CI** with `workflow_run`: it starts only when CI has passed on `main`. Two PRs
+can each pass alone and still break when combined, and this catches that.
+
+1. `changes` diffs the merge commit against its parent and picks the services whose
+   `apps/<svc>` or `charts/<svc>` changed.
+2. `deploy` (one job per service) runs `docker build`, then `docker push` to
+   `ghcr.io/renchi/church-cms/<svc>:<commit-sha>`, then
+   `helm upgrade --install --wait --rollback-on-failure`.
+
+Tagging by **commit SHA** (not `latest`) means every deploy is a real change that
+Kubernetes rolls out, and `kubectl get deploy -o jsonpath='{..image}'` tells you exactly
+which commit is running. First measured run: **2 min 37 s from merge to both services live.**
+
+### 8.3 Why a self-hosted runner
+
+minikube's API is on a private IP, and GitHub's cloud machines can't reach it. So a
+**runner** (GitHub's job agent) is installed on the same machine as a systemd service. It
+makes outbound HTTPS calls only, uses the local Docker and `~/.kube/config`, and builds
+native arm64 images.
+
+Because the repo is public, the security rules matter:
+
+- Deploy has **no `pull_request` trigger**, so code from a PR never runs on your machine.
+- It only accepts CI runs that were a `push`, from this repository, and passed.
+- Workflows from outside contributors' forks need manual approval.
+
+### 8.4 What setting it up taught (real problems we hit)
+
+| Problem | Lesson |
+| --- | --- |
+| `pnpm lint` crashed: pnpm had resolved **ESLint 10** for the web app | CI exposes dependency drift you never notice locally; pin what you rely on |
+| Typecheck passed without a generated Prisma client (`PrismaClient` was `any`) | A green check is only as strong as what it really checks |
+| CI jobs "cancelled — not acquired by Runner" | That was a GitHub outage, not our code. Read the reason before debugging |
+| Pods `ImagePullBackOff` / `unauthorized` | Private registry images need credentials, so we made the packages public |
+| Helm 4 warning: `--atomic` deprecated | Watch tool deprecations in logs; renamed to `--rollback-on-failure` |
+| The ticket said "kubeconfig secret" | Tickets can be wrong about *how*. Keep the *goal* and record the deviation (PR + Linear comment) |
+
+---
+
+## 9. Using AI tools (learning goal #5)
 
 The development method itself is a learning goal: **issue-driven development with Claude
 Code + Linear**. Each chunk of work maps to a Linear ticket (CMS-5, CMS-6, CMS-12 …, visible
@@ -397,6 +544,10 @@ in the roadmap table and git history). The workflow:
 2. Claude Code implements it against the existing code and conventions.
 3. Decisions that shape architecture are written down as **ADRs**, not left in chat.
 4. Code is heavily commented **for learning**, not just for shipping.
+5. Every ticket goes through the same **quality loop**: plan → implement → verify in the
+   running app → `/code-review` (fix every finding) → PR → CI green → merge. On CMS-16,
+   the review caught two real bugs: deploy didn't wait for CI, and typecheck ignored the
+   Prisma types.
 
 The takeaway as a modern developer: AI tools are most effective when scoped by clear
 tickets, anchored by written decisions (ADRs), and verified by tests — exactly the loop
@@ -404,7 +555,7 @@ this repo models.
 
 ---
 
-## 8. Self-check — can you explain each of these?
+## 10. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -433,21 +584,38 @@ in parentheses (and the file it links) is where to look.
 - [ ] What is a Next.js Server Component, and why no JS ships for the members page? (§5)
 - [ ] What changes at stage 9 (NATS), and what's already in place for it? (§3.3, §6)
 
+**Kubernetes**
+
+- [ ] Deployment vs. Pod vs. Service: which one gives you a stable address? (§7.1)
+- [ ] What does `helm upgrade --install --set image.tag=…` change, and how do you undo it? (§7.2)
+- [ ] Readiness vs. liveness: which one stops a bad rollout, and which restarts a container? (§7.3)
+- [ ] Why does `/api/members/health` reach the service as `/health`? (§7.4)
+- [ ] Why must migrations be backward compatible when the image can be rolled back? (§7.5)
+- [ ] Why isn't the HPA scaling right now? (§7.6)
+
+**CI/CD**
+
+- [ ] What makes a red test actually block the merge? (§8.1)
+- [ ] Why does Deploy wait for CI on `main` instead of running on the push? (§8.2)
+- [ ] Why tag images with the commit SHA instead of `latest`? (§8.2)
+- [ ] Why can't GitHub's cloud runners deploy to minikube, and how is the self-hosted runner kept safe? (§8.3)
+
 ---
 
-## 9. Where to go next
+## 11. Where to go next
 
-The next stage is **Kubernetes** (roadmap stage 5): take these same container images and
-run them on minikube with manifests, an Ingress, and Helm. Much of the groundwork is
-deliberate preparation for it — the separate migrate job becomes a K8s Job/init container,
-the healthchecks become liveness/readiness probes, and the per-service database becomes a
-StatefulSet with a PersistentVolume (ADR-0008).
+The next stage is **Observability** (roadmap stage 7): Prometheus to collect metrics,
+Grafana to see them, plus structured logs. Stages 5–6 left natural starting points:
+enabling `metrics-server` so the HPA finally works (§7.6), the `/health` endpoints, and
+the deploy summaries CI already writes. After that, stage 8 repeats the DDD pattern in the
+Events service, and it gets the CI/CD pipeline for free by following the same folder
+conventions (`apps/<svc>`, `charts/<svc>`).
 
 Read, in this order, to go deeper than this guide:
 
 1. [`members-service-ddd.md`](members-service-ddd.md) — DDD with full diagrams
 2. [`docker-local-dev.md`](docker-local-dev.md) — the container workflow, hands-on
-3. [`adr/0007-learning-scope-and-roadmap.md`](adr/0007-learning-scope-and-roadmap.md) — the why behind the sequencing
-4. [`adr/context-map.md`](adr/context-map.md) — the strategic DDD picture
-   </content>
-   </invoke>
+3. [`k8s-local-dev.md`](k8s-local-dev.md) — the Kubernetes deploy, hands-on
+4. [`ci-cd.md`](ci-cd.md) — the pipeline, runner setup and debugging
+5. [`adr/0007-learning-scope-and-roadmap.md`](adr/0007-learning-scope-and-roadmap.md) — the why behind the sequencing
+6. [`adr/context-map.md`](adr/context-map.md) — the strategic DDD picture
