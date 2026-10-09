@@ -552,6 +552,37 @@ The takeaway as a modern developer: AI tools are most effective when scoped by c
 tickets, anchored by written decisions (ADRs), and verified by tests — exactly the loop
 this repo models.
 
+### 9.1 How the agent is configured (`.claude/`)
+
+An AI agent only follows the conventions it can see. Claude Code gives you five ways to
+make it see them. Each one has a different trigger and a different cost:
+
+| Mechanism | Where | When it loads or runs | Use it for |
+| --- | --- | --- | --- |
+| **CLAUDE.md** | repo root | Every session, always in context | What *every* task needs: purpose, commands, workflow, indexes. Keep it short, because every line costs attention |
+| **Rules** | `.claude/rules/*.md` | Only when the agent touches a matching path (`paths:` frontmatter) | Area conventions: `ddd.md` for service code, `k8s-helm.md` for charts, `testing.md`, `docs-learning.md` |
+| **Skills** | `.claude/skills/<name>/SKILL.md` | When you type `/name` (or the agent decides it's relevant) | Repeatable procedures: `/start-ticket`, `/verify`, `/new-service` |
+| **Hooks** | `.claude/settings.json` → `.claude/hooks/` | Automatically on events (e.g. after every Edit) | Things that must *always* happen, enforced by the harness rather than the model. `lint-file.sh` lints each edited `.ts` file |
+| **Memory** | `~/.claude/projects/.../memory/` | Index loaded each session | Facts about you and the project that aren't in the repo: preferences, reminders |
+
+Two design points are worth remembering:
+
+- **Enforce mechanically where you can.** "Never import another context's code" used to
+  be a sentence in CLAUDE.md. Now it's an ESLint `no-restricted-imports` rule in
+  [`eslint.config.mjs`](../eslint.config.mjs). The lint hook catches a violation the
+  moment it's written, and CI blocks the PR. Prose rules depend on the model's
+  attention; lint rules don't.
+- **A hook talks back only through stderr plus exit code 2.** The old hook ran
+  `pnpm lint` on the whole repo after every edit, but it printed to stdout, which the
+  agent never sees. It cost time and changed nothing.
+
+`/loop` (run a prompt on a timer) was considered and left out on purpose:
+`gh pr checks --watch` and `gh run watch` already block until CI and Deploy finish.
+
+**The work queue:** Linear `Todo` in board order holds the next tickets, and the
+`deferred` label marks tickets out of scope under ADR-0007. `/start-ticket` uses both, so
+"what's next" is the same answer for you and for the agent.
+
 ---
 
 ## 10. Self-check — can you explain each of these?
@@ -598,6 +629,13 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why does Deploy wait for CI on `main` instead of running on the push? (§8.2)
 - [ ] Why tag images with the commit SHA instead of `latest`? (§8.2)
 - [ ] Why can't GitHub's cloud runners deploy to minikube, and how is the self-hosted runner kept safe? (§8.3)
+
+**AI tools**
+
+- [ ] When would you put a convention in CLAUDE.md, in a rule, or in a skill? (§9.1)
+- [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§9.1)
+- [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§9.1)
+- [ ] How does `/start-ticket` decide which ticket is next? (§9.1)
 
 ---
 
