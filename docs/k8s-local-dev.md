@@ -82,6 +82,12 @@ sudo -E minikube tunnel
 echo "127.0.0.1  cms.local traefik.cms.local" | sudo tee -a /etc/hosts
 ```
 
+> **Which IP?** On some setups the tunnel gives Traefik its cluster IP (e.g.
+> `10.109.105.150`) instead of `127.0.0.1`. Ask the cluster rather than guessing:
+> `kubectl -n traefik get svc traefik` → `EXTERNAL-IP`, and use that address. The
+> monitoring stack adds `grafana.cms.local` on the same address
+> ([`observability.md`](observability.md) §4).
+
 Verify:
 
 ```bash
@@ -333,3 +339,10 @@ minikube delete
 | `/etc/hosts` stale after `minikube delete` | Re-run step 3 with new `minikube ip` |
 | `cannot reuse a name` | `helm uninstall <name>` then reinstall |
 | minikube unreachable | `minikube status` → if Stopped, run `minikube start` |
+
+---
+
+## Next: observability
+
+To see metrics and dashboards for what you just deployed (Prometheus, Grafana,
+metrics-server for the HPA), follow [`observability.md`](observability.md).

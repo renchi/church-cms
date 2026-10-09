@@ -100,6 +100,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `ServiceEvent` covers services + one-off events (no split aggregates) | Type-specific invariants appear in more than one or two places               | 0004        |
 | `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
 | Phase 1 uses sync HTTP between services                               | Stage 9 of the roadmap: wire NATS for async events                           | 0007        |
+| OTel metrics only, Prometheus pull; no Collector or traces            | Events service + NATS live, or traces wanted                                 | 0009        |
 
 ## ADR index
 
@@ -113,6 +114,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | 0006 | Groups context aggregates & domain model                             |
 | 0007 | Learning scope & roadmap: two-service slice first                    |
 | 0008 | Database hosting strategy (Docker → minikube → managed cloud)        |
+| 0009 | Observability: OpenTelemetry instrumentation, Prometheus + Grafana   |
 
 ## Docs index
 
@@ -123,4 +125,5 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `docs/docker-local-dev.md`    | Runbook: Compose stack, images                                                                                |
 | `docs/k8s-local-dev.md`       | Runbook: minikube, Traefik, Helm deploys                                                                      |
 | `docs/ci-cd.md`               | Runbook: GitHub Actions, self-hosted runner, debugging                                                        |
+| `docs/observability.md`       | Runbook: Prometheus, Grafana, metrics and logs, with hands-on exercises                                       |
 | `docs/status-dashboards.md`   | Where to watch the pipeline and the cluster                                                                   |

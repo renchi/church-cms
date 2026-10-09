@@ -7,4 +7,6 @@ metadata:
 data:
   NODE_ENV: {{ .Values.config.nodeEnv | quote }}
   PORT: {{ .Values.config.port | quote }}
-
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  # Must match the metrics port the chart exposes; src/instrumentation.ts reads it.
+  METRICS_PORT: {{ .Values.metrics.port | quote }}
