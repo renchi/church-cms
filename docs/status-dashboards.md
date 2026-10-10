@@ -67,6 +67,8 @@ sudo -E minikube tunnel
 | --- | --- |
 | Web frontend | <http://cms.local> |
 | Members API health | <http://cms.local/api/members/health> (expect `{"status":"ok"}`) |
+| Events API health | <http://cms.local/api/events/health> (expect `{"status":"ok"}`) |
+| Upcoming events | <http://cms.local/api/events/events> |
 | Traefik dashboard (routers, services, middlewares) | <http://traefik.cms.local/dashboard/> |
 | Grafana: RED dashboard (rate, errors, latency per service) | <http://grafana.cms.local> → Dashboards → *CMS — Service RED metrics* ([setup](observability.md)) |
 | Prometheus: scrape targets (is each Pod `up`?) | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` → <http://localhost:9090/targets> |
@@ -80,8 +82,8 @@ If `cms.local` doesn't resolve, the `/etc/hosts` entry is missing. See step 3 of
 kubectl get pods -w                    # watch pods roll over live (Ctrl+C to stop)
 kubectl get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.spec.template.spec.containers[0].image}{"\n"}{end}'
                                        # which commit each service is running
-kubectl logs <members-pod> -c migrate  # migration output
-helm history members-service           # every deploy, including rollbacks
+kubectl logs <members-pod> -c migrate  # migration output (same for <events-pod>)
+helm history members-service           # every deploy, including rollbacks (or events-service)
 ```
 
 ---
@@ -103,7 +105,7 @@ journalctl -u 'actions.runner.*' -f    # live log, e.g. "Running job: deploy (we
 Open two terminals side by side:
 
 1. `gh run watch`: CI runs on `main`, then Deploy starts automatically.
-2. `kubectl get pods -w`: the members-service and web pods are replaced.
+2. `kubectl get pods -w`: the pods of each changed service (members-service, events-service, web) are replaced.
 
 The first measured run took **2 min 37 s** from merge to both services live.
 
@@ -116,6 +118,6 @@ The first measured run took **2 min 37 s** from merge to both services live.
 | `cms.local` doesn't load | Is `minikube tunnel` running? Is minikube up? |
 | Pods not Ready | Kubernetes Dashboard → the pod → Events and Logs |
 | API slow or erroring | Grafana RED dashboard → which route, since when → then `kubectl logs` for those requests |
-| Grafana panels say **No data** | Prometheus Targets: is `members-service` up? See [observability troubleshooting](observability.md#troubleshooting) |
+| Grafana panels say **No data** | Prometheus Targets: is `members-service` (or `events-service`) up? See [observability troubleshooting](observability.md#troubleshooting) |
 
 More symptoms and fixes: the debugging table in [ci-cd.md](ci-cd.md#debugging).

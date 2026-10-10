@@ -1,0 +1,63 @@
+# events-service chart: a copy of charts/members-service with the names, ports
+# (3002 API, 9465 metrics), Ingress path (/api/events) and database changed.
+# Keeping the two charts identical in shape is deliberate: the Deploy workflow
+# treats every service the same way (see .github/workflows/deploy.yml).
+
+replicaCount: 2
+
+image:
+  repository: events-service
+  tag: local
+  pullPolicy: Never   # Never = use local image; IfNotPresent = pull if not cached; Always = always pull
+
+service:
+  type: ClusterIP
+  port: 3002
+
+resources:
+  requests:
+    cpu: 100m      # 100 millicores = 0.1 CPU
+    memory: 128Mi
+  limits:
+    cpu: 500m      # 500 millicores = 0.5 CPU
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+config:
+  nodeEnv: production
+  port: "3002"
+  logLevel: info   # pino level: debug | info | warn | error — raise to debug while troubleshooting
+
+# The actual DB URL goes in secret.yaml; this key just names the secret
+database:
+  secretName: events-service-db-secret
+  secretKey: DATABASE_URL
+
+# Runs "prisma migrate deploy" in an init container before the app starts
+migrations:
+  enabled: true
+
+ingress:
+  enabled: false    # flip to true at deploy time: --set ingress.enabled=true
+  host: cms.local
+  path: /api/events
+
+# Prometheus metrics (OpenTelemetry SDK, see apps/events-service/src/instrumentation.ts)
+# 9465, not 9464, only to match the local-dev default; each Pod has its own IP.
+metrics:
+  port: 9465
+  serviceMonitor:
+    # A ServiceMonitor is a custom resource from the Prometheus Operator
+    # (installed by kube-prometheus-stack, see docs/observability.md). On a
+    # cluster without it the CRD doesn't exist and the install would fail, so
+    # it is off by default; deploy.yml turns it on with --set.
+    enabled: false
+    interval: 15s
+    # kube-prometheus-stack's Prometheus only picks up ServiceMonitors that
+    # carry its release label.
+    release: kube-prometheus-stack

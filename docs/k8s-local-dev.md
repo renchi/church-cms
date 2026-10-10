@@ -1,6 +1,6 @@
 # Kubernetes Local Dev Runbook
 
-This guide walks through deploying the full church-cms stack (Members service + web frontend) to a local minikube cluster with Traefik as the Ingress controller. Follow it top to bottom — each step depends on the previous one.
+This guide walks through deploying the full church-cms stack (Members service + Events service + web frontend) to a local minikube cluster with Traefik as the Ingress controller. Follow it top to bottom — each step depends on the previous one.
 
 > **Quick start: one command.** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs every step
 > below, plus the monitoring stack from [`observability.md`](observability.md), in the right order,
@@ -139,15 +139,19 @@ eval $(minikube docker-env)
 # Build members-service
 docker build -f apps/members-service/Dockerfile -t members-service:local .
 
+# Build events-service
+docker build -f apps/events-service/Dockerfile -t events-service:local .
+
 # Build web frontend
 docker build -f apps/web/Dockerfile -t church-cms-web:local .
 ```
 
-Verify both images are visible to minikube:
+Verify the images are visible to minikube:
 
 ```bash
-docker images | grep -E "members-service|church-cms-web"
+docker images | grep -E "members-service|events-service|church-cms-web"
 # members-service    local   <id>   ...
+# events-service     local   <id>   ...
 # church-cms-web     local   <id>   ...
 ```
 
@@ -158,17 +162,21 @@ docker images | grep -E "members-service|church-cms-web"
 ## 5. Deploy Postgres
 
 Postgres runs as a plain Kubernetes Deployment (not via Helm — it's infrastructure, not the app).
+There are **two**, one per service (ADR-0008): `members-postgres` and `events-postgres`.
+They are separate Pods with separate volumes, so neither service can read the other's
+tables, and one database going down doesn't take the other service with it.
 
 ```bash
-kubectl apply -f k8s/postgres.yaml
+kubectl apply -f k8s/postgres.yaml -f k8s/events-postgres.yaml
 ```
 
-Wait for the Pod to reach Running:
+Wait for both Pods to reach Running:
 
 ```bash
-kubectl get pods -l app=members-postgres --watch
+kubectl get pods -l 'app in (members-postgres, events-postgres)' --watch
+# events-postgres-xxx    1/1   Running   0   30s
 # members-postgres-xxx   1/1   Running   0   30s
-# Press Ctrl+C when Running
+# Press Ctrl+C when both are Running
 ```
 
 > **If the Pod stays Pending:** the PersistentVolumeClaim may still be provisioning. Run `kubectl get pvc` and wait for `STATUS` to show `Bound`, then the Pod will start automatically.
@@ -177,7 +185,7 @@ kubectl get pods -l app=members-postgres --watch
 
 ## 6. Prisma migrations (automatic)
 
-Migrations now run automatically: each members-service Pod has a `migrate` init container that runs `prisma migrate deploy` before the app starts (`migrations.enabled` in `charts/members-service/values.yaml`). You can skip straight to step 7.
+Migrations now run automatically: each members-service and events-service Pod has a `migrate` init container that runs `prisma migrate deploy` before the app starts (`migrations.enabled` in `charts/members-service/values.yaml`). You can skip straight to step 7.
 
 Check what it did:
 
@@ -229,6 +237,69 @@ REVISION: 1
 
 ---
 
+## 7b. Deploy Events service
+
+The chart is a copy of the members one with different names, ports (3002, metrics 9465)
+and Ingress path (`/api/events`), so the command is the same:
+
+```bash
+helm upgrade --install events-service ./charts/events-service \
+  --set image.repository=events-service \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true \
+  --set metrics.serviceMonitor.enabled=true \
+  --wait --timeout 4m
+# STATUS: deployed
+
+kubectl get pods -l app.kubernetes.io/name=events-service
+# events-service-events-service-xxx   1/1   Running   0   20s   (x2)
+
+kubectl logs deploy/events-service-events-service -c migrate
+# 1 migration found in prisma/migrations
+# All migrations have been successfully applied.   (on the Pod that ran first)
+# No pending migrations to apply.                  (on the other one)
+```
+
+> **`--set metrics.serviceMonitor.enabled=true`** needs the monitoring stack's CRDs
+> ([`observability.md`](observability.md) §2). Leave it out on a cluster without them.
+
+**Try the real feature.** Every check-in needs a `memberId` that came from the Members
+context, so take one from members-service first:
+
+```bash
+MEMBER=$(curl -s 'http://cms.local/api/members/members?limit=1' | jq -r '.data[0].id')
+WHEN=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)   # check-in opens 2 h before the start
+
+EVENT=$(curl -s -X POST http://cms.local/api/events/events -H 'content-type: application/json' \
+  -d "{\"title\":\"Sunday Morning Service\",\"eventType\":\"service\",\"venue\":{\"name\":\"Main Sanctuary\"},
+       \"scheduledAt\":\"$WHEN\",\"durationMinutes\":90,\"createdById\":\"$MEMBER\"}" | jq -r .id)
+
+curl -s -X POST "http://cms.local/api/events/events/$EVENT/attendance" \
+  -H 'content-type: application/json' -d "{\"memberId\":\"$MEMBER\"}"
+# {"id":"…"}                                                  ← 201
+curl -s -X POST "http://cms.local/api/events/events/$EVENT/attendance" \
+  -H 'content-type: application/json' -d "{\"memberId\":\"$MEMBER\"}"
+# {"error":"Member is already checked in to this event"}      ← 409
+```
+
+The full endpoint list is in [`events-service-ddd.md`](events-service-ddd.md) §6.
+
+> **No tunnel? Test without sudo.** `minikube tunnel` needs root. A port-forward to
+> Traefik doesn't, and still goes through the real Ingress rules and middlewares:
+>
+> ```bash
+> kubectl -n traefik port-forward svc/traefik 18080:80 &
+> curl -s -H 'Host: cms.local' http://127.0.0.1:18080/api/events/health
+> # {"status":"ok"}
+> kill %1
+> ```
+>
+> The `Host` header is what the Ingress matches on (`host: cms.local`), so it stands in
+> for the `/etc/hosts` entry.
+
+---
+
 ## 8. Deploy web frontend
 
 ```bash
@@ -255,12 +326,15 @@ kubectl apply -f k8s/traefik-dashboard-ingress.yaml
 kubectl get pods
 # members-postgres-xxx                1/1   Running
 # members-service-members-service-xxx 1/1   Running   (x2, HPA managed)
+# events-postgres-xxx                 1/1   Running
+# events-service-events-service-xxx   1/1   Running   (x2, HPA managed)
 # web-web-xxx                         1/1   Running
 
 # All ingress resources should be present
 kubectl get ingress
 # NAME                      CLASS     HOSTS       ...
 # members-service-...       traefik   cms.local   ...
+# events-service-...        traefik   cms.local   ...
 # web-web                   traefik   cms.local   ...
 
 kubectl get ingress -n traefik
@@ -272,6 +346,10 @@ kubectl get ingress -n traefik
 ```bash
 # 1. Members API health
 curl http://cms.local/api/members/health
+# Expected: {"status":"ok"}
+
+# 1b. Events API health
+curl http://cms.local/api/events/health
 # Expected: {"status":"ok"}
 
 # 2. Frontend (should return HTML)
@@ -300,6 +378,9 @@ Traefik (Ingress controller, namespace: traefik)
      ├── /api/members/* ──[StripPrefix /api/members]──► members-service:3001
      │                                                     /health, /members, ...
      │
+     ├── /api/events/*  ──[StripPrefix /api/events]───► events-service:3002
+     │                                                     /health, /events, ...
+     │
      └── /*  ─────────────────────────────────────────► web:3000
 ```
 
@@ -314,6 +395,13 @@ The **StripPrefix middleware** (`charts/members-service/templates/middleware.yam
 ```bash
 # Re-deploy members-service after chart or image change
 helm upgrade --install members-service ./charts/members-service \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true
+
+# Re-deploy events-service after chart or image change
+helm upgrade --install events-service ./charts/events-service \
+  --set image.repository=events-service \
   --set image.tag=local \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true
@@ -333,9 +421,10 @@ Remove all Helm releases, Postgres, and Traefik:
 
 ```bash
 helm uninstall members-service
+helm uninstall events-service
 helm uninstall web
 helm uninstall traefik -n traefik
-kubectl delete -f k8s/postgres.yaml
+kubectl delete -f k8s/postgres.yaml -f k8s/events-postgres.yaml
 kubectl delete -f k8s/traefik-dashboard-ingress.yaml
 kubectl delete namespace traefik
 ```
@@ -368,6 +457,97 @@ minikube delete
 | `/etc/hosts` stale after `minikube delete` | Re-run step 3 with new `minikube ip` |
 | `cannot reuse a name` | `helm uninstall <name>` then reinstall |
 | minikube unreachable | `minikube status` → if Stopped, run `minikube start` |
+| `cms.local` doesn't answer and you can't `sudo` for the tunnel | Port-forward Traefik and send `Host: cms.local` (§7b) |
+| `zsh: no matches found: http://…?limit=1` | zsh reads `?` as a glob: quote the URL |
+| An API returns `500` with `P1001 Can't reach database server` | That service's Postgres is down: `kubectl get pods -l app=<svc>-postgres` (see Exercise 2) |
+
+---
+
+## Exercises: two contexts, two databases
+
+Run these after §7b. Each one shows the expected result so you can check yourself.
+They use the variables from §7b (`MEMBER`, `EVENT`, `WHEN`).
+
+**1. A rule only the database can enforce.** Create a fresh event, then fire two check-ins
+for the same member *at the same moment*:
+
+```bash
+EVENT2=$(curl -s -X POST http://cms.local/api/events/events -H 'content-type: application/json' \
+  -d "{\"title\":\"Prayer Meeting\",\"eventType\":\"event\",\"venue\":{\"name\":\"Chapel\"},
+       \"scheduledAt\":\"$WHEN\",\"durationMinutes\":60,\"createdById\":\"$MEMBER\"}" | jq -r .id)
+for i in 1 2; do
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST "http://cms.local/api/events/events/$EVENT2/attendance" \
+    -H 'content-type: application/json' -d "{\"memberId\":\"$MEMBER\"}" &
+done; wait
+```
+
+Expected: one `201` and one `409` (in either order), never two `201`s. Both requests may
+pass the use case's "already checked in?" check, but the unique index on
+`(eventId, memberId)` lets only one INSERT win. Why that matters:
+[`events-service-ddd.md`](events-service-ddd.md) §3.2.
+
+**2. Break one database on purpose.** Stop the Events database and watch both services:
+
+```bash
+kubectl scale deploy/events-postgres --replicas=0
+
+curl -s http://cms.local/api/events/health
+# {"status":"ok"}                ← still "healthy": /health doesn't touch the database
+curl -s -o /dev/null -w '%{http_code}\n' http://cms.local/api/events/events
+# 500                            ← the body says P1001 "Can't reach database server at events-postgres:5432"
+curl -s -o /dev/null -w '%{http_code}\n' http://cms.local/api/members/members
+# 200                            ← Members doesn't notice: its database is a different server
+kubectl get pods -l app.kubernetes.io/name=events-service
+# … 1/1 Running                  ← Pods stay Ready: the probes only check /health
+
+kubectl scale deploy/events-postgres --replicas=1
+kubectl rollout status deploy/events-postgres
+curl -s -o /dev/null -w '%{http_code}\n' http://cms.local/api/events/events
+# 200                            ← Prisma reconnects by itself; no restart needed
+```
+
+Things to think about: should readiness fail when the database is down? (It would stop
+traffic to Pods that can't serve it, but a liveness check that did the same would restart
+healthy Pods in a loop.) And should a 500 reveal a database hostname to the client?
+(It shouldn't. Both services still use Fastify's default error body, which is a known gap.)
+
+**3. Look for the boundary.** Ask each database which tables it has:
+
+```bash
+kubectl exec deploy/members-postgres -- psql -U cms_user -d members_db -tAc \
+  "select tablename from pg_tables where schemaname='public'"
+# _prisma_migrations
+# Member
+kubectl exec deploy/events-postgres -- psql -U cms_user -d events_db -tAc \
+  "select tablename from pg_tables where schemaname='public'"
+# _prisma_migrations
+# ServiceEvent
+# Attendance
+# VolunteerAssignment
+```
+
+Expected: no `Member` table in `events_db`, and no events tables in `members_db`. The
+`memberId` in `Attendance` is just text: try to `JOIN` it to `Member` and you'll find
+there's nothing to join to.
+
+**4. A rule that spans aggregates.** Assign two roles, then cancel the event:
+
+```bash
+for role in usher greeter; do
+  curl -s -X POST "http://cms.local/api/events/events/$EVENT/volunteers" -H 'content-type: application/json' \
+    -d "{\"memberId\":\"$MEMBER\",\"role\":\"$role\",\"assignedById\":\"$MEMBER\"}"; echo
+done
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "http://cms.local/api/events/events/$EVENT/cancel" \
+  -H 'content-type: application/json' -d '{"reason":"Storm warning"}'
+# 204
+kubectl exec deploy/events-postgres -- psql -U cms_user -d events_db -tAc \
+  "select role, status from \"VolunteerAssignment\" where \"eventId\" = '$EVENT' order by role"
+# greeter|declined
+# usher|declined
+```
+
+Then cancel it again: expect `400 {"error":"Event is already cancelled"}`. A cancelled
+event can't go back to scheduled (ADR-0004).
 
 ---
 

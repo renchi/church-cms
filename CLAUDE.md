@@ -59,6 +59,7 @@ docs/adr/   # architecture decision records. Read these before changing architec
 
 - `tsconfig.base.json` is the base TS config that services extend. Target ES2022, `NodeNext` module resolution, strict mode, ESM.
 - Services use **Fastify + Prisma** (members-service, events-service). The frontend uses **Next.js 15**.
+- Each service's Prisma client must generate into its own folder (`output` in `schema.prisma`, as events-service does). pnpm shares one `@prisma/client`, so default outputs overwrite each other.
 - Path-scoped conventions load automatically from `.claude/rules/`: `ddd.md` (service code), `k8s-helm.md` (charts, k8s, workflows, Dockerfiles), `testing.md` (tests), `docs-learning.md` (docs).
 
 ## Active vs deferred services
@@ -68,7 +69,7 @@ Only **two backend services** are in active development. Do not create or scaffo
 | Service                       | Status                                                                 |
 | ----------------------------- | ---------------------------------------------------------------------- |
 | `apps/members-service`        | Active: built first, the DDD anchor                                    |
-| `apps/events-service`         | Active: second service, paired via events (not scaffolded yet, CMS-18) |
+| `apps/events-service`         | Active: second service, paired via events (scaffolded in CMS-18)       |
 | `apps/web`                    | Active: Next.js 15 frontend                                            |
 | `apps/identity-service`       | **Deferred**                                                           |
 | `apps/finance-service`        | **Deferred**                                                           |
@@ -127,6 +128,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `docs/study-guide.md`         | **The map.** Every concept learned so far, per roadmap stage, with self-check questions. Updated every ticket |
 | `docs/members-service-ddd.md` | DDD layering of the reference service                                                                         |
+| `docs/events-service-ddd.md`  | The second context: three aggregates, a value object, rules across aggregates                                 |
 | `docs/docker-local-dev.md`    | Runbook: Compose stack, images                                                                                |
 | `docs/k8s-local-dev.md`       | Runbook: minikube, Traefik, Helm deploys                                                                      |
 | `docs/ci-cd.md`               | Runbook: GitHub Actions, self-hosted runner, debugging                                                        |

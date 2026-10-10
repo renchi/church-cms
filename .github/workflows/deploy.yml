@@ -79,6 +79,10 @@ jobs:
               - *shared
               - apps/members-service/**
               - charts/members-service/**
+            events-service:
+              - *shared
+              - apps/events-service/**
+              - charts/events-service/**
             web:
               - *shared
               - apps/web/**
@@ -91,7 +95,7 @@ jobs:
           CHANGES: ${{ steps.filter.outputs.changes }}
         run: |
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            services='["members-service","web"]'
+            services='["members-service","events-service","web"]'
           else
             services=$(echo "$CHANGES" | jq -c 'map(select(. != "shared"))')
           fi

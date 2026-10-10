@@ -50,6 +50,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 # full workspace graph, even though we won't build those packages here.
 COPY apps/web/package.json            ./apps/web/package.json
 COPY apps/members-service/package.json ./apps/members-service/package.json
+COPY apps/events-service/package.json  ./apps/events-service/package.json
 
 # --frozen-lockfile fails the build if pnpm-lock.yaml is out of date.
 # This guarantees the container always uses exactly the versions that were

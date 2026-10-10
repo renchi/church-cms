@@ -19,6 +19,7 @@ Plan this in plan mode first: it touches many files.
 
 - [ ] `package.json` with the same scripts (`dev`, `build`, `start`, `lint`, `typecheck`, `test`, `test:unit`, `test:coverage`). CI fails if `test:unit` is missing.
 - [ ] `tsconfig.json`, `prisma/schema.prisma`, `.env.example`
+- [ ] Prisma `output = "../generated/client"` in the generator, imported via `src/infrastructure/prisma.ts` (copy events-service's). pnpm shares one `@prisma/client`, so with the default output each service's `prisma generate` overwrites the other's client. The Dockerfile must copy `generated/` into the runner stage
 - [ ] `src/domain/` (aggregates, repository interface, errors, events), `src/application/` (use cases), `src/infrastructure/` (Prisma repo), `src/api/` (routes), `src/app.ts` (`buildApp()`), `src/index.ts`
 - [ ] Observability, the same as members-service: `src/instrumentation.ts` (OTel, Prometheus exporter on its own port), JSON logger with a `service` base field, and `/health` silenced
 - [ ] Unit tests next to the domain and use cases. Integration tests named `*.integration.test.ts` (Testcontainers).
@@ -37,7 +38,7 @@ Plan this in plan mode first: it touches many files.
 **Kubernetes:**
 
 - [ ] `charts/<svc>/`: copy `charts/members-service` (deployment with a migrations init container, service, configmap, secret, hpa, ingress, middleware, servicemonitor). Ingress path `/api/<context>`.
-- [ ] Postgres for the service: a StatefulSet and PVC like `k8s/postgres.yaml`
+- [ ] Postgres for the service: a Deployment and PVC like `k8s/events-postgres.yaml`. Apply it to the cluster **before the first merge**: the Deploy workflow only runs Helm, and the migrate init container fails without its database
 - [ ] Grafana: the RED dashboard's "Service" dropdown picks up the new `job` automatically (via `target_info`). Check that it appears
 - [ ] `scripts/cluster-up.sh`: add the new Postgres, the image build and the `helm upgrade --install` (with `metrics.serviceMonitor.enabled=true`), plus a smoke-test line for the new health endpoint
 

@@ -86,7 +86,7 @@ ok "minikube, kubectl, helm, docker, jq, curl found; Docker is running"
 # --- Optional: start from nothing -------------------------------------------
 if $FRESH; then
   step "--fresh" "Deleting the minikube cluster"
-  warn "This deletes EVERYTHING in the cluster, including the Postgres data (members)."
+  warn "This deletes EVERYTHING in the cluster, including the Postgres data (members and events)."
   read -r -p "    Type 'yes' to delete the cluster: " answer
   [[ "$answer" == "yes" ]] || { fail "Aborted — nothing was deleted."; exit 1; }
   minikube delete
@@ -146,9 +146,10 @@ step "observability §3" "Grafana dashboard"
 kubectl apply -f k8s/monitoring/service-red-dashboard.yaml
 
 # --- 5. Postgres -------------------------------------------------------------
-step "k8s-local-dev §5" "Postgres for members-service"
-kubectl apply -f k8s/postgres.yaml
+step "k8s-local-dev §5" "Postgres for members-service and events-service (one each, ADR-0008)"
+kubectl apply -f k8s/postgres.yaml -f k8s/events-postgres.yaml
 kubectl rollout status deployment/members-postgres --timeout=3m
+kubectl rollout status deployment/events-postgres --timeout=3m
 
 # --- 4. Images ---------------------------------------------------------------
 # Build straight into minikube's own Docker daemon, so the cluster can use the
@@ -156,15 +157,16 @@ kubectl rollout status deployment/members-postgres --timeout=3m
 step "k8s-local-dev §4" "Docker images inside minikube"
 eval "$(minikube docker-env)"
 if $SKIP_BUILD; then
-  for img in members-service:local church-cms-web:local; do
+  for img in members-service:local events-service:local church-cms-web:local; do
     created=$(docker image inspect "$img" --format '{{.Created}}' 2>/dev/null) \
       || { fail "$img not found in minikube — run without --skip-build"; exit 1; }
     warn "reusing $img (built ${created%%.*}). If the code changed since then, rebuild!"
   done
 else
   docker build -f apps/members-service/Dockerfile -t members-service:local .
+  docker build -f apps/events-service/Dockerfile -t events-service:local .
   docker build -f apps/web/Dockerfile -t church-cms-web:local .
-  ok "built members-service:local and church-cms-web:local"
+  ok "built members-service:local, events-service:local and church-cms-web:local"
 fi
 
 # --- 7–8. Apps ---------------------------------------------------------------
@@ -172,6 +174,16 @@ fi
 step "k8s-local-dev §7" "members-service (Helm)"
 helm_quiet upgrade --install members-service ./charts/members-service \
   --set image.repository=members-service \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true \
+  --set metrics.serviceMonitor.enabled=true \
+  --wait --timeout 4m
+
+# Same flags as members-service: every backend service is deployed the same way.
+step "k8s-local-dev §7b" "events-service (Helm)"
+helm_quiet upgrade --install events-service ./charts/events-service \
+  --set image.repository=events-service \
   --set image.tag=local \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
@@ -278,11 +290,13 @@ fi
 step "smoke test" "Is everything actually working?"
 smoke_ok=true
 if $network_ok; then
-  if [[ "$(curl -s -m 5 http://cms.local/api/members/health)" == '{"status":"ok"}' ]]; then
-    ok "members API: http://cms.local/api/members/health → {\"status\":\"ok\"}"
-  else
-    smoke_ok=false; fail "members API health check failed"
-  fi
+  for svc in members events; do
+    if [[ "$(curl -s -m 5 "http://cms.local/api/$svc/health")" == '{"status":"ok"}' ]]; then
+      ok "$svc API: http://cms.local/api/$svc/health → {\"status\":\"ok\"}"
+    else
+      smoke_ok=false; fail "$svc API health check failed"
+    fi
+  done
   for url in http://cms.local/ http://grafana.cms.local/login; do
     code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$url" || true)
     if [[ "$code" == 200 ]]; then
@@ -299,22 +313,26 @@ fi
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090 >/dev/null 2>&1 &
 pf_pid=$!
 trap 'kill $pf_pid 2>/dev/null || true' EXIT
-members_up() {
+# targets_up <job> — true once Prometheus scrapes both Pods of that service.
+targets_up() {
   curl -s 'http://localhost:9090/api/v1/targets?state=active' \
-    | jq -e '[.data.activeTargets[] | select(.labels.job == "members-service" and .health == "up")] | length >= 2'
+    | jq -e --arg job "$1" '[.data.activeTargets[] | select(.labels.job == $job and .health == "up")] | length >= 2'
 }
 # A new ServiceMonitor takes the Operator ~1 minute to pick up (observability.md troubleshooting).
-if wait_for 180 "members-service targets up in Prometheus" members_up; then
-  ok "Prometheus scrapes members-service (2 pods up)"
-else
-  smoke_ok=false
-fi
+for job in members-service events-service; do
+  if wait_for 180 "$job targets up in Prometheus" targets_up "$job"; then
+    ok "Prometheus scrapes $job (2 pods up)"
+  else
+    smoke_ok=false
+  fi
+done
 
 # --- Summary -----------------------------------------------------------------
 step "done" "Finished in ${SECONDS}s"
 cat <<EOF
     App                http://cms.local
     Members API        http://cms.local/api/members/members
+    Events API         http://cms.local/api/events/events
     Traefik dashboard  http://traefik.cms.local/dashboard/
     Grafana            http://grafana.cms.local/d/cms-service-red   (user: admin)
     Grafana password   kubectl get secret -n monitoring -l app.kubernetes.io/component=admin-secret \\
