@@ -15,8 +15,9 @@ The project exists so the user can learn (ADR-0007). A ticket isn't done until i
   3. **Why this way.** The trade-off and the ADR it relates to, plus what was deliberately deferred.
   4. **What setting it up taught.** A problem → lesson table of real issues hit during the ticket (like §8.4). Fill it in during implementation; don't invent entries.
 - **§0 roadmap status** and the goal list at the top (e.g. "stage 7 done").
-- **§11 self-check**: add 4–8 questions, each pointing to its section (`(§9.3)`).
-- **§12 where to go next**, plus the "known gaps" lists if the ticket closes or opens one.
+- **The "Self-check" section**: add 4–8 questions, each pointing to its section (`(§9.3)`).
+- **The "Where to go next" section**, plus the "known gaps" lists if the ticket closes or opens one.
+- Refer to those two by name, not number: each new stage section shifts them down.
 - If a new companion doc is added, list it in the "companion docs" list at the top.
 
 ## Runbooks (`docs/<topic>.md`)

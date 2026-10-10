@@ -14,3 +14,6 @@ coverage/
 # Downloaded binaries (minikube, kubectl)
 minikube-linux-*
 kubectl.sha256
+
+# Per-service generated Prisma clients (see apps/events-service/prisma/schema.prisma)
+apps/*/generated/

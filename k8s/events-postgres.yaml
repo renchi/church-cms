@@ -1,0 +1,59 @@
+# Postgres for events-service: its OWN database server, separate from
+# members-postgres (ADR-0008: one database per service). Same shape as
+# k8s/postgres.yaml; only the names and the database differ.
+#
+# Nothing here is shared with members: if this Pod dies, members-service keeps
+# working, and neither service can read the other's tables.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: events-postgres-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: events-postgres
+spec:
+  selector:
+    matchLabels:
+      app: events-postgres
+  template:
+    metadata:
+      labels:
+        app: events-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_DB
+              value: events_db
+            - name: POSTGRES_USER
+              value: cms_user
+            - name: POSTGRES_PASSWORD
+              value: cms_password
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: events-postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: events-postgres
+spec:
+  selector:
+    app: events-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

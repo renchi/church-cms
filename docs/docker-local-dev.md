@@ -37,13 +37,22 @@ root. It runs four things:
 docker compose up --build
 ```
 
-The first run builds the `members-service` image, then starts the stack **in
+The first run builds the service images, then starts each service's chain **in
 order**: `members-db` → `members-migrate` (applies the schema, exits) →
-`members-service`, with `adminer` alongside. When it settles you have:
+`members-service`, and the same for Events: `events-db` → `events-migrate` →
+`events-service`. `web` and `adminer` run alongside. When it settles you have:
 
-- API at <http://localhost:3001> — try `curl localhost:3001/health`
+- Members API at <http://localhost:3001> — try `curl localhost:3001/health`
+- Events API at <http://localhost:3002> — try `curl localhost:3002/events`
 - Adminer at <http://localhost:8080>
-- Postgres at `localhost:5432`
+- Members Postgres at `localhost:5432`, Events Postgres at `localhost:5433`
+
+> **Why two Postgres containers?** Each service owns its database (ADR-0008), so
+> Events gets its own server, not just its own schema. Inside the Compose network both
+> listen on 5432 (`members-db:5432`, `events-db:5432`); only the **host** ports differ,
+> because two containers can't both publish host port 5432. The `events-db` container
+> uses the same user and password from `.env`, but overrides `POSTGRES_DB` to
+> `events_db`.
 
 After the first build, drop `--build` for faster starts:
 
@@ -64,6 +73,8 @@ Open <http://localhost:8080> and log in with the values from your `.env`:
 | Password | value of `POSTGRES_PASSWORD` in `.env` |
 | Database | value of `POSTGRES_DB` in `.env`       |
 
+> For the Events database, use Server `events-db` and Database `events_db`.
+>
 > Server is `members-db` (the service name), **not** `localhost` — see
 > [why service names, not localhost](#why-service-names-not-localhost) below.
 
@@ -74,6 +85,8 @@ docker compose ps                       # what's running + health status
 docker compose logs -f members-service  # tail one service's logs
 docker compose restart members-service  # restart a single service
 docker compose exec members-db psql -U cms_user -d members_db   # psql into the DB
+docker compose exec events-db psql -U cms_user -d events_db     # ...or the Events DB
+docker compose up -d --build events-service   # rebuild and restart only Events (and its DB chain)
 ```
 
 ### Stop / clean up

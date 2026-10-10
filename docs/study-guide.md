@@ -7,12 +7,13 @@ exercised, mapped to the **five learning goals** in
 1. **Docker & containers**
 2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability)_
 3. **System design**
-4. **Domain-Driven Design (DDD)** — the emphasised priority
+4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
 5. **Using AI tools** — issue-driven development
 
-This guide is the **map**. Two companion docs are the **detail**:
+This guide is the **map**. The companion docs are the **detail**:
 
 - [`members-service-ddd.md`](members-service-ddd.md) — the DDD layering, with diagrams
+- [`events-service-ddd.md`](events-service-ddd.md) — the second context: several aggregates, a value object, cross-aggregate rules
 - [`docker-local-dev.md`](docker-local-dev.md) — running the stack, Compose vs. raw `docker`
 - [`k8s-local-dev.md`](k8s-local-dev.md) — deploying to minikube with Helm + Traefik, step by step
 - [`ci-cd.md`](ci-cd.md) — the GitHub Actions pipeline, self-hosted runner, debugging
@@ -26,7 +27,7 @@ points at (`file_path:line`) and read the real code — that is where the learni
 
 ## 0. Where we are on the roadmap
 
-The roadmap is a 9-stage sequence. **Stages 1–7 are done.** That is the scope of this guide.
+The roadmap is a 9-stage sequence. **Stages 1–8 are done.** That is the scope of this guide.
 
 | #   | Stage                                         | Status  | What it taught                      |
 | --- | --------------------------------------------- | ------- | ----------------------------------- |
@@ -37,8 +38,8 @@ The roadmap is a 9-stage sequence. **Stages 1–7 are done.** That is the scope 
 | 5   | Kubernetes (minikube → manifests → Helm)      | ✅ done | Kubernetes                          |
 | 6   | CI/CD pipeline                                | ✅ done | automation                          |
 | 7   | Observability (Prometheus + Grafana)          | ✅ done | operating distributed systems       |
-| 8   | Build Events service                          | ⬜ next | repeat the DDD pattern              |
-| 9   | Wire NATS between Members ↔ Events            | ⬜      | async events / eventual consistency |
+| 8   | Build Events service                          | ✅ done | repeat the DDD pattern              |
+| 9   | Wire NATS between Members ↔ Events            | ⬜ next | async events / eventual consistency |
 
 Knowing what is **deliberately not built yet** is itself part of the learning: the
 architecture is sequenced so you learn each layer once, well, instead of building the
@@ -306,6 +307,8 @@ made, including deliberate "simple now, evolve later" choices (e.g. `familyId` i
 not yet a `Family` aggregate). Reading an ADR before changing architecture is the habit to
 build.
 
+Stage 8 put these rules to work with a second context, Events: see §10.
+
 ---
 
 ## 4. Testing (roadmap stage 2 — TDD)
@@ -374,7 +377,7 @@ browser bundles — the Dockerfile comment explains why our server-only page doe
 
 Even at two services, several distributed-systems ideas are already in play:
 
-- **Service boundaries** — Members (core) and the soon-to-come Events service are separate
+- **Service boundaries** — Members (core) and Events (stage 8, §10) are separate
   deployables with separate databases. They communicate over the network, not shared memory.
 - **Synchronous now, asynchronous later** — Phase 1 is HTTP between services (the web app
   calls the API directly). Phase 2 (stage 9) introduces **NATS** for async **domain
@@ -619,7 +622,7 @@ The decision record: [ADR-0009](adr/0009-observability-opentelemetry.md).
 | --- | --- | --- | --- |
 | **Metrics** | *How much / how often / how fast*, as numbers over time. Cheap to store, great for graphs and alerts | 0.86 req/s, p95 = 7 ms | ✅ Prometheus + Grafana |
 | **Logs** | *What exactly happened* in one event | `{"reqId":"req-e","res":{"statusCode":404}}` | ✅ JSON on stdout, `kubectl logs` |
-| **Traces** | *Where did the time go* as one request crosses services | members → events → NATS | ⏳ with Events (stage 8/9) |
+| **Traces** | *Where did the time go* as one request crosses services | members → events → NATS | ⏳ with NATS (stage 9), once requests cross services |
 
 You usually start from a **metric** (error rate went up), narrow it with **labels** (only
 `/members/:id`, only 404s), then read the **logs** for those requests. Traces join that
@@ -786,7 +789,122 @@ kubelet scrape, in the built-in "Kubernetes / Compute Resources" dashboards.)
 
 ---
 
-## 10. Using AI tools (learning goal #5)
+## 10. A second bounded context: Events (roadmap stage 8)
+
+Until now, everything about DDD was learned in one service. A bounded context only
+really shows what it's for once there's a second one, with a boundary that code isn't
+allowed to cross. The companion doc [`events-service-ddd.md`](events-service-ddd.md)
+has the diagrams; this section is the summary.
+
+### 10.1 The concept
+
+A **bounded context** is a part of the system with its own model, its own language and
+its own data. In Members, a person is a `Member` with a name and an email. In Events, a
+person is just the `memberId` on an `Attendance`. Events never needs a name to record a
+check-in, so it doesn't keep one.
+
+Inside a context, the new idea is **several aggregates**. Members had one aggregate
+(`Member`). Events has three: `ServiceEvent`, `Attendance` and `VolunteerAssignment`.
+An aggregate is a **consistency boundary**: everything inside one is loaded, checked
+and saved together. So the question for every rule becomes *which aggregate owns it*,
+and for rules no single aggregate can check, *how are they kept anyway*.
+
+Vocabulary:
+
+- **Aggregate root**: the only entry point to an aggregate. Outside code calls its
+  methods; it never edits its fields directly.
+- **Value object**: no id, defined by its values, immutable (`Venue`).
+- **Reference by id**: one aggregate points to another (`Attendance.eventId`) or to
+  another context (`memberId`) by id, never by holding the object.
+- **Domain event**: a past-tense fact (`AttendanceRecorded`), the future contract
+  between contexts.
+
+Four more terms come up as soon as a rule spans several aggregates, because each
+aggregate is saved on its own, without one transaction around all of them:
+
+- **Race condition**: two requests interleave so that both pass a check before either
+  writes. Example: two check-ins for the same member both see "not checked in yet".
+- **Idempotent**: doing it twice has the same effect as doing it once. Cancelling an
+  already-cancelled event is a harmless no-op, so a failed cancel can just be retried.
+- **Optimistic locking**: don't lock anything while working; at the moment of saving,
+  check that nobody else saved since you loaded (a `version` number), and fail with a
+  conflict if they did.
+- **Eventual consistency**: a rule that isn't true at every instant, but becomes true
+  shortly after. Today that happens inside one use case (cancel, then decline the
+  volunteers); at stage 9 it happens across services through NATS events.
+
+### 10.2 How we did it here
+
+- **Three aggregates**, one file each, in
+  [`apps/events-service/src/domain/`](../apps/events-service/src/domain/). `Attendance`
+  is separate from `ServiceEvent` because a service with 500 attendees would otherwise be
+  one huge aggregate that every check-in has to lock (ADR-0004's decision log).
+- **A rule that needs another aggregate**: `Attendance.record()` takes the event and asks
+  [`event.isOpenForCheckIn()`](../apps/events-service/src/domain/ServiceEvent.ts#L256)
+  ([`Attendance.ts:65`](../apps/events-service/src/domain/Attendance.ts#L65)).
+- **Uniqueness across aggregates** ("one check-in per member per event"): the use case
+  checks first for a friendly 409
+  ([`RecordAttendanceUseCase.ts:29`](../apps/events-service/src/application/RecordAttendanceUseCase.ts#L29)),
+  and a unique index ([`schema.prisma:65`](../apps/events-service/prisma/schema.prisma#L65))
+  settles races. Its error is mapped to the same 409
+  ([`uniqueViolation.ts:8`](../apps/events-service/src/infrastructure/uniqueViolation.ts#L8)).
+- **A use case touching many aggregates**: cancelling saves the event, then declines
+  every volunteer. It's idempotent, so a failure part-way is fixed by cancelling again,
+  and a volunteer assigned at the same moment re-checks the event and declines itself
+  ([`CancelEventUseCase.ts`](../apps/events-service/src/application/CancelEventUseCase.ts),
+  [`events-service-ddd.md` §3.3](events-service-ddd.md#33-cancelling-declines-all-volunteers-several-saves-no-transaction)).
+- **Optimistic locking**: a `version` column, and saves that only apply if nobody else
+  saved in between; otherwise `409`
+  ([`events-service-ddd.md` §3.4](events-service-ddd.md#34-two-edits-at-once-optimistic-locking)).
+- **A value object**: [`Venue`](../apps/events-service/src/domain/ServiceEvent.ts#L27),
+  stored as three flat columns ([`schema.prisma:29`](../apps/events-service/prisma/schema.prisma#L29)).
+- **Time as a parameter**: domain methods take `now`, so tests pin the clock
+  ([`ServiceEvent.ts:170`](../apps/events-service/src/domain/ServiceEvent.ts#L170)).
+- **Its own database**: a second Postgres, both in Kubernetes
+  ([`k8s/events-postgres.yaml`](../k8s/events-postgres.yaml)) and in Compose (`events-db`
+  on host port 5433, [`docker-compose.yml`](../docker-compose.yml)). `memberId` columns
+  have no foreign key, because the `Member` table is on another server.
+- **Everything else is a copy of members-service, on purpose**: the
+  [Dockerfile](../apps/events-service/Dockerfile), the [Helm chart](../charts/events-service/values.yaml)
+  (port 3002, metrics 9465, Ingress `/api/events`), the OTel setup, the CI steps and a
+  `deploy.yml` paths-filter entry. Because the shape is the same, the Deploy workflow,
+  `scripts/cluster-up.sh` and the Grafana RED dashboard all handle the new service
+  without special cases. The dashboard's "Service" dropdown lists `events-service` on its own.
+
+### 10.3 Why this way
+
+- **ADR-0004** fixed the model before any code: three aggregates, `Venue`, and
+  `EventType = service | event` (one aggregate for both until their rules diverge).
+- **ADR-0008**: one database per service. Sharing one Postgres would have been less
+  YAML, but then nothing would stop a query joining `Attendance` to `Member`, and the
+  boundary would exist only on paper.
+- **ADR-0007**: sync HTTP now, NATS at stage 9. So the domain events exist as types and
+  return values, but nothing publishes them yet.
+- **Deliberately deferred**: publishing events (CMS-22), the `@cms/events` shared
+  package (created when there's a consumer), checking that a `memberId` exists
+  (a sync call to Members on every check-in would make Events fail whenever Members
+  does), auth (`createdById` comes in the body for now), and the endpoints for
+  start/complete, confirm/decline and QR check-in. The full list is in
+  [`events-service-ddd.md` §8](events-service-ddd.md#8-known-gaps-deliberate).
+
+### 10.4 What setting it up taught (real problems we hit)
+
+| Problem | Lesson |
+| --- | --- |
+| After `prisma generate` for events-service, **members-service** stopped typechecking: `Property 'member' does not exist on type 'PrismaClient'` | pnpm keeps **one** copy of `@prisma/client` for the whole monorepo, and Prisma generates into that shared folder by default. The second service's generate overwrote the first's. Fix: a per-service `output` ([`schema.prisma:10`](../apps/events-service/prisma/schema.prisma#L10)), so each client lives in its own `generated/` folder (copied into the image by its Dockerfile) |
+| The ticket listed four event types, a `Location` object and separate date/time fields; ADR-0004 says otherwise | The ticket was written before the ADR was accepted. The accepted ADR wins, and the differences are recorded ([`events-service-ddd.md` §7](events-service-ddd.md#7-where-the-ticket-and-the-adr-disagreed)) so nobody "fixes" the code back to the ticket |
+| The ticket's acceptance criteria asked for `EventCreated` "published to message bus" | That's stage 9 (CMS-22). Doing it now would mean building NATS inside the wrong ticket. The aggregates return the event so CMS-22 only has to publish it |
+| The copied metrics test failed: it still expected `/members/:id` | `sed` replaced `/members/` but not the regex-escaped `\/members\/`. A copied test that fails at first is good news: it proves the test really checks something |
+| No `minikube tunnel` (needs sudo), so `cms.local` didn't answer | `kubectl -n traefik port-forward svc/traefik 18080:80` plus `curl -H 'Host: cms.local'` goes through the real Ingress rules without root ([`k8s-local-dev.md` §7b](k8s-local-dev.md#7b-deploy-events-service)) |
+| `curl http://…/members?limit=1` failed in zsh with `no matches found` | zsh treats `?` as a glob. Quote URLs that contain `?` or `&` |
+| Code review: an edit made on a stale copy could save `status: scheduled` over a cancellation | "Load, change, save everything" loses updates when two requests overlap. A `version` column turns the silent overwrite into a `409` (optimistic locking). The column came as a **second** migration: `init` was already applied in the cluster, and Prisma rejects an applied migration whose checksum changed |
+| Code review: cancelling saved the event *last*, so a volunteer assigned during the cancel stayed `pending` | Rules across aggregates without a transaction need an argument that **every** interleaving is covered. Saving the event first, plus a re-check on the assign side, closes it. Cancel became idempotent so it stays retryable |
+| After adding the `version` column, editing an event created **before** the migration returned `500` (`Unique constraint failed on the fields: (id)`) | The repository uses version `0` to mean "never saved, INSERT it", and the migration gave existing rows `DEFAULT 0`. So old rows were inserted again. Fix: `DEFAULT 1`, plus a test that inserts a row the way the *previous* release would. Lesson: a migration must be checked against the data that already exists, not just against a fresh database (which is all the integration tests use) |
+| Running the "stop the database" exercise, the 500 body contained Prisma's message and the DB hostname | Default error handlers leak internals. Recorded as a gap for both services rather than fixed in one |
+
+---
+
+## 11. Using AI tools (learning goal #5)
 
 The development method itself is a learning goal: **issue-driven development with Claude
 Code + Linear**. Each chunk of work maps to a Linear ticket (CMS-5, CMS-6, CMS-12 …, visible
@@ -805,7 +923,7 @@ The takeaway as a modern developer: AI tools are most effective when scoped by c
 tickets, anchored by written decisions (ADRs), and verified by tests — exactly the loop
 this repo models.
 
-### 10.1 How the agent is configured (`.claude/`)
+### 11.1 How the agent is configured (`.claude/`)
 
 An AI agent only follows the conventions it can see. Claude Code gives you five ways to
 make it see them. Each one has a different trigger and a different cost:
@@ -838,7 +956,7 @@ Two design points are worth remembering:
 
 ---
 
-## 11. Self-check — can you explain each of these?
+## 12. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -858,6 +976,17 @@ in parentheses (and the file it links) is where to look.
 - [ ] What is the repository pattern buying you? (§3.4)
 - [ ] Difference between a use case and the aggregate? (§3.2 vs §3.5)
 - [ ] What is the ACL rule, and what's a read model? (§3.7)
+
+**A second context: Events**
+
+- [ ] Why is `Attendance` its own aggregate instead of a list inside `ServiceEvent`? (§10.1, §10.2)
+- [ ] "One check-in per member per event": why isn't the use case's check enough on its own, and what closes the gap? (§10.2)
+- [ ] Cancelling saves several aggregates without a transaction. How do idempotency and "save the event first, re-check on assign" keep the rule true? (§10.2, §10.4)
+- [ ] Two admins edit the same event at once. What does the `version` column change about the outcome? (§10.2)
+- [ ] What makes `Venue` a value object, and why does it need no table? (§10.2)
+- [ ] Why do domain methods take a `now` parameter? (§10.2)
+- [ ] Why does `Attendance.memberId` have no foreign key, and why doesn't Events check that the member exists? (§10.2, §10.3)
+- [ ] Why did generating the events-service Prisma client break members-service, and what fixed it? (§10.4)
 
 **Stack & system design**
 
@@ -901,20 +1030,22 @@ in parentheses (and the file it links) is where to look.
 
 **AI tools**
 
-- [ ] When would you put a convention in CLAUDE.md, in a rule, or in a skill? (§10.1)
-- [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§10.1)
-- [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§10.1)
-- [ ] How does `/start-ticket` decide which ticket is next? (§10.1)
+- [ ] When would you put a convention in CLAUDE.md, in a rule, or in a skill? (§11.1)
+- [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§11.1)
+- [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§11.1)
+- [ ] How does `/start-ticket` decide which ticket is next? (§11.1)
 
 ---
 
-## 12. Where to go next
+## 13. Where to go next
 
-The next stage is the **Events service** (roadmap stage 8). It repeats the DDD pattern in
-a second bounded context and gets CI/CD *and* observability for free by following the
-same conventions (`apps/<svc>`, `charts/<svc>`, `src/instrumentation.ts`, a ServiceMonitor).
-It appears in the RED dashboard's "Service" dropdown automatically. `/new-service`
-has the checklist.
+The next stage is **NATS** (roadmap stage 9, CMS-22): the two contexts start talking.
+The pieces are waiting for it. Events already returns `AttendanceRecorded` and
+`EventCancelled` from its aggregates (§10.3), and Members returns `MemberArchived`.
+Stage 9 publishes them, moves the shared payloads into `packages/` (`@cms/events`), and
+lets each side react: Members keeps an attendance summary, and Events declines an
+archived member's future volunteer slots. That's **eventual consistency**: the other
+side catches up a moment later, instead of both changing in one transaction.
 
 Observability has natural next steps that wait for a real need (ADR-0009):
 
@@ -929,7 +1060,8 @@ To rebuild everything from scratch at any time: `scripts/cluster-up.sh --fresh` 
 
 Read, in this order, to go deeper than this guide:
 
-1. [`members-service-ddd.md`](members-service-ddd.md) — DDD with full diagrams
+1. [`members-service-ddd.md`](members-service-ddd.md) — DDD with full diagrams, then
+   [`events-service-ddd.md`](events-service-ddd.md) for what a second context adds
 2. [`docker-local-dev.md`](docker-local-dev.md) — the container workflow, hands-on
 3. [`k8s-local-dev.md`](k8s-local-dev.md) — the Kubernetes deploy, hands-on
 4. [`ci-cd.md`](ci-cd.md) — the pipeline, runner setup and debugging

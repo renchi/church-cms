@@ -91,7 +91,7 @@ EOF
 
 ### 3. Make the container images public (once, after the first deploy)
 
-The first push creates two packages: `ghcr.io/renchi/church-cms/members-service` and `.../web`. minikube pulls them without credentials, so they must be public. For each package, go to GitHub → your profile → **Packages** → package → **Package settings** → **Change visibility** → Public.
+The first push of each service creates its package: `ghcr.io/renchi/church-cms/members-service`, `.../events-service` and `.../web`. minikube pulls them without credentials, so they must be public. **This repeats for every new service:** its first Deploy fails with `ImagePullBackOff` (Helm rolls back) until you make its package public and re-run the job with `gh run rerun <id> --failed`. For each package, go to GitHub → your profile → **Packages** → package → **Package settings** → **Change visibility** → Public.
 
 (The alternative is an `imagePullSecret` in the cluster. Public images are simpler, and the repo is public anyway.)
 
@@ -111,20 +111,20 @@ All the places to watch the pipeline and cluster (URLs, dashboards, commands) ar
 | Watch a deploy | `gh run watch` (or the **Actions** tab) |
 | Redeploy everything without a code change | `gh workflow run deploy.yml` |
 | See what image is running | `kubectl get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{..image}{"\n"}{end}'` |
-| See migration output | `kubectl logs <members-pod> -c migrate` |
+| See migration output | `kubectl logs <members-pod> -c migrate` (same for an events-service Pod) |
 | Roll back | `helm rollback <release>` (or revert the commit; the next deploy ships the old code) |
 
 Only services whose files changed are rebuilt:
 
 - `apps/<svc>/**` and `charts/<svc>/**` trigger that service only.
-- Shared files (`pnpm-lock.yaml`, `package.json`, `tsconfig.base.json`, `packages/**`, the workflow itself) trigger both.
-- A manual run always deploys both.
+- Shared files (`pnpm-lock.yaml`, `package.json`, `tsconfig.base.json`, `packages/**`, the workflow itself) trigger every service.
+- A manual run always deploys every service (members-service, events-service, web).
 
 Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA tag makes it obvious which commit is running and makes every deploy a real change that Kubernetes rolls out.
 
 ### Migrations and rollbacks (expand/contract)
 
-The members-service `migrate` init container applies migrations **before** the new Pods are known to be healthy. If they then fail readiness, `helm --rollback-on-failure` rolls back the image, but **not the schema**. The old code then runs against the new schema.
+Each service's `migrate` init container (members-service and events-service) applies migrations **before** the new Pods are known to be healthy. If they then fail readiness, `helm --rollback-on-failure` rolls back the image, but **not the schema**. The old code then runs against the new schema.
 
 So every migration must work with **both** the old and new code:
 
@@ -133,6 +133,20 @@ So every migration must work with **both** the old and new code:
 | Add a column | add it nullable / with a default | make it required, if needed |
 | Rename a column | add new column, write to both, backfill | read from new, drop old |
 | Drop a column | stop reading/writing it in code | drop it |
+
+A real example: events-service's second migration
+([`20261010150000_service_event_version`](../apps/events-service/prisma/migrations/20261010150000_service_event_version/migration.sql))
+adds `version` **with a default**, so the previous release, which doesn't know the
+column, can still insert rows. The default also had to suit rows that *already exist*:
+`0` broke editing them, `1` didn't (study-guide §10.4).
+
+### Adding a new service to the pipeline
+
+What CMS-18 needed for events-service, in order:
+
+1. `deploy.yml`: a paths-filter entry and a place in the manual-run list. `ci.yml`: its `prisma generate` and `test:coverage` steps.
+2. **Its database in the cluster before the first merge.** Deploy only runs Helm; it never applies `k8s/*.yaml`. Without `events-postgres`, the `migrate` init container can't connect, `--wait` times out and the release fails. `scripts/cluster-up.sh` applies it.
+3. After the first Deploy: make the new GHCR package public (setup step 3) and re-run the job.
 
 ---
 
@@ -144,7 +158,8 @@ So every migration must work with **both** the old and new code:
 | `docker: permission denied` in runner | Runner user not in `docker` group: `sudo usermod -aG docker $USER`, then restart the service |
 | `kubernetes cluster unreachable` | minikube stopped: `minikube start` |
 | `helm: command not found` | Runner PATH is stale; see the note in setup step 1 |
-| Pods `ImagePullBackOff` | GHCR package still private (setup step 3), or the push failed |
+| Pods `ImagePullBackOff` | GHCR package still private (setup step 3; happens once per new service), or the push failed |
+| New service's deploy times out, `migrate` init container keeps restarting | Its Postgres isn't in the cluster: `kubectl get deploy <svc>-postgres`. Run `scripts/cluster-up.sh` ("Adding a new service" above) |
 | Helm "UPGRADE FAILED … rolled back" | New Pods never became Ready. Check `kubectl describe pod` and `kubectl logs <pod> -c migrate` |
 | `denied: permission_denied` on push | Package not linked to the repo. In package settings → **Manage Actions access**, add `church-cms` with write access |
 | CI `integration-tests` fails, others pass | Testcontainers couldn't start Postgres. Check the job log for Docker errors |

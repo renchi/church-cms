@@ -1,0 +1,11 @@
+-- Optimistic locking for ServiceEvent (code review of CMS-18).
+-- A new migration rather than an edit to "init": init has already been applied
+-- to the cluster's database, and Prisma refuses a migration whose checksum
+-- changed after it was applied.
+--
+-- DEFAULT 1, not 0: the repository treats version 0 as "never saved, INSERT
+-- it". Existing rows must therefore start at 1, or editing an event created
+-- before this migration would try to insert it again (duplicate id → 500).
+-- The column has a default, so the previous release keeps working against the
+-- new schema: an "expand" step (study-guide §7.5).
+ALTER TABLE "ServiceEvent" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 1;

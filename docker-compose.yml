@@ -10,6 +10,8 @@
 # On startup the order is: members-db → members-migrate (applies the schema, then
 # exits) → members-service → web. So a fresh "docker compose up" gives you a
 # working, migrated database and a running frontend with no manual steps.
+# events-service follows the same chain with its OWN database (events-db →
+# events-migrate → events-service): one Postgres per service, ADR-0008.
 #
 # ── Production-shaped vs. dev hot-reload ─────────────────────────────────────
 # This file is production-shaped: the web service runs "next build + next start"
@@ -50,6 +52,19 @@ x-members-base: &members-base
     # here differs from apps/members-service/.env (which uses localhost for
     # running the service directly on your machine, outside Docker).
     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@members-db:5432/${POSTGRES_DB}
+  networks:
+    - cms-network
+
+# The same pattern for events-service (CMS-18). Its database is a separate
+# container, so its DATABASE_URL points at "events-db", not "members-db".
+x-events-base: &events-base
+  build:
+    context: .
+    dockerfile: apps/events-service/Dockerfile
+    network: host
+  image: church-cms-events-service:latest
+  environment:
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@events-db:5432/events_db
   networks:
     - cms-network
 
@@ -130,6 +145,46 @@ services:
         # exists, is reachable, AND has the current schema applied.
         condition: service_completed_successfully
 
+  # ─── Events: database, migration job, service ──────────────────────────────
+  # A second, independent Postgres. Nothing in members-db is visible from here
+  # and vice versa; the two services share data only by id (memberId).
+  events-db:
+    image: postgres:16-alpine
+    env_file: .env
+    environment:
+      # Overrides POSTGRES_DB from .env (members_db) for this container only.
+      POSTGRES_DB: events_db
+    ports:
+      # 5433 on the host, because members-db already has 5432. Inside the
+      # Docker network both listen on 5432; only the host-side port differs.
+      - "5433:5432"
+    volumes:
+      - events-db-data:/var/lib/postgresql/data
+    networks:
+      - cms-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  events-migrate:
+    <<: *events-base
+    command: ["node_modules/.bin/prisma", "migrate", "deploy"]
+    restart: "no"
+    depends_on:
+      events-db:
+        condition: service_healthy
+
+  events-service:
+    <<: *events-base
+    ports:
+      - "3002:3002"
+    depends_on:
+      events-migrate:
+        condition: service_completed_successfully
+
   # ─── Web frontend ───────────────────────────────────────────────────────────
   web:
     build:
@@ -207,6 +262,7 @@ volumes:
   # Top-level volume declaration — makes the name "members-db-data" available
   # across all services. Docker creates it on first run if it doesn't exist.
   members-db-data:
+  events-db-data:
 
 networks:
   # All services share this bridge network so they can reach each other by
