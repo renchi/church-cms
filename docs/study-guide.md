@@ -489,7 +489,7 @@ ones that say "create this":
 | `kubectl apply -f k8s/postgres.yaml` | ✅ prints `unchanged` | compares the desired with the live object, and changes only differences |
 | `minikube start` / `addons enable` | ✅ no-op if already done | |
 
-A re-run of the script takes ~26 s and restarts nothing. Helm still records a new *revision*
+A run from nothing (`--fresh`) took ~4.7 min, most of it image builds. A re-run takes ~26 s and restarts nothing. Helm still records a new *revision*
 (`helm history`), but because the rendered Pod spec is identical, the Deployment doesn't roll.
 
 **Pin versions** (`--version 41.6.1`, `--version 92.2.0`). Without a pin, "the same script" installs
@@ -504,9 +504,22 @@ before members-service's migration init container runs.
 Pods are Ready. The script ends with a **smoke test** (health endpoint, web, Grafana, Prometheus
 targets) because "the commands succeeded" isn't the same as "the system works".
 
-**Automate what's safe; check what isn't.** `minikube tunnel` runs forever, and `/etc/hosts`
-needs `sudo`. A script that silently edits system files or asks for root is a script people
-stop trusting. So it *checks* both and prints the exact command to run.
+**Automating root steps: visibly, narrowly, reversibly.** `minikube tunnel` and `/etc/hosts`
+both need `sudo`. The first version only *checked* them, on the reasoning that a script which
+silently edits system files is a script people stop trusting. But every `--fresh` gives
+Traefik a **new IP**, so that left a manual step after every rebuild. The script now does both,
+under rules that keep it trustworthy:
+
+- It uses sudo **only when something is wrong**. A healthy run never asks for a password.
+- It **shows the diff** before changing `/etc/hosts`, and saves a backup (`/etc/hosts.church-cms.bak`).
+- It owns **one marked block** (`# BEGIN church-cms` … `# END church-cms`). Old lines for our
+  names are removed, and every other line stays byte-for-byte. This was tested on a copy,
+  including a line that mixes our names with others.
+- It starts the tunnel **in the background** (`nohup … &`, log in `/tmp/minikube-tunnel.log`).
+- **`--no-sudo`** brings back check-only mode, for CI or an agent that can't type a password.
+
+The trade-off changed because the cost of the manual step changed. That's worth noticing:
+"don't automate X" is rarely a permanent rule.
 
 **Script + runbook, not script instead of runbook.** Each step prints its runbook section
 (`==> [k8s-local-dev §2]`). The runbook explains *why*; the script makes it *repeatable*. When
@@ -520,6 +533,8 @@ What setting it up taught:
 | The old runbook used `helm install`, so it couldn't be re-run | Prefer declarative, idempotent commands (`upgrade --install`, `apply`) everywhere, not only in scripts |
 | Moving Traefik's `--set` flags into `k8s/traefik-values.yaml` could silently change it | `diff <(helm template … -f values) <(helm template … --set …)` proved the two render identically before switching |
 | Helm prints long NOTES after every install, which buried the useful output | Filter to the `STATUS` line, while `set -o pipefail` keeps Helm's failures fatal (tested by pointing it at a missing chart) |
+| On the first `--fresh` run, minikube warned that v1.39+ defaults to the **containerd** runtime | Our image builds depend on `minikube docker-env`, which needs the Docker runtime. Pin what you depend on (`--container-runtime docker`), just like chart versions. Read warnings in the output: they're tomorrow's failures |
+| After `sudo pkill -f "minikube tunnel"`, the script said the tunnel was fine, and it *was* still working | Two things outlive the tunnel: the IP recorded on the Traefik Service, and the route `10.96.0.0/12 via 192.168.49.2` the tunnel added (gone after a reboot). Test **behaviour** ("can I reach Traefik?"), not a status field that only reports what was last true |
 | `--skip-build` could quietly deploy an old image (`members-service:local` was 4 days old, from before OTel) | The script prints each reused image's build time. Fast paths need visible warnings |
 
 Next steps for this idea (not needed yet): `make` targets, **helmfile** (declare all Helm releases
