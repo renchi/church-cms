@@ -193,7 +193,11 @@ step "k8s-local-dev §3" "minikube tunnel and /etc/hosts"
 network_ok=true
 
 traefik_ip() { kubectl -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null; }
-has_traefik_ip() { [[ -n "$(traefik_ip)" ]]; }
+# Is Traefik actually reachable from this machine? Don't trust the IP recorded on
+# the Service alone: Kubernetes keeps it after the tunnel dies, and the route the
+# tunnel added can outlive it too (until a reboot). Any HTTP answer counts, even
+# a 404; only "can't connect" means we need a tunnel.
+traefik_reachable() { local ip; ip=$(traefik_ip); [[ -n "$ip" ]] && curl -s -m 3 -o /dev/null "http://$ip/"; }
 # sudo is usable if allowed and either passwordless or we have a terminal to type into.
 can_sudo() { $USE_SUDO && { sudo -n true 2>/dev/null || [[ -t 0 ]]; }; }
 
@@ -221,25 +225,25 @@ render_hosts() {
 }
 
 # 3a. minikube tunnel: gives Traefik's LoadBalancer Service a reachable IP.
-if ! has_traefik_ip; then
+if ! traefik_reachable; then
   if can_sudo; then
     warn "minikube tunnel is not running; starting it in the background (needs sudo)."
     sudo -v
     # nohup + & = keeps running after this script ends. Log: $TUNNEL_LOG
     sudo -E bash -c 'nohup minikube tunnel >"$1" 2>&1 &' _ "$TUNNEL_LOG"
-    if wait_for 60 "Traefik external IP from minikube tunnel" has_traefik_ip; then
+    if wait_for 60 "Traefik reachable through minikube tunnel" traefik_reachable; then
       ok "minikube tunnel started (log: $TUNNEL_LOG; stop it with: sudo pkill -f 'minikube tunnel')"
     fi
   fi
 fi
 ip=$(traefik_ip)
-if [[ -z "$ip" ]]; then
+if ! traefik_reachable; then
   network_ok=false
-  fail "Traefik has no external IP; minikube tunnel is not running."
+  fail "Traefik isn't reachable${ip:+ at $ip}; minikube tunnel is not running."
   warn "Start it in another terminal and leave it open:  sudo -E minikube tunnel"
   warn "Then run this script again (with --skip-build) to finish the checks."
 else
-  ok "Traefik external IP: $ip (minikube tunnel is running)"
+  ok "Traefik reachable at $ip"
 
   # 3b. /etc/hosts: point our hostnames at that IP. The IP changes whenever the
   # cluster is recreated (--fresh), which is why this is automated.
