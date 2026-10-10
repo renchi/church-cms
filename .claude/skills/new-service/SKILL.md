@@ -38,7 +38,8 @@ Plan this in plan mode first: it touches many files.
 
 - [ ] `charts/<svc>/`: copy `charts/members-service` (deployment with a migrations init container, service, configmap, secret, hpa, ingress, middleware, servicemonitor). Ingress path `/api/<context>`.
 - [ ] Postgres for the service: a StatefulSet and PVC like `k8s/postgres.yaml`
-- [ ] Grafana dashboard ConfigMap, or add the new `job` to the existing dashboard
+- [ ] Grafana: the RED dashboard's "Service" dropdown picks up the new `job` automatically (via `target_info`). Check that it appears
+- [ ] `scripts/cluster-up.sh`: add the new Postgres, the image build and the `helm upgrade --install` (with `metrics.serviceMonitor.enabled=true`), plus a smoke-test line for the new health endpoint
 
 **CI/CD:**
 

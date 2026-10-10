@@ -97,7 +97,7 @@ The first push creates two packages: `ghcr.io/renchi/church-cms/members-service`
 
 ### 4. Start minikube
 
-The runner deploys into whatever `kubectl` points at, so minikube must be running (`minikube start`). The runner service starts by itself at boot, but **minikube does not**: after a reboot, run `minikube start` again. Postgres and Traefik must be installed too; see [k8s-local-dev.md](k8s-local-dev.md).
+The runner deploys into whatever `kubectl` points at, so minikube must be running (`minikube start`). The runner service starts by itself at boot, but **minikube does not**: after a reboot, run `minikube start` again. Postgres, Traefik and the monitoring stack must be installed too: run `scripts/cluster-up.sh` once (see [k8s-local-dev.md](k8s-local-dev.md)).
 
 ---
 

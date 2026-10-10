@@ -21,6 +21,9 @@ members-service Pod                         monitoring namespace
 Prerequisites: the cluster from [`k8s-local-dev.md`](k8s-local-dev.md) is running
 (minikube, Traefik, members-service), and `minikube tunnel` is open.
 
+> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs steps 1–3 below (and the
+> whole k8s runbook), then checks steps 4–5 for you. Read on to learn what it does.
+
 ---
 
 ## 1. Enable metrics-server

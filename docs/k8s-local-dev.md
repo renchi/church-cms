@@ -2,6 +2,20 @@
 
 This guide walks through deploying the full church-cms stack (Members service + web frontend) to a local minikube cluster with Traefik as the Ingress controller. Follow it top to bottom — each step depends on the previous one.
 
+> **Quick start: one command.** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs every step
+> below, plus the monitoring stack from [`observability.md`](observability.md), in the right order,
+> then smoke-tests the result. Each line it prints is labelled with the section it comes from
+> (`==> [k8s-local-dev §2] …`). It's safe to re-run at any time.
+>
+> ```bash
+> scripts/cluster-up.sh               # create or update everything
+> scripts/cluster-up.sh --skip-build  # reuse the images already in minikube
+> scripts/cluster-up.sh --fresh       # delete the cluster first (wipes Postgres data!)
+> ```
+>
+> The script is a convenience, not a replacement: **read the steps below** to learn what each one
+> does. It only *checks* `minikube tunnel` and `/etc/hosts` (§3), because both need `sudo`.
+
 ---
 
 ## Prerequisites
@@ -19,8 +33,15 @@ helm version       # v4.x
 ## 1. Start minikube
 
 ```bash
-minikube start
+minikube start --memory 6g --cpus 4
 ```
+
+> **Why `--memory 6g`?** With the docker driver, minikube's node is a container with a memory cap
+> (the default here was 3 GB). The apps, Traefik and the monitoring stack already use ~2.7 GB of
+> it, and the Events service and NATS come next. The cap can only be set when the cluster is
+> **created**: an existing cluster needs `minikube delete` (or `scripts/cluster-up.sh --fresh`).
+> Check the real cap with `docker inspect minikube --format '{{.HostConfig.Memory}}'`. Note that
+> `free` *inside* the node shows the host's RAM, not the cap.
 
 Expected output ends with:
 ```
@@ -45,12 +66,14 @@ Traefik is the Ingress controller — it watches Ingress resources and routes ex
 helm repo add traefik https://traefik.github.io/charts
 helm repo update
 
-helm install traefik traefik/traefik \
+helm upgrade --install traefik traefik/traefik \
+  --version 41.6.1 \
   --namespace traefik --create-namespace \
-  --set ports.traefik.expose.default=true \
-  --set ingressRoute.dashboard.enabled=false \
-  --set api.insecure=true
+  -f k8s/traefik-values.yaml
 ```
+
+The settings live in [`k8s/traefik-values.yaml`](../k8s/traefik-values.yaml), with a comment on
+each. `--version` pins the chart so a reinstall gives the same Traefik.
 
 Wait for Traefik to be ready:
 

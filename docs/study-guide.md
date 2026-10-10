@@ -471,6 +471,60 @@ Pod never becomes Ready, so a broken migration stops the rollout.
   learning. Real deployments inject them from outside (platform secrets, External
   Secrets, Sealed Secrets).
 
+### 7.7 Automating the runbook: an idempotent bootstrap script
+
+Bringing the cluster up by hand means ~15 steps across two runbooks, and the details are easy to
+get wrong: the Traefik flags, the install order, waiting for things to be ready. The
+[`scripts/cluster-up.sh`](../scripts/cluster-up.sh) script runs those steps for you. It's built
+on a few ideas that apply to any infrastructure automation.
+
+**Idempotent = safe to run again.** Running it once or five times ends in the same state. That
+comes from using *declarative* commands that say what should exist, rather than *imperative*
+ones that say "create this":
+
+| Command | Second run | Why |
+| --- | --- | --- |
+| `helm install traefik …` (the old runbook) | ❌ fails: *cannot re-use a name* | "create" can't succeed twice |
+| `helm upgrade --install traefik …` | ✅ upgrades to the same values | installs if missing, otherwise brings it to the declared state |
+| `kubectl apply -f k8s/postgres.yaml` | ✅ prints `unchanged` | compares the desired with the live object, and changes only differences |
+| `minikube start` / `addons enable` | ✅ no-op if already done | |
+
+A re-run of the script takes ~26 s and restarts nothing. Helm still records a new *revision*
+(`helm history`), but because the rendered Pod spec is identical, the Deployment doesn't roll.
+
+**Pin versions** (`--version 41.6.1`, `--version 92.2.0`). Without a pin, "the same script" installs
+whatever the latest chart is on the day you run it. Pinning makes a run months later reproduce what was tested.
+
+**Order is a dependency graph.** The monitoring stack installs the `ServiceMonitor` **CRD**, and
+the members-service chart *uses* that CRD. So monitoring must come before the apps, or the app
+install fails with *no matches for kind "ServiceMonitor"*. Similarly, Postgres must be ready
+before members-service's migration init container runs.
+
+**Wait for readiness, then prove it works.** `--wait` and `kubectl rollout status` block until
+Pods are Ready. The script ends with a **smoke test** (health endpoint, web, Grafana, Prometheus
+targets) because "the commands succeeded" isn't the same as "the system works".
+
+**Automate what's safe; check what isn't.** `minikube tunnel` runs forever, and `/etc/hosts`
+needs `sudo`. A script that silently edits system files or asks for root is a script people
+stop trusting. So it *checks* both and prints the exact command to run.
+
+**Script + runbook, not script instead of runbook.** Each step prints its runbook section
+(`==> [k8s-local-dev §2]`). The runbook explains *why*; the script makes it *repeatable*. When
+they disagree, that's a bug in one of them.
+
+What setting it up taught:
+
+| Problem | Lesson |
+| --- | --- |
+| The minikube node was capped at **3 GB** and already using ~2.7 GB. Earlier planning had said "~7 GB free, no bump needed" | `free` *inside* the node shows the host's RAM. The real cap is on the container: `docker inspect minikube --format '{{.HostConfig.Memory}}'`. New clusters now get `--memory 6g`. The cap can only be set at creation |
+| The old runbook used `helm install`, so it couldn't be re-run | Prefer declarative, idempotent commands (`upgrade --install`, `apply`) everywhere, not only in scripts |
+| Moving Traefik's `--set` flags into `k8s/traefik-values.yaml` could silently change it | `diff <(helm template … -f values) <(helm template … --set …)` proved the two render identically before switching |
+| Helm prints long NOTES after every install, which buried the useful output | Filter to the `STATUS` line, while `set -o pipefail` keeps Helm's failures fatal (tested by pointing it at a missing chart) |
+| `--skip-build` could quietly deploy an old image (`members-service:local` was 4 days old, from before OTel) | The script prints each reused image's build time. Fast paths need visible warnings |
+
+Next steps for this idea (not needed yet): `make` targets, **helmfile** (declare all Helm releases
+in one file), or **Tilt**/**Skaffold** (rebuild and redeploy on every code change).
+
 ---
 
 ## 8. CI/CD (roadmap stage 6)
@@ -806,6 +860,10 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why does `/api/members/health` reach the service as `/health`? (§7.4)
 - [ ] Why must migrations be backward compatible when the image can be rolled back? (§7.5)
 - [ ] Why couldn't the HPA scale before stage 7, and what fixed it? (§7.6, §9.7)
+- [ ] Why can `scripts/cluster-up.sh` be run twice, but the old `helm install traefik` couldn't? (§7.7)
+- [ ] Why must the monitoring stack be installed before members-service? (§7.7)
+- [ ] How do you find minikube's real memory cap, and why is `free` inside the node misleading? (§7.7)
+- [ ] Why does the script check `/etc/hosts` and the tunnel instead of fixing them? (§7.7)
 
 **CI/CD**
 
@@ -851,6 +909,8 @@ Observability has natural next steps that wait for a real need (ADR-0009):
   which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
 - **Log aggregation**: Loki, so logs from all Pods are searchable in Grafana instead of
   one `kubectl logs` at a time.
+
+To rebuild everything from scratch at any time: `scripts/cluster-up.sh --fresh` (§7.7).
 
 Read, in this order, to go deeper than this guide:
 

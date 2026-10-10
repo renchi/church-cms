@@ -21,6 +21,9 @@ pnpm format                           # format with Prettier
 pnpm --filter members-service dev        # run a single service
 pnpm --filter members-service test:unit  # fast: unit tests only
 pnpm --filter members-service test       # unit + integration
+
+scripts/cluster-up.sh                    # bring up / update the whole minikube stack, then smoke-test it
+scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postgres data)
 ```
 
 ## Workflow
@@ -46,7 +49,8 @@ Never work directly on main. Scaffold new services with `/new-service`, and only
 apps/       # deployable services (members-service, events-service, web)
 packages/   # shared packages (e.g. @cms/events for domain event types)
 charts/     # one Helm chart per deployable app
-k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik dashboard, ...)
+k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik, monitoring, ...)
+scripts/    # cluster-up.sh: idempotent bootstrap that runs the k8s + observability runbooks
 docs/       # learning material and runbooks (see Docs index)
 docs/adr/   # architecture decision records. Read these before changing architecture
 .claude/    # agent config: rules/ (path-scoped conventions), skills/, hooks/
