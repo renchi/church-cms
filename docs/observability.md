@@ -148,7 +148,7 @@ ConfigMap), or edit `charts/members-service/values.yaml`.
 | `helm upgrade members-service` fails with *no matches for kind "ServiceMonitor"* | The monitoring stack isn't installed, so the CRD is missing. Do step 2 first |
 | Target missing from Prometheus → Targets | The Operator needs ~1 minute to reload after a new ServiceMonitor. Still missing? The ServiceMonitor needs the label `release: kube-prometheus-stack`: `kubectl get servicemonitor -A --show-labels` |
 | Target **DOWN**, `connection refused` | The Pod isn't serving :9464. The container must start with `node --import ./dist/instrumentation.js` (Dockerfile `CMD`), and the Service needs a port named `metrics` |
-| Dashboard panels say **No data** | Is the "Service" dropdown set? Has there been traffic in the last few minutes? `rate()` needs at least two scrapes, so wait ~1 minute after the first requests |
+| Dashboard panels say **No data** (but "Pods scraped" shows 2) | **No traffic since the Pods started.** Counters live in each Pod's memory and restart from zero on every deploy or restart; until the first request, the request metric doesn't exist at all. Send some requests (exercise 3), then wait ~1 minute: `rate()` needs at least two scrapes |
 | A series with an empty route | Requests that matched no route (e.g. 404 on an unknown path) have no `http_route`. That's expected |
 | `kubectl get hpa` shows `<unknown>` | metrics-server not enabled (step 1), or the Pods are only a few minutes old |
 | Prometheus alerts firing about etcd/scheduler | These are disabled in our values file because minikube doesn't expose them. Re-run step 2 if you installed with defaults |

@@ -7,8 +7,10 @@
 #
 #   kubectl apply -f k8s/monitoring/service-red-dashboard.yaml
 #
-# The "Service" dropdown lists every `job` that reports HTTP metrics, so the
-# Events service will appear here automatically once it has a ServiceMonitor.
+# The "Service" dropdown lists every `job` with a `target_info` series. The OTel
+# SDK publishes target_info (service name, host, SDK version) from the moment a
+# service starts, so services appear even before their first request, and the
+# Events service will show up automatically once it has a ServiceMonitor.
 # Each panel's description (hover the ⓘ in Grafana) explains its PromQL;
 # docs/study-guide.md walks through the queries in detail.
 apiVersion: v1
@@ -45,10 +47,10 @@ data:
               "uid": "prometheus"
             },
             "query": {
-              "query": "label_values(http_server_request_duration_count, job)",
+              "query": "label_values(target_info, job)",
               "refId": "job"
             },
-            "definition": "label_values(http_server_request_duration_count, job)",
+            "definition": "label_values(target_info, job)",
             "refresh": 2,
             "current": {
               "text": "members-service",
