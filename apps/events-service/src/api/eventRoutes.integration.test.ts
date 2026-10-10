@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
+import { ConflictError } from "../domain/errors.js";
 import { PrismaAttendanceRepository } from "../infrastructure/PrismaAttendanceRepository.js";
 import { PrismaClient } from "../infrastructure/prisma.js";
 import { PrismaServiceEventRepository } from "../infrastructure/PrismaServiceEventRepository.js";
@@ -253,19 +254,76 @@ describe("Events API (integration)", () => {
       const statuses = await prisma.volunteerAssignment.findMany({ select: { status: true } });
       expect(statuses).toEqual([{ status: "declined" }, { status: "declined" }]);
 
-      // A cancelled event accepts no check-ins and can't be cancelled again.
+      // A cancelled event accepts no check-ins and stays cancelled.
       const checkIn = await app.inject({
         method: "POST",
         url: `/events/${eventId}/attendance`,
         payload: { memberId: MEMBER },
       });
       expect(checkIn.statusCode).toBe(400);
+      const update = await app.inject({
+        method: "PUT",
+        url: `/events/${eventId}`,
+        payload: { title: "Back on" },
+      });
+      expect(update.statusCode).toBe(400);
+      // Cancelling again is allowed and changes nothing (idempotent, so a
+      // half-finished cancel can be retried; see CancelEventUseCase).
       const again = await app.inject({
         method: "POST",
         url: `/events/${eventId}/cancel`,
         payload: { reason: "Again" },
       });
-      expect(again.statusCode).toBe(400);
+      expect(again.statusCode).toBe(204);
+      const row = await prisma.serviceEvent.findUnique({ where: { id: eventId } });
+      expect(row?.status).toBe("cancelled");
+    });
+  });
+
+  describe("optimistic locking", () => {
+    it("can edit a row written before the version column existed", async () => {
+      // The previous release doesn't know about `version`, so its INSERTs leave
+      // it to the column default. Those rows must load as "already saved".
+      await prisma.$executeRaw`
+        INSERT INTO "ServiceEvent" (id, title, "eventType", "venueName", "scheduledAt",
+          "durationMinutes", "createdById", "updatedAt")
+        VALUES ('old-release-event', 'Old', 'service', 'Main Sanctuary',
+          now() + interval '1 day', 60, ${ADMIN}, now())`;
+
+      const res = await app.inject({
+        method: "PUT",
+        url: "/events/old-release-event",
+        payload: { title: "Edited" },
+      });
+
+      expect(res.statusCode).toBe(204);
+      const row = await prisma.serviceEvent.findUnique({ where: { id: "old-release-event" } });
+      expect(row).toMatchObject({ title: "Edited", version: 2 });
+    });
+
+    it("rejects a save based on a stale copy instead of overwriting the newer change", async () => {
+      const id = await createEvent();
+      const repo = new PrismaServiceEventRepository(prisma);
+
+      // Two requests load the same event (version 1)...
+      const editor = await repo.findById(id);
+      const canceller = await repo.findById(id);
+
+      // ...one cancels it and saves first (version 1 → 2)...
+      canceller!.cancel("Storm warning");
+      await repo.save(canceller!);
+
+      // ...then the other saves its edit, made on the version-1 copy. Without
+      // the version check this would write status "scheduled" back.
+      editor!.update({ title: "Harvest Service" });
+      await expect(repo.save(editor!)).rejects.toThrow(ConflictError);
+
+      const row = await prisma.serviceEvent.findUnique({ where: { id } });
+      expect(row).toMatchObject({
+        status: "cancelled",
+        title: "Sunday Morning Service",
+        version: 2,
+      });
     });
   });
 });

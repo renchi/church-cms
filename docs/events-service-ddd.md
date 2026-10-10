@@ -90,19 +90,39 @@ can win, and the loser's Prisma error `P2002` is translated into the same
 An integration test fires two check-ins at once and expects exactly one `201` and one
 `409` ([`eventRoutes.integration.test.ts:193`](../apps/events-service/src/api/eventRoutes.integration.test.ts#L193)).
 
-### 3.3 "Cancelling declines all volunteers": one use case, several saves, retry-safe order
+### 3.3 "Cancelling declines all volunteers": several saves, no transaction
 
-[`CancelEventUseCase`](../apps/events-service/src/application/CancelEventUseCase.ts#L14)
+[`CancelEventUseCase`](../apps/events-service/src/application/CancelEventUseCase.ts)
 changes one `ServiceEvent` and every `VolunteerAssignment` for it. Those are separate
-saves, not one transaction, so a crash half-way is possible. The order makes it safe:
+saves, not one transaction. Two things can go wrong, and each has a fix:
 
-1. `event.cancel()` validates the transition, but nothing is saved yet.
-2. Each assignment is declined and saved. Declining twice is a no-op.
-3. The event is saved **last**.
+- **A crash half-way.** Cancel is **idempotent**: cancelling an already-cancelled
+  event skips the event and just declines the assignments again (declining twice is a
+  no-op). So calling cancel again finishes the job, and returns `204` again.
+- **A volunteer assigned at the same moment.** Cancel saves the event **first**, then
+  reads the assignments to decline ("the sweep"). `AssignVolunteerUseCase` saves its
+  assignment, then **re-reads the event**, and declines its own assignment if the event
+  is now cancelled. Either the sweep sees the new assignment, or the new assignment
+  sees the cancelled event. There is no ordering where both miss.
 
-If step 2 fails, the event is still `scheduled` in the database, so calling cancel
-again redoes everything. At stage 9 the declines can move into a handler for the
+The first version of this use case saved the event _last_, and the code review found the
+race: an assignment created after the sweep but before the event save stayed `pending`
+on a cancelled event. At stage 9 the sweep can move into a handler for the
 `EventCancelled` event. That's **eventual consistency**, the same idea at a bigger scale.
+
+### 3.4 Two edits at once: optimistic locking
+
+Two admins open the same event. One cancels it; the other, a second later, saves a new
+title from the copy they loaded _before_ the cancel. A plain "save everything" would
+write `status: scheduled` back, and the cancellation would silently disappear.
+
+Each `ServiceEvent` row has a `version`. The repository updates only
+`WHERE id = … AND version = <the version we loaded>`, and bumps it
+([`PrismaServiceEventRepository.save`](../apps/events-service/src/infrastructure/PrismaServiceEventRepository.ts)).
+If someone saved in between, no row matches, and the request fails with `409` ("reload
+and try again") instead of overwriting their change. It's "optimistic" because nothing
+is locked while the request runs; the check happens only at the moment of writing.
+The integration test "optimistic locking" plays this exact story.
 
 ---
 
@@ -136,15 +156,15 @@ Production passes nothing and gets the real clock. Tests pass a fixed date, so
 Behind Traefik, every path is prefixed with `/api/events`, which the Ingress strips
 (study-guide §7.4).
 
-| Method and path               | Use case                  | Success            | Errors                                           |
-| ----------------------------- | ------------------------- | ------------------ | ------------------------------------------------ |
-| `POST /events`                | `ScheduleEventUseCase`    | `201 {id}`         | 400 (schema or domain rule)                      |
-| `GET /events?page&limit`      | repository `listUpcoming` | `200 {data, meta}` |                                                  |
-| `GET /events/:id`             | repository `findById`     | `200`              | 404                                              |
-| `PUT /events/:id`             | `UpdateEventUseCase`      | `204`              | 400, 404                                         |
-| `POST /events/:id/cancel`     | `CancelEventUseCase`      | `204`              | 400 (already cancelled), 404                     |
-| `POST /events/:id/attendance` | `RecordAttendanceUseCase` | `201 {id}`         | 400 (closed, not open yet), 404, 409 (duplicate) |
-| `POST /events/:id/volunteers` | `AssignVolunteerUseCase`  | `201 {id}`         | 400, 404, 409 (same role twice)                  |
+| Method and path               | Use case                  | Success                             | Errors                                           |
+| ----------------------------- | ------------------------- | ----------------------------------- | ------------------------------------------------ |
+| `POST /events`                | `ScheduleEventUseCase`    | `201 {id}`                          | 400 (schema or domain rule)                      |
+| `GET /events?page&limit`      | repository `listUpcoming` | `200 {data, meta}`                  |                                                  |
+| `GET /events/:id`             | repository `findById`     | `200`                               | 404                                              |
+| `PUT /events/:id`             | `UpdateEventUseCase`      | `204`                               | 400, 404, 409 (changed by another request)       |
+| `POST /events/:id/cancel`     | `CancelEventUseCase`      | `204` (also when already cancelled) | 400 (completed), 404, 409                        |
+| `POST /events/:id/attendance` | `RecordAttendanceUseCase` | `201 {id}`                          | 400 (closed, not open yet), 404, 409 (duplicate) |
+| `POST /events/:id/volunteers` | `AssignVolunteerUseCase`  | `201 {id}`                          | 400, 404, 409 (same role twice)                  |
 
 Cancel is its own endpoint, not `PUT {status: "cancelled"}`, because it's a state
 transition with its own rule, its own required reason, and its own domain event.
@@ -185,6 +205,14 @@ the ADR:
 - **Not reachable through the API yet:** the `ongoing`/`completed` transitions,
   confirming or declining a volunteer, QR check-in, and listing an event's attendance.
   The types are modelled; the endpoints come with the ticket that needs them.
+- **Check-in never closes.** ADR-0004 only says when check-in _opens_. Closing it needs
+  the `completed` transition, which nothing triggers yet, so a past event still accepts
+  check-ins. It lands with the start/complete ticket.
+- **`GET /events` only lists events that haven't started.** That's what "upcoming"
+  means in the ticket. An event in progress is still reachable by id.
+- **A `500` shows Prisma's error text** (including the database hostname). Fastify's
+  default error handler does this in both services; hiding 5xx details belongs in a
+  shared fix, not in one service.
 
 ---
 
@@ -196,6 +224,7 @@ the ADR:
 | A rule checked by asking another aggregate (same context)                 | §3.1  |
 | Uniqueness across aggregates: use case check + unique index + P2002 → 409 | §3.2  |
 | A use case that saves several aggregates in a retry-safe order            | §3.3  |
+| Optimistic locking with a `version` column                                | §3.4  |
 | A value object, flattened into columns                                    | §4    |
 | An injectable clock for time-based rules                                  | §5    |
 | Referencing another context: id only, no FK, no copy                      | §1    |

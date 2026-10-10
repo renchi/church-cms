@@ -68,6 +68,11 @@ export class Attendance {
     if (now.getTime() < event.scheduledAt.getTime() - CHECK_IN_WINDOW_MS) {
       throw new DomainError("Check-in opens two hours before the event starts");
     }
+    // A self check-in is recorded by the member; anything else must say who
+    // recorded it, so the audit trail never credits the member by accident.
+    if (params.method !== "self" && !params.checkedInById?.trim()) {
+      throw new DomainError("checkedInById is required unless the member checks in themselves");
+    }
     const checkedInById = params.checkedInById?.trim() || memberId;
     if (params.method === "self" && checkedInById !== memberId) {
       throw new DomainError("A self check-in must be recorded by the member themselves");

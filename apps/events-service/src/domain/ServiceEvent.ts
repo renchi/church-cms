@@ -71,6 +71,11 @@ export interface ServiceEventSnapshot {
   createdById: string;
   createdAt: Date;
   updatedAt: Date;
+  // Optimistic concurrency: how many times this event has been saved. 0 means
+  // "new, never saved". The repository only writes if the stored version still
+  // matches, so a request working on a stale copy fails instead of silently
+  // overwriting a newer change (e.g. an edit undoing a cancellation).
+  version: number;
 }
 
 export interface ScheduleEventParams {
@@ -112,6 +117,16 @@ function requireValidDate(date: Date): Date {
   return date;
 }
 
+// ADR-0004: "scheduledAt must be in the future when first created". The same
+// rule applies when an event is moved: rescheduling into the past would make it
+// vanish from the upcoming list and open check-in immediately.
+function requireFutureDate(date: Date, now: Date): Date {
+  if (requireValidDate(date).getTime() <= now.getTime()) {
+    throw new DomainError("An event must be scheduled in the future");
+  }
+  return date;
+}
+
 export class ServiceEvent {
   private constructor(private snap: ServiceEventSnapshot) {}
 
@@ -145,6 +160,9 @@ export class ServiceEvent {
   get createdById() {
     return this.snap.createdById;
   }
+  get version() {
+    return this.snap.version;
+  }
 
   // `now` is a parameter (defaulting to the real clock) so tests can pin time.
   // "In the future" is a rule about time, and tests that depend on the real
@@ -155,11 +173,7 @@ export class ServiceEvent {
   ): { event: ServiceEvent; domainEvent: EventCreatedEvent } {
     const title = requireTitle(params.title);
     const venue = Venue.create(params.venue);
-    const scheduledAt = requireValidDate(params.scheduledAt);
-    // ADR-0004: "scheduledAt must be in the future when first created".
-    if (scheduledAt.getTime() <= now.getTime()) {
-      throw new DomainError("An event must be scheduled in the future");
-    }
+    const scheduledAt = requireFutureDate(params.scheduledAt, now);
     const durationMinutes = requireDuration(params.durationMinutes);
     if (!params.createdById.trim()) throw new DomainError("createdById is required");
 
@@ -176,6 +190,7 @@ export class ServiceEvent {
       createdById: params.createdById.trim(),
       createdAt: now,
       updatedAt: now,
+      version: 0,
     });
 
     return {
@@ -203,7 +218,9 @@ export class ServiceEvent {
     if (params.eventType !== undefined) next.eventType = params.eventType;
     if (params.venue !== undefined) next.venue = Venue.create(params.venue).toProps();
     if (params.ministerId !== undefined) next.ministerId = params.ministerId?.trim() || null;
-    if (params.scheduledAt !== undefined) next.scheduledAt = requireValidDate(params.scheduledAt);
+    if (params.scheduledAt !== undefined) {
+      next.scheduledAt = requireFutureDate(params.scheduledAt, now);
+    }
     if (params.durationMinutes !== undefined) {
       next.durationMinutes = requireDuration(params.durationMinutes);
     }

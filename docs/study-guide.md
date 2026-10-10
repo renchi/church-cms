@@ -834,9 +834,14 @@ Vocabulary:
   and a unique index ([`schema.prisma:62`](../apps/events-service/prisma/schema.prisma#L62))
   settles races. Its error is mapped to the same 409
   ([`uniqueViolation.ts:8`](../apps/events-service/src/infrastructure/uniqueViolation.ts#L8)).
-- **A use case touching many aggregates**: cancelling declines every volunteer, then
-  saves the event *last*, so a failure part-way can simply be retried
-  ([`CancelEventUseCase.ts:14`](../apps/events-service/src/application/CancelEventUseCase.ts#L14)).
+- **A use case touching many aggregates**: cancelling saves the event, then declines
+  every volunteer. It's idempotent, so a failure part-way is fixed by cancelling again,
+  and a volunteer assigned at the same moment re-checks the event and declines itself
+  ([`CancelEventUseCase.ts`](../apps/events-service/src/application/CancelEventUseCase.ts),
+  [`events-service-ddd.md` §3.3](events-service-ddd.md#33-cancelling-declines-all-volunteers-several-saves-no-transaction)).
+- **Optimistic locking**: a `version` column, and saves that only apply if nobody else
+  saved in between; otherwise `409`
+  ([`events-service-ddd.md` §3.4](events-service-ddd.md#34-two-edits-at-once-optimistic-locking)).
 - **A value object**: [`Venue`](../apps/events-service/src/domain/ServiceEvent.ts#L27),
   stored as three flat columns ([`schema.prisma:29`](../apps/events-service/prisma/schema.prisma#L29)).
 - **Time as a parameter**: domain methods take `now`, so tests pin the clock
@@ -878,6 +883,9 @@ Vocabulary:
 | The copied metrics test failed: it still expected `/members/:id` | `sed` replaced `/members/` but not the regex-escaped `\/members\/`. A copied test that fails at first is good news: it proves the test really checks something |
 | No `minikube tunnel` (needs sudo), so `cms.local` didn't answer | `kubectl -n traefik port-forward svc/traefik 18080:80` plus `curl -H 'Host: cms.local'` goes through the real Ingress rules without root ([`k8s-local-dev.md` §7b](k8s-local-dev.md#7b-deploy-events-service)) |
 | `curl http://…/members?limit=1` failed in zsh with `no matches found` | zsh treats `?` as a glob. Quote URLs that contain `?` or `&` |
+| Code review: an edit made on a stale copy could save `status: scheduled` over a cancellation | "Load, change, save everything" loses updates when two requests overlap. A `version` column turns the silent overwrite into a `409` (optimistic locking). The column came as a **second** migration: `init` was already applied in the cluster, and Prisma rejects an applied migration whose checksum changed |
+| Code review: cancelling saved the event *last*, so a volunteer assigned during the cancel stayed `pending` | Rules across aggregates without a transaction need an argument that **every** interleaving is covered. Saving the event first, plus a re-check on the assign side, closes it. Cancel became idempotent so it stays retryable |
+| Running the "stop the database" exercise, the 500 body contained Prisma's message and the DB hostname | Default error handlers leak internals. Recorded as a gap for both services rather than fixed in one |
 
 ---
 
@@ -958,7 +966,8 @@ in parentheses (and the file it links) is where to look.
 
 - [ ] Why is `Attendance` its own aggregate instead of a list inside `ServiceEvent`? (§10.1, §10.2)
 - [ ] "One check-in per member per event": why isn't the use case's check enough on its own, and what closes the gap? (§10.2)
-- [ ] Cancelling an event saves several aggregates without a transaction. Why is saving the event *last* safe to retry? (§10.2)
+- [ ] Cancelling saves several aggregates without a transaction. How do idempotency and "save the event first, re-check on assign" keep the rule true? (§10.2, §10.4)
+- [ ] Two admins edit the same event at once. What does the `version` column change about the outcome? (§10.2)
 - [ ] What makes `Venue` a value object, and why does it need no table? (§10.2)
 - [ ] Why do domain methods take a `now` parameter? (§10.2)
 - [ ] Why does `Attendance.memberId` have no foreign key, and why doesn't Events check that the member exists? (§10.2, §10.3)

@@ -546,8 +546,11 @@ kubectl exec deploy/events-postgres -- psql -U cms_user -d events_db -tAc \
 # usher|declined
 ```
 
-Then cancel it again: expect `400 {"error":"Event is already cancelled"}`. A cancelled
-event can't go back to scheduled (ADR-0004).
+Then try to bring it back: `PUT` a new title and expect
+`400 {"error":"Cannot update a cancelled event"}`. A cancelled event can't go back to
+scheduled (ADR-0004). Cancelling it *again* returns `204` and changes nothing: cancel is
+idempotent, so a cancel that failed half-way can simply be retried
+([`events-service-ddd.md`](events-service-ddd.md) §3.3).
 
 ---
 

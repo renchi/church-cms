@@ -30,6 +30,15 @@ export class AssignVolunteerUseCase {
 
     const { assignment } = VolunteerAssignment.assign({ event, ...input });
     await this.volunteers.save(assignment);
+
+    // The event may have been cancelled while we were working: our copy was
+    // loaded before. If so, CancelEventUseCase's sweep may already have run
+    // and missed this assignment, so decline it ourselves. (See the comment
+    // in CancelEventUseCase for why this closes the race.)
+    const latest = await this.events.findById(eventId);
+    if (latest?.status === "cancelled" && assignment.decline()) {
+      await this.volunteers.save(assignment);
+    }
     return { id: assignment.id };
   }
 }

@@ -112,6 +112,18 @@ describe("ServiceEvent.update", () => {
     expect(event.title).toBe("Sunday Morning Service");
   });
 
+  it("rejects rescheduling into the past", () => {
+    const { event } = ServiceEvent.schedule(params(), NOW);
+    expect(() => event.update({ scheduledAt: new Date("2020-01-01T00:00:00Z") }, NOW)).toThrow(
+      DomainError
+    );
+    expect(event.scheduledAt).toEqual(NEXT_SUNDAY);
+  });
+
+  it("starts at version 0 (never saved)", () => {
+    expect(ServiceEvent.schedule(params(), NOW).event.version).toBe(0);
+  });
+
   it("rejects updates to a cancelled event", () => {
     const { event } = ServiceEvent.schedule(params(), NOW);
     event.cancel("Storm warning", NOW);

@@ -37,6 +37,9 @@ model ServiceEvent {
   createdById     String
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  // Optimistic locking (see PrismaServiceEventRepository.save). Stored rows
+  // start at 1; 0 only ever exists in memory, for an event never saved.
+  version         Int      @default(1)
 
   // Foreign keys INSIDE this context are fine: all three tables live in the
   // same database and belong to the same bounded context.

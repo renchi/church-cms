@@ -1,24 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { DomainError, NotFoundError } from "../domain/errors.js";
+import { ServiceEvent } from "../domain/ServiceEvent.js";
 import { VolunteerAssignment } from "../domain/VolunteerAssignment.js";
 import { CancelEventUseCase } from "./CancelEventUseCase.js";
 import { ADMIN, MEMBER, makeEventRepo, makeVolunteerRepo, upcomingEvent } from "./testFixtures.js";
 
+function assign(event: ServiceEvent, role: "usher" | "greeter") {
+  return VolunteerAssignment.assign({ event, memberId: MEMBER, role, assignedById: ADMIN })
+    .assignment;
+}
+
 describe("CancelEventUseCase", () => {
   it("cancels the event and declines every volunteer assignment (ADR-0004)", async () => {
     const event = upcomingEvent();
-    const usher = VolunteerAssignment.assign({
-      event,
-      memberId: MEMBER,
-      role: "usher",
-      assignedById: ADMIN,
-    }).assignment;
-    const greeter = VolunteerAssignment.assign({
-      event,
-      memberId: ADMIN,
-      role: "greeter",
-      assignedById: ADMIN,
-    }).assignment;
+    const usher = assign(event, "usher");
+    const greeter = assign(event, "greeter");
     const events = makeEventRepo({ findById: vi.fn().mockResolvedValue(event) });
     const volunteers = makeVolunteerRepo({
       findByEventId: vi.fn().mockResolvedValue([usher, greeter]),
@@ -33,34 +29,39 @@ describe("CancelEventUseCase", () => {
     expect(events.save).toHaveBeenCalledWith(event);
   });
 
-  it("saves the event last, so a failure part-way leaves it retryable", async () => {
+  it("saves the event BEFORE reading the assignments to sweep", async () => {
     const event = upcomingEvent();
-    const usher = VolunteerAssignment.assign({
-      event,
-      memberId: MEMBER,
-      role: "usher",
-      assignedById: ADMIN,
-    }).assignment;
-    const events = makeEventRepo({ findById: vi.fn().mockResolvedValue(event) });
+    const order: string[] = [];
+    const events = makeEventRepo({
+      findById: vi.fn().mockResolvedValue(event),
+      save: vi.fn(async () => void order.push("save event")),
+    });
     const volunteers = makeVolunteerRepo({
-      findByEventId: vi.fn().mockResolvedValue([usher]),
-      save: vi.fn().mockRejectedValue(new Error("database down")),
+      findByEventId: vi.fn(async () => (order.push("read assignments"), [])),
     });
 
-    await expect(
-      new CancelEventUseCase(events, volunteers).execute(event.id, { reason: "Storm warning" })
-    ).rejects.toThrow("database down");
+    await new CancelEventUseCase(events, volunteers).execute(event.id, { reason: "Storm warning" });
+
+    expect(order).toEqual(["save event", "read assignments"]);
+  });
+
+  it("is idempotent: cancelling again only re-sweeps, so a failed sweep can be retried", async () => {
+    const event = upcomingEvent();
+    event.cancel("first time");
+    const leftOver = assign(upcomingEvent(), "usher"); // still pending
+    const events = makeEventRepo({ findById: vi.fn().mockResolvedValue(event) });
+    const volunteers = makeVolunteerRepo({ findByEventId: vi.fn().mockResolvedValue([leftOver]) });
+
+    await new CancelEventUseCase(events, volunteers).execute(event.id, { reason: "again" });
+
     expect(events.save).not.toHaveBeenCalled();
+    expect(leftOver.status).toBe("declined");
+    expect(volunteers.save).toHaveBeenCalledOnce();
   });
 
   it("skips assignments that are already declined", async () => {
     const event = upcomingEvent();
-    const declined = VolunteerAssignment.assign({
-      event,
-      memberId: MEMBER,
-      role: "usher",
-      assignedById: ADMIN,
-    }).assignment;
+    const declined = assign(event, "usher");
     declined.decline();
     const events = makeEventRepo({ findById: vi.fn().mockResolvedValue(event) });
     const volunteers = makeVolunteerRepo({ findByEventId: vi.fn().mockResolvedValue([declined]) });
@@ -70,17 +71,19 @@ describe("CancelEventUseCase", () => {
     expect(volunteers.save).not.toHaveBeenCalled();
   });
 
-  it("writes nothing when the event can't be cancelled", async () => {
-    const event = upcomingEvent();
-    event.cancel("first time");
-    const events = makeEventRepo({ findById: vi.fn().mockResolvedValue(event) });
+  it("writes nothing when the domain refuses the transition", async () => {
+    const completed = ServiceEvent.reconstitute({
+      ...upcomingEvent().toSnapshot(),
+      status: "completed",
+    });
+    const events = makeEventRepo({ findById: vi.fn().mockResolvedValue(completed) });
     const volunteers = makeVolunteerRepo();
 
     await expect(
-      new CancelEventUseCase(events, volunteers).execute(event.id, { reason: "again" })
+      new CancelEventUseCase(events, volunteers).execute(completed.id, { reason: "too late" })
     ).rejects.toThrow(DomainError);
-    expect(volunteers.findByEventId).not.toHaveBeenCalled();
     expect(events.save).not.toHaveBeenCalled();
+    expect(volunteers.findByEventId).not.toHaveBeenCalled();
   });
 
   it("throws NotFoundError for an unknown event", async () => {

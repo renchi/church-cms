@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConflictError, NotFoundError } from "../domain/errors.js";
+import { ServiceEvent } from "../domain/ServiceEvent.js";
 import { VolunteerAssignment } from "../domain/VolunteerAssignment.js";
 import { AssignVolunteerUseCase } from "./AssignVolunteerUseCase.js";
 import { ADMIN, MEMBER, makeEventRepo, makeVolunteerRepo, upcomingEvent } from "./testFixtures.js";
@@ -41,6 +42,29 @@ describe("AssignVolunteerUseCase", () => {
       })
     ).rejects.toThrow(ConflictError);
     expect(volunteers.save).not.toHaveBeenCalled();
+  });
+
+  it("declines its own assignment if the event was cancelled meanwhile", async () => {
+    const event = upcomingEvent();
+    const cancelledMeanwhile = ServiceEvent.reconstitute({
+      ...event.toSnapshot(),
+      status: "cancelled",
+    });
+    // First read: still scheduled. Re-check after saving: cancelled.
+    const events = makeEventRepo({
+      findById: vi.fn().mockResolvedValueOnce(event).mockResolvedValueOnce(cancelledMeanwhile),
+    });
+    const volunteers = makeVolunteerRepo();
+
+    await new AssignVolunteerUseCase(events, volunteers).execute(event.id, {
+      memberId: MEMBER,
+      role: "usher",
+      assignedById: ADMIN,
+    });
+
+    expect(volunteers.save).toHaveBeenCalledTimes(2);
+    const saved = vi.mocked(volunteers.save).mock.calls[1][0];
+    expect(saved.status).toBe("declined");
   });
 
   it("throws NotFoundError for an unknown event", async () => {

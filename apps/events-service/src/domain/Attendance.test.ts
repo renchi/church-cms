@@ -54,6 +54,15 @@ describe("Attendance.record", () => {
     expect(attendance.toSnapshot().checkedInById).toBe(USHER);
   });
 
+  it("rejects a manual check-in that doesn't say who recorded it", () => {
+    expect(() =>
+      Attendance.record(
+        { event: sundayService(), memberId: MEMBER, method: "manual" },
+        minutesBeforeStart(5)
+      )
+    ).toThrow(/checkedInById/);
+  });
+
   it("allows check-in exactly two hours before the start", () => {
     expect(() =>
       Attendance.record(

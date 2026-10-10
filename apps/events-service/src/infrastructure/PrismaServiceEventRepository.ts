@@ -1,4 +1,5 @@
 import type { PrismaClient, ServiceEventRow } from "./prisma.js";
+import { ConflictError } from "../domain/errors.js";
 import { ServiceEvent, type EventStatus, type EventType } from "../domain/ServiceEvent.js";
 import type { ServiceEventRepository } from "../domain/ServiceEventRepository.js";
 import { prisma as defaultPrisma } from "./prisma.js";
@@ -19,6 +20,7 @@ function toServiceEvent(row: ServiceEventRow): ServiceEvent {
     createdById: row.createdById,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    version: row.version,
   });
 }
 
@@ -59,13 +61,21 @@ export class PrismaServiceEventRepository implements ServiceEventRepository {
     return { events: rows.map(toServiceEvent), total };
   }
 
+  // Optimistic locking. A new event (version 0) is inserted. An existing one is
+  // updated only WHERE its version is still the one we loaded, and the version
+  // goes up by one. If another request saved in between, the WHERE matches no
+  // row, and we report a conflict instead of overwriting their change. No row
+  // is locked while the request runs; we only check at the moment of writing.
   async save(event: ServiceEvent): Promise<void> {
     const row = toRow(event);
-    await this.prisma.serviceEvent.upsert({
-      where: { id: row.id },
-      create: row,
+    if (row.version === 0) {
+      await this.prisma.serviceEvent.create({ data: { ...row, version: 1 } });
+      return;
+    }
+    const { count } = await this.prisma.serviceEvent.updateMany({
+      where: { id: row.id, version: row.version },
       // Everything except id, createdAt and createdById, which never change.
-      update: {
+      data: {
         title: row.title,
         eventType: row.eventType,
         venueName: row.venueName,
@@ -77,7 +87,11 @@ export class PrismaServiceEventRepository implements ServiceEventRepository {
         status: row.status,
         description: row.description,
         updatedAt: row.updatedAt,
+        version: { increment: 1 },
       },
     });
+    if (count === 0) {
+      throw new ConflictError("The event was changed by another request; reload it and try again");
+    }
   }
 }

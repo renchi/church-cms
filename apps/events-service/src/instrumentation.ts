@@ -10,7 +10,7 @@
 //   - Instrumentations: HttpInstrumentation records a duration histogram for
 //     every incoming request; fastifyOtel adds the matched route to it.
 //   - Exporter: PrometheusExporter serves the collected metrics as text on
-//     http://<pod>:9464/metrics. Prometheus *pulls* (scrapes) from it.
+//     http://<pod>:9465/metrics. Prometheus *pulls* (scrapes) from it.
 //   - Resource: `service.name` identifies which service the metrics came from.
 //
 // Deliberately NOT here yet: traces and an OTel Collector. ADR-0009 adds them
