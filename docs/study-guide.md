@@ -713,6 +713,7 @@ kubelet scrape, in the built-in "Kubernetes / Compute Resources" dashboards.)
 | A new ServiceMonitor didn't show up in Targets for ~1 min | The Operator regenerates config, then Prometheus reloads. Check the generated config before assuming the selector is wrong |
 | `cms.local` resolves to Traefik's LoadBalancer IP (`10.109.105.150`), not `127.0.0.1` as the k8s runbook assumed | Ask the cluster (`kubectl get ingress` → ADDRESS) instead of trusting a hardcoded IP |
 | HPA still `<unknown>` right after enabling metrics-server | New Pods' CPU is ignored for a few minutes. Read `kubectl describe hpa` conditions before changing anything |
+| After a reinstall, 10 fresh 404s showed an error rate of **0** | A series is created on its first observation, so Prometheus's first sample of it was already `10`. `rate()` only sees increases *between* samples, so the jump from "no series" to 10 is invisible. The next 404s registered at once. In production you'd pre-initialise counters to 0 for known label values, or alert on `increase()` over longer windows |
 
 ---
 

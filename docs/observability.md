@@ -149,6 +149,7 @@ ConfigMap), or edit `charts/members-service/values.yaml`.
 | Target missing from Prometheus → Targets | The Operator needs ~1 minute to reload after a new ServiceMonitor. Still missing? The ServiceMonitor needs the label `release: kube-prometheus-stack`: `kubectl get servicemonitor -A --show-labels` |
 | Target **DOWN**, `connection refused` | The Pod isn't serving :9464. The container must start with `node --import ./dist/instrumentation.js` (Dockerfile `CMD`), and the Service needs a port named `metrics` |
 | Dashboard panels say **No data** (but "Pods scraped" shows 2) | **No traffic since the Pods started.** Counters live in each Pod's memory and restart from zero on every deploy or restart; until the first request, the request metric doesn't exist at all. Send some requests (exercise 3), then wait ~1 minute: `rate()` needs at least two scrapes |
+| Errors panel stays at **0** right after the first errors | The 404/400 series didn't exist until those requests, so Prometheus's first sample already holds the full count and `rate()` sees no increase. Send a few more; from then on it's counted. See study-guide §9.8 |
 | A series with an empty route | Requests that matched no route (e.g. 404 on an unknown path) have no `http_route`. That's expected |
 | `kubectl get hpa` shows `<unknown>` | metrics-server not enabled (step 1), or the Pods are only a few minutes old |
 | Prometheus alerts firing about etcd/scheduler | These are disabled in our values file because minikube doesn't expose them. Re-run step 2 if you installed with defaults |
@@ -189,7 +190,7 @@ for i in $(seq 30); do
 done
 ```
 
-*Expected:* 404 and 400 lines appear in "Errors — by status" within ~30s. The **5xx
+*Expected:* 404 and 400 lines appear in "Errors — by status" within ~30s. (If these are the first 4xx since the Pods started, the first burst can read 0; run the loop once more. The troubleshooting table explains why.) The **5xx
 error ratio** stays 0%. These are client errors, not ours. Why does that
 distinction matter for paging someone at 3 a.m.?
 
