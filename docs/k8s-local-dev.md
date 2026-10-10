@@ -33,7 +33,7 @@ helm version       # v4.x
 ## 1. Start minikube
 
 ```bash
-minikube start --memory 6g --cpus 4
+minikube start --memory 6g --cpus 4 --container-runtime docker
 ```
 
 > **Why `--memory 6g`?** With the docker driver, minikube's node is a container with a memory cap
@@ -42,6 +42,10 @@ minikube start --memory 6g --cpus 4
 > **created**: an existing cluster needs `minikube delete` (or `scripts/cluster-up.sh --fresh`).
 > Check the real cap with `docker inspect minikube --format '{{.HostConfig.Memory}}'`. Note that
 > `free` *inside* the node shows the host's RAM, not the cap.
+>
+> **Why `--container-runtime docker`?** Step 4 builds images straight into minikube's Docker
+> daemon (`minikube docker-env`), which only exists with the Docker runtime. minikube v1.39+
+> switches the default to containerd, so we pin it.
 
 Expected output ends with:
 ```

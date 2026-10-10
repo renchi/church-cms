@@ -30,6 +30,10 @@ KPS_CHART_VERSION=92.2.0          # kube-prometheus-stack
 # that needs --fresh.
 MINIKUBE_MEMORY_MB=6144
 MINIKUBE_CPUS=4
+# Pin the container runtime: we build images straight into minikube's Docker
+# daemon (`minikube docker-env`, §4), which only exists with the docker runtime.
+# minikube v1.39+ defaults to containerd, which would break that step.
+MINIKUBE_RUNTIME=docker
 HOSTNAMES=(cms.local traefik.cms.local grafana.cms.local)
 
 FRESH=false
@@ -98,7 +102,7 @@ if minikube profile list -o json 2>/dev/null | jq -e '.valid[]? | select(.Name =
     warn "Resizing needs a new cluster: scripts/cluster-up.sh --fresh  (deletes Postgres data)"
   fi
 else
-  minikube start --memory "$MINIKUBE_MEMORY_MB" --cpus "$MINIKUBE_CPUS"
+  minikube start --memory "$MINIKUBE_MEMORY_MB" --cpus "$MINIKUBE_CPUS" --container-runtime "$MINIKUBE_RUNTIME"
 fi
 kubectl get nodes
 

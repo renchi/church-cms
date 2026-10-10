@@ -489,7 +489,7 @@ ones that say "create this":
 | `kubectl apply -f k8s/postgres.yaml` | ✅ prints `unchanged` | compares the desired with the live object, and changes only differences |
 | `minikube start` / `addons enable` | ✅ no-op if already done | |
 
-A re-run of the script takes ~26 s and restarts nothing. Helm still records a new *revision*
+A run from nothing (`--fresh`) took ~4.7 min, most of it image builds. A re-run takes ~26 s and restarts nothing. Helm still records a new *revision*
 (`helm history`), but because the rendered Pod spec is identical, the Deployment doesn't roll.
 
 **Pin versions** (`--version 41.6.1`, `--version 92.2.0`). Without a pin, "the same script" installs
@@ -520,6 +520,7 @@ What setting it up taught:
 | The old runbook used `helm install`, so it couldn't be re-run | Prefer declarative, idempotent commands (`upgrade --install`, `apply`) everywhere, not only in scripts |
 | Moving Traefik's `--set` flags into `k8s/traefik-values.yaml` could silently change it | `diff <(helm template … -f values) <(helm template … --set …)` proved the two render identically before switching |
 | Helm prints long NOTES after every install, which buried the useful output | Filter to the `STATUS` line, while `set -o pipefail` keeps Helm's failures fatal (tested by pointing it at a missing chart) |
+| On the first `--fresh` run, minikube warned that v1.39+ defaults to the **containerd** runtime | Our image builds depend on `minikube docker-env`, which needs the Docker runtime. Pin what you depend on (`--container-runtime docker`), just like chart versions. Read warnings in the output: they're tomorrow's failures |
 | `--skip-build` could quietly deploy an old image (`members-service:local` was 4 days old, from before OTel) | The script prints each reused image's build time. Fast paths need visible warnings |
 
 Next steps for this idea (not needed yet): `make` targets, **helmfile** (declare all Helm releases
