@@ -4,6 +4,7 @@
 #   scripts/cluster-up.sh               create or update the cluster, build images, deploy
 #   scripts/cluster-up.sh --skip-build  reuse the images already inside minikube
 #   scripts/cluster-up.sh --fresh       DELETE the cluster first and start from nothing
+#   scripts/cluster-up.sh --no-sudo     never use sudo: only check the tunnel and /etc/hosts
 #
 # This script does not replace the runbooks; it *runs* them. Every step prints
 # the runbook section it comes from, e.g. "[k8s-local-dev §2]". To learn what a
@@ -15,9 +16,10 @@
 # or brings it to the declared state ("helm upgrade --install", "kubectl apply"),
 # so a second run changes nothing that is already right. See study-guide §7.7.
 #
-# Deliberately NOT automated (both need sudo, and the tunnel runs forever):
-# `minikube tunnel` and /etc/hosts. The script checks them and tells you exactly
-# what to run if something is missing.
+# The two steps that need root (§3) are automated too, but visibly: the script
+# asks for your sudo password, starts `minikube tunnel` in the background if it
+# isn't running, and keeps a clearly marked "church-cms" block in /etc/hosts up to
+# date (a backup is saved first). With --no-sudo it only checks and prints the fix.
 
 set -euo pipefail   # stop on the first error, on unset variables, and on failures inside pipes
 
@@ -35,14 +37,18 @@ MINIKUBE_CPUS=4
 # minikube v1.39+ defaults to containerd, which would break that step.
 MINIKUBE_RUNTIME=docker
 HOSTNAMES=(cms.local traefik.cms.local grafana.cms.local)
+HOSTS_FILE=/etc/hosts
+TUNNEL_LOG=/tmp/minikube-tunnel.log
 
 FRESH=false
 SKIP_BUILD=false
+USE_SUDO=true
 for arg in "$@"; do
   case "$arg" in
     --fresh) FRESH=true ;;
     --skip-build) SKIP_BUILD=true ;;
-    -h | --help) sed -n '2,20p' "$0"; exit 0 ;;
+    --no-sudo) USE_SUDO=false ;;
+    -h | --help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -180,31 +186,87 @@ helm_quiet upgrade --install web ./charts/web \
   --set ingress.enabled=true \
   --wait --timeout 4m
 
-# --- 3. Tunnel and /etc/hosts: check only ------------------------------------
-step "k8s-local-dev §3" "minikube tunnel and /etc/hosts (checked, not changed)"
+# --- 3. Tunnel and /etc/hosts ------------------------------------------------
+# Both need root. We only use sudo when it's actually needed, say why first, and
+# let sudo ask for the password itself (nothing is stored).
+step "k8s-local-dev §3" "minikube tunnel and /etc/hosts"
 network_ok=true
-traefik_ip=$(kubectl -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-if [[ -z "$traefik_ip" ]]; then
+
+traefik_ip() { kubectl -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null; }
+has_traefik_ip() { [[ -n "$(traefik_ip)" ]]; }
+# sudo is usable if allowed and either passwordless or we have a terminal to type into.
+can_sudo() { $USE_SUDO && { sudo -n true 2>/dev/null || [[ -t 0 ]]; }; }
+
+# render_hosts <hosts-file> <ip> — print the hosts file with our names pointing at <ip>.
+# Removes our names from any other line (dropping lines left with only an IP),
+# replaces the old managed block, and leaves every other line exactly as it was.
+render_hosts() {
+  awk -v names="${HOSTNAMES[*]}" -v ip="$2" '
+    BEGIN { n = split(names, h, " "); for (i = 1; i <= n; i++) ours[h[i]] = 1 }
+    /^# BEGIN church-cms/ { skip = 1; next }
+    /^# END church-cms/   { skip = 0; next }
+    skip { next }
+    /^[[:space:]]*(#|$)/ { print; next }            # comments and blank lines: untouched
+    {
+      hit = 0; line = $1
+      for (i = 2; i <= NF; i++) { if ($i in ours) hit = 1; else line = line "  " $i }
+      if (!hit) print                                # not ours: byte-for-byte unchanged
+      else if (line != $1) print line                # had other names too: keep those
+    }
+    END {
+      print "# BEGIN church-cms (managed by scripts/cluster-up.sh; changes here are overwritten)"
+      print ip "  " names
+      print "# END church-cms"
+    }' "$1"
+}
+
+# 3a. minikube tunnel: gives Traefik's LoadBalancer Service a reachable IP.
+if ! has_traefik_ip; then
+  if can_sudo; then
+    warn "minikube tunnel is not running; starting it in the background (needs sudo)."
+    sudo -v
+    # nohup + & = keeps running after this script ends. Log: $TUNNEL_LOG
+    sudo -E bash -c 'nohup minikube tunnel >"$1" 2>&1 &' _ "$TUNNEL_LOG"
+    if wait_for 60 "Traefik external IP from minikube tunnel" has_traefik_ip; then
+      ok "minikube tunnel started (log: $TUNNEL_LOG; stop it with: sudo pkill -f 'minikube tunnel')"
+    fi
+  fi
+fi
+ip=$(traefik_ip)
+if [[ -z "$ip" ]]; then
   network_ok=false
-  fail "Traefik has no external IP — minikube tunnel is not running."
+  fail "Traefik has no external IP; minikube tunnel is not running."
   warn "Start it in another terminal and leave it open:  sudo -E minikube tunnel"
   warn "Then run this script again (with --skip-build) to finish the checks."
 else
-  ok "Traefik external IP: $traefik_ip (minikube tunnel is running)"
-  missing=()
+  ok "Traefik external IP: $ip (minikube tunnel is running)"
+
+  # 3b. /etc/hosts: point our hostnames at that IP. The IP changes whenever the
+  # cluster is recreated (--fresh), which is why this is automated.
+  wrong=()
   for host in "${HOSTNAMES[@]}"; do
-    resolved=$(getent hosts "$host" | awk '{print $1; exit}' || true)
-    if [[ "$resolved" == "$traefik_ip" ]]; then
-      ok "$host → $traefik_ip"
-    else
-      missing+=("$host")
-      fail "$host resolves to '${resolved:-nothing}', expected $traefik_ip"
-    fi
+    [[ "$(getent hosts "$host" | awk '{print $1; exit}' || true)" == "$ip" ]] || wrong+=("$host")
   done
-  if ((${#missing[@]})); then
-    network_ok=false
-    warn "Add this line to /etc/hosts (and remove old lines for these names):"
-    warn "  echo \"$traefik_ip  ${missing[*]}\" | sudo tee -a /etc/hosts"
+  if ((${#wrong[@]} == 0)); then
+    ok "/etc/hosts: ${HOSTNAMES[*]} → $ip"
+  else
+    new_hosts=$(mktemp)
+    render_hosts "$HOSTS_FILE" "$ip" >"$new_hosts"
+    if can_sudo; then
+      warn "/etc/hosts points ${wrong[*]} at the wrong address. Updating it (needs sudo):"
+      diff "$HOSTS_FILE" "$new_hosts" | sed 's/^/        /' || true
+      sudo cp "$HOSTS_FILE" "$HOSTS_FILE.church-cms.bak"
+      # Read our own temp file as the user; only `tee` (the write) runs as root.
+      # shellcheck disable=SC2024
+      sudo tee "$HOSTS_FILE" <"$new_hosts" >/dev/null
+      ok "/etc/hosts updated (backup: $HOSTS_FILE.church-cms.bak)"
+    else
+      network_ok=false
+      fail "/etc/hosts points ${wrong[*]} at the wrong address (expected $ip)."
+      warn "Fix it with:  echo \"$ip  ${HOSTNAMES[*]}\" | sudo tee -a /etc/hosts"
+      warn "(and delete older lines for these names), or re-run without --no-sudo."
+    fi
+    rm -f "$new_hosts"
   fi
 fi
 

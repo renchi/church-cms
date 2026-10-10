@@ -504,9 +504,22 @@ before members-service's migration init container runs.
 Pods are Ready. The script ends with a **smoke test** (health endpoint, web, Grafana, Prometheus
 targets) because "the commands succeeded" isn't the same as "the system works".
 
-**Automate what's safe; check what isn't.** `minikube tunnel` runs forever, and `/etc/hosts`
-needs `sudo`. A script that silently edits system files or asks for root is a script people
-stop trusting. So it *checks* both and prints the exact command to run.
+**Automating root steps: visibly, narrowly, reversibly.** `minikube tunnel` and `/etc/hosts`
+both need `sudo`. The first version only *checked* them, on the reasoning that a script which
+silently edits system files is a script people stop trusting. But every `--fresh` gives
+Traefik a **new IP**, so that left a manual step after every rebuild. The script now does both,
+under rules that keep it trustworthy:
+
+- It uses sudo **only when something is wrong**. A healthy run never asks for a password.
+- It **shows the diff** before changing `/etc/hosts`, and saves a backup (`/etc/hosts.church-cms.bak`).
+- It owns **one marked block** (`# BEGIN church-cms` … `# END church-cms`). Old lines for our
+  names are removed, and every other line stays byte-for-byte. This was tested on a copy,
+  including a line that mixes our names with others.
+- It starts the tunnel **in the background** (`nohup … &`, log in `/tmp/minikube-tunnel.log`).
+- **`--no-sudo`** brings back check-only mode, for CI or an agent that can't type a password.
+
+The trade-off changed because the cost of the manual step changed. That's worth noticing:
+"don't automate X" is rarely a permanent rule.
 
 **Script + runbook, not script instead of runbook.** Each step prints its runbook section
 (`==> [k8s-local-dev §2]`). The runbook explains *why*; the script makes it *repeatable*. When

@@ -14,7 +14,9 @@ This guide walks through deploying the full church-cms stack (Members service + 
 > ```
 >
 > The script is a convenience, not a replacement: **read the steps below** to learn what each one
-> does. It only *checks* `minikube tunnel` and `/etc/hosts` (§3), because both need `sudo`.
+> does. For §3 it asks for your `sudo` password **only if needed**: it starts `minikube tunnel` in
+> the background and keeps a marked `# BEGIN church-cms` block in `/etc/hosts` pointing at
+> Traefik's current IP, showing the diff and saving a backup first. Use `--no-sudo` to only check.
 
 ---
 

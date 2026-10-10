@@ -24,6 +24,7 @@ pnpm --filter members-service test       # unit + integration
 
 scripts/cluster-up.sh                    # bring up / update the whole minikube stack, then smoke-test it
 scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postgres data)
+scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, only check tunnel + /etc/hosts
 ```
 
 ## Workflow
