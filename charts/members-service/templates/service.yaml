@@ -13,4 +13,8 @@ spec:
       protocol: TCP
       port: {{ .Values.service.port }}        # port the Service exposes (3001)
       targetPort: http                         # references the container port named "http" above
-
+    # Prometheus scrapes this port; the ServiceMonitor refers to it by name.
+    - name: metrics
+      protocol: TCP
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics

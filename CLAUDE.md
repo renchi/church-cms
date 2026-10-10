@@ -21,6 +21,9 @@ pnpm format                           # format with Prettier
 pnpm --filter members-service dev        # run a single service
 pnpm --filter members-service test:unit  # fast: unit tests only
 pnpm --filter members-service test       # unit + integration
+
+scripts/cluster-up.sh                    # bring up / update the whole minikube stack, then smoke-test it
+scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postgres data)
 ```
 
 ## Workflow
@@ -46,7 +49,8 @@ Never work directly on main. Scaffold new services with `/new-service`, and only
 apps/       # deployable services (members-service, events-service, web)
 packages/   # shared packages (e.g. @cms/events for domain event types)
 charts/     # one Helm chart per deployable app
-k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik dashboard, ...)
+k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik, monitoring, ...)
+scripts/    # cluster-up.sh: idempotent bootstrap that runs the k8s + observability runbooks
 docs/       # learning material and runbooks (see Docs index)
 docs/adr/   # architecture decision records. Read these before changing architecture
 .claude/    # agent config: rules/ (path-scoped conventions), skills/, hooks/
@@ -100,6 +104,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `ServiceEvent` covers services + one-off events (no split aggregates) | Type-specific invariants appear in more than one or two places               | 0004        |
 | `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
 | Phase 1 uses sync HTTP between services                               | Stage 9 of the roadmap: wire NATS for async events                           | 0007        |
+| OTel metrics only, Prometheus pull; no Collector or traces            | Events service + NATS live, or traces wanted                                 | 0009        |
 
 ## ADR index
 
@@ -113,6 +118,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | 0006 | Groups context aggregates & domain model                             |
 | 0007 | Learning scope & roadmap: two-service slice first                    |
 | 0008 | Database hosting strategy (Docker → minikube → managed cloud)        |
+| 0009 | Observability: OpenTelemetry instrumentation, Prometheus + Grafana   |
 
 ## Docs index
 
@@ -123,4 +129,5 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `docs/docker-local-dev.md`    | Runbook: Compose stack, images                                                                                |
 | `docs/k8s-local-dev.md`       | Runbook: minikube, Traefik, Helm deploys                                                                      |
 | `docs/ci-cd.md`               | Runbook: GitHub Actions, self-hosted runner, debugging                                                        |
+| `docs/observability.md`       | Runbook: Prometheus, Grafana, metrics and logs, with hands-on exercises                                       |
 | `docs/status-dashboards.md`   | Where to watch the pipeline and the cluster                                                                   |

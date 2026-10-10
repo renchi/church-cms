@@ -5,7 +5,7 @@ exercised, mapped to the **five learning goals** in
 [ADR-0007](adr/0007-learning-scope-and-roadmap.md):
 
 1. **Docker & containers**
-2. **Kubernetes** _(stage 5 done; observability, stage 7, is next)_
+2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability)_
 3. **System design**
 4. **Domain-Driven Design (DDD)** — the emphasised priority
 5. **Using AI tools** — issue-driven development
@@ -17,6 +17,7 @@ This guide is the **map**. Two companion docs are the **detail**:
 - [`k8s-local-dev.md`](k8s-local-dev.md) — deploying to minikube with Helm + Traefik, step by step
 - [`ci-cd.md`](ci-cd.md) — the GitHub Actions pipeline, self-hosted runner, debugging
 - [`status-dashboards.md`](status-dashboards.md) — where to watch the pipeline and the cluster
+- [`observability.md`](observability.md) — Prometheus, Grafana, metrics and logs, with exercises
 
 Read this top to bottom once. Then, whenever a section feels thin, open the file it
 points at (`file_path:line`) and read the real code — that is where the learning sticks.
@@ -25,7 +26,7 @@ points at (`file_path:line`) and read the real code — that is where the learni
 
 ## 0. Where we are on the roadmap
 
-The roadmap is a 9-stage sequence. **Stages 1–6 are done.** That is the scope of this guide.
+The roadmap is a 9-stage sequence. **Stages 1–7 are done.** That is the scope of this guide.
 
 | #   | Stage                                         | Status  | What it taught                      |
 | --- | --------------------------------------------- | ------- | ----------------------------------- |
@@ -35,8 +36,8 @@ The roadmap is a 9-stage sequence. **Stages 1–6 are done.** That is the scope 
 | 4   | Frontend (Next.js) + compose it in            | ✅ done | full local stack                    |
 | 5   | Kubernetes (minikube → manifests → Helm)      | ✅ done | Kubernetes                          |
 | 6   | CI/CD pipeline                                | ✅ done | automation                          |
-| 7   | Observability (Prometheus + Grafana)          | ⬜ next | operating distributed systems       |
-| 8   | Build Events service                          | ⬜      | repeat the DDD pattern              |
+| 7   | Observability (Prometheus + Grafana)          | ✅ done | operating distributed systems       |
+| 8   | Build Events service                          | ⬜ next | repeat the DDD pattern              |
 | 9   | Wire NATS between Members ↔ Events            | ⬜      | async events / eventual consistency |
 
 Knowing what is **deliberately not built yet** is itself part of the learning: the
@@ -463,12 +464,66 @@ Pod never becomes Ready, so a broken migration stops the rollout.
 - **Postgres runs as a Deployment + PVC, not a StatefulSet** as ADR-0008 describes.
   It works for a single dev instance. A StatefulSet adds stable identity and per-replica
   volumes, which matter once a database has replicas.
-- **The HPA can't scale yet.** It needs CPU metrics, and minikube's `metrics-server`
-  addon is disabled, so the HPA logs `FailedGetResourceMetric` and stays at 2 replicas.
-  `minikube addons enable metrics-server` fixes it, which fits stage 7 (observability).
+- ~~**The HPA can't scale yet.**~~ Fixed in stage 7: it needed CPU metrics from
+  minikube's `metrics-server` addon, which was disabled. Now `kubectl get hpa` shows
+  `cpu: 2%/70%` (§9.7).
 - **Dev credentials live in the chart's Secret template.** That's fine for local
   learning. Real deployments inject them from outside (platform secrets, External
   Secrets, Sealed Secrets).
+
+### 7.7 Automating the runbook: an idempotent bootstrap script
+
+Bringing the cluster up by hand means ~15 steps across two runbooks, and the details are easy to
+get wrong: the Traefik flags, the install order, waiting for things to be ready. The
+[`scripts/cluster-up.sh`](../scripts/cluster-up.sh) script runs those steps for you. It's built
+on a few ideas that apply to any infrastructure automation.
+
+**Idempotent = safe to run again.** Running it once or five times ends in the same state. That
+comes from using *declarative* commands that say what should exist, rather than *imperative*
+ones that say "create this":
+
+| Command | Second run | Why |
+| --- | --- | --- |
+| `helm install traefik …` (the old runbook) | ❌ fails: *cannot re-use a name* | "create" can't succeed twice |
+| `helm upgrade --install traefik …` | ✅ upgrades to the same values | installs if missing, otherwise brings it to the declared state |
+| `kubectl apply -f k8s/postgres.yaml` | ✅ prints `unchanged` | compares the desired with the live object, and changes only differences |
+| `minikube start` / `addons enable` | ✅ no-op if already done | |
+
+A re-run of the script takes ~26 s and restarts nothing. Helm still records a new *revision*
+(`helm history`), but because the rendered Pod spec is identical, the Deployment doesn't roll.
+
+**Pin versions** (`--version 41.6.1`, `--version 92.2.0`). Without a pin, "the same script" installs
+whatever the latest chart is on the day you run it. Pinning makes a run months later reproduce what was tested.
+
+**Order is a dependency graph.** The monitoring stack installs the `ServiceMonitor` **CRD**, and
+the members-service chart *uses* that CRD. So monitoring must come before the apps, or the app
+install fails with *no matches for kind "ServiceMonitor"*. Similarly, Postgres must be ready
+before members-service's migration init container runs.
+
+**Wait for readiness, then prove it works.** `--wait` and `kubectl rollout status` block until
+Pods are Ready. The script ends with a **smoke test** (health endpoint, web, Grafana, Prometheus
+targets) because "the commands succeeded" isn't the same as "the system works".
+
+**Automate what's safe; check what isn't.** `minikube tunnel` runs forever, and `/etc/hosts`
+needs `sudo`. A script that silently edits system files or asks for root is a script people
+stop trusting. So it *checks* both and prints the exact command to run.
+
+**Script + runbook, not script instead of runbook.** Each step prints its runbook section
+(`==> [k8s-local-dev §2]`). The runbook explains *why*; the script makes it *repeatable*. When
+they disagree, that's a bug in one of them.
+
+What setting it up taught:
+
+| Problem | Lesson |
+| --- | --- |
+| The minikube node was capped at **3 GB** and already using ~2.7 GB. Earlier planning had said "~7 GB free, no bump needed" | `free` *inside* the node shows the host's RAM. The real cap is on the container: `docker inspect minikube --format '{{.HostConfig.Memory}}'`. New clusters now get `--memory 6g`. The cap can only be set at creation |
+| The old runbook used `helm install`, so it couldn't be re-run | Prefer declarative, idempotent commands (`upgrade --install`, `apply`) everywhere, not only in scripts |
+| Moving Traefik's `--set` flags into `k8s/traefik-values.yaml` could silently change it | `diff <(helm template … -f values) <(helm template … --set …)` proved the two render identically before switching |
+| Helm prints long NOTES after every install, which buried the useful output | Filter to the `STATUS` line, while `set -o pipefail` keeps Helm's failures fatal (tested by pointing it at a missing chart) |
+| `--skip-build` could quietly deploy an old image (`members-service:local` was 4 days old, from before OTel) | The script prints each reused image's build time. Fast paths need visible warnings |
+
+Next steps for this idea (not needed yet): `make` targets, **helmfile** (declare all Helm releases
+in one file), or **Tilt**/**Skaffold** (rebuild and redeploy on every code change).
 
 ---
 
@@ -533,7 +588,190 @@ Because the repo is public, the security rules matter:
 
 ---
 
-## 9. Using AI tools (learning goal #5)
+## 9. Observability (roadmap stage 7)
+
+Until now the only way to know whether the system was healthy was to `curl` it. For
+**observability** you instead ask the running system questions you didn't plan for in
+advance: *"is it slow?", "since when?", "only on one route?", "which Pod?"* This stage adds
+the tools to answer those from the outside, without attaching a debugger.
+
+Runbook (install, use, troubleshoot, exercises): [`observability.md`](observability.md).
+The decision record: [ADR-0009](adr/0009-observability-opentelemetry.md).
+
+### 9.1 The three pillars, and which ones we have
+
+| Signal | Answers | Example | Here |
+| --- | --- | --- | --- |
+| **Metrics** | *How much / how often / how fast*, as numbers over time. Cheap to store, great for graphs and alerts | 0.86 req/s, p95 = 7 ms | ✅ Prometheus + Grafana |
+| **Logs** | *What exactly happened* in one event | `{"reqId":"req-e","res":{"statusCode":404}}` | ✅ JSON on stdout, `kubectl logs` |
+| **Traces** | *Where did the time go* as one request crosses services | members → events → NATS | ⏳ with Events (stage 8/9) |
+
+You usually start from a **metric** (error rate went up), narrow it with **labels** (only
+`/members/:id`, only 404s), then read the **logs** for those requests. Traces join that
+up across services, which is why they wait until there *is* a second service.
+
+### 9.2 OpenTelemetry: instrumentation separate from the backend
+
+**OpenTelemetry (OTel)** is a vendor-neutral standard for *producing* telemetry. Its parts:
+
+| Part | What it is | In this repo |
+| --- | --- | --- |
+| **API** | The interfaces code calls ("record this duration") | `@opentelemetry/api` |
+| **SDK** | The implementation: aggregates measurements, holds config | `NodeSDK` in [`instrumentation.ts`](../apps/members-service/src/instrumentation.ts) |
+| **Instrumentation** | Libraries that measure *other* libraries for you by patching them | `instrumentation-http` (durations), `@fastify/otel` (route names) |
+| **Exporter** | Sends or serves the data in some backend's format | `PrometheusExporter`, serving `:9464/metrics` |
+| **Collector** | Optional separate process that receives, processes and fans out telemetry | not yet (ADR-0009) |
+
+The point of the split: **services describe *what* happened; the backend is a
+configuration choice.** Switching from Prometheus to another vendor, or adding traces,
+changes the exporter in one file and leaves the instrumented code alone. The ticket
+suggested a Fastify-Prometheus plugin. That would have welded the two together, so
+we kept the *goal* (Prometheus + Grafana) and changed the *how* (§8.4's lesson again).
+
+**Loading order matters.** Instrumentation works by patching `http` and `fastify` *as
+they're loaded*, so the SDK must start first. That's why the container runs
+`node --import ./dist/instrumentation.js dist/index.js` ([Dockerfile](../apps/members-service/Dockerfile))
+instead of importing it from `index.ts`. And because the service is ESM, the Fastify
+plugin is registered explicitly in [`app.ts`](../apps/members-service/src/app.ts) rather
+than relying on automatic patching ([`fastifyOtel.ts`](../apps/members-service/src/infrastructure/fastifyOtel.ts)).
+
+### 9.3 Prometheus: pull, time series, labels
+
+Prometheus **pulls** ("scrapes"): every 15 s it does `GET /metrics` on each target and
+stores the numbers with a timestamp. Pull means the app needs no idea where Prometheus
+is, and a target that stops answering becomes an alert in itself (`up == 0`).
+
+A **time series** is one metric name plus one unique set of **labels**:
+
+```
+http_server_request_duration_count{job="members-service", http_route="/members/:id", http_response_status_code="404"}  10
+```
+
+The three metric types:
+
+- **Counter**: only goes up (total requests). On its own the value means little; you
+  graph its *rate*.
+- **Gauge**: goes up and down (memory in use, queue length).
+- **Histogram**: a family of counters, one per **bucket** (`_bucket{le="0.005"}`,
+  `le="0.01"` … `le="+Inf"`), plus `_count` and `_sum`. Each bucket counts the requests
+  that took *at most* that long, which lets you estimate percentiles later. Our
+  `http_server_request_duration` is one, in seconds, with buckets from 5 ms to 10 s.
+
+**Cardinality.** Every distinct label combination is a separate series, held in memory.
+If the label were the raw URL (`/members/7f3a…`), every member id would create new
+series without limit, and Prometheus would eventually fall over. So the label is the
+**route template** `/members/:id`, which `@fastify/otel` supplies. The test
+[`instrumentation.test.ts`](../apps/members-service/src/instrumentation.test.ts) asserts
+exactly this: two different ids, one series.
+
+### 9.4 The Prometheus Operator and ServiceMonitors
+
+Nobody edits `prometheus.yml` here. kube-prometheus-stack installs the **Prometheus
+Operator**, which adds a custom resource (CRD) called **ServiceMonitor**. Our chart ships
+one ([`servicemonitor.yaml`](../charts/members-service/templates/servicemonitor.yaml)):
+*"scrape the Service with these labels, on its port named `metrics`, every 15 s."* The
+Operator watches for ServiceMonitors and regenerates Prometheus's config. That's the
+Kubernetes **operator pattern**: you declare what you want, and a controller makes it so.
+
+Three details that bite:
+
+- Prometheus only picks ServiceMonitors labelled **`release: kube-prometheus-stack`**.
+  Without that label, nothing happens and no error shows anywhere.
+- The ServiceMonitor follows the **Service**, so Prometheus discovers every Pod behind it
+  automatically. New Pods from a rollout or the HPA are scraped with no change.
+- The CRD must exist before a chart can create a ServiceMonitor. That's why the flag
+  `metrics.serviceMonitor.enabled` defaults to `false` and deploy.yml turns it on
+  (`.claude/rules/k8s-helm.md`).
+
+`/metrics` is on its **own port (9464)**. The Ingress routes only the `http` port, so
+internal numbers never become public at `cms.local`.
+
+### 9.5 The RED method, and reading the dashboard's PromQL
+
+For any request-driven service, three numbers tell you most of what matters. This is
+the **RED method**: **R**ate, **E**rrors, **D**uration. The dashboard
+([`service-red-dashboard.yaml`](../k8s/monitoring/service-red-dashboard.yaml)) is built
+around it:
+
+```promql
+# Rate: requests per second, per route
+sum by (http_route) (rate(http_server_request_duration_count{job="members-service"}[$__rate_interval]))
+```
+
+- `rate(counter[window])` is the per-second increase over the window. It turns
+  "10 432 requests ever" into "0.86 per second now", and it copes with counter resets
+  when a Pod restarts.
+- `sum by (http_route)` adds the Pods together (2 replicas → 1 line), keeping only the
+  route label.
+- `$__rate_interval` is Grafana picking a window safely larger than the scrape interval.
+  `rate` needs at least two samples.
+
+```promql
+# Errors: 5xx share of all requests
+(sum(rate(..._count{job="members-service", http_response_status_code=~"5.."}[$__rate_interval])) or vector(0))
+  / sum(rate(..._count{job="members-service"}[$__rate_interval]))
+```
+
+`=~"5.."` is a regex match. `or vector(0)` turns "no 5xx series at all" into 0 instead
+of "No data". The dashboard shows 4xx separately: a 404 is the client's mistake, a 500
+is ours. Only the second should page someone.
+
+```promql
+# Duration: p95 latency
+histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_bucket{job="members-service"}[$__rate_interval])))
+```
+
+`histogram_quantile` estimates the value below which 95% of requests fall, from the
+bucket rates (`le` must survive the `sum by`). **Why p95 rather than the average?**
+Averages hide the slow tail. If 1 request in 20 takes 2 s, the average looks fine
+while every 20th user waits. p50/p95/p99 show the typical case and the tail.
+
+### 9.6 Structured logging
+
+Fastify's logger (pino) writes **one JSON object per line** to stdout. Kubernetes keeps
+stdout per container, and `kubectl logs` reads it. JSON makes the logs *queryable*
+(`jq 'select(.res.statusCode >= 400)'`) instead of grep-able. What we configured in
+[`app.ts`](../apps/members-service/src/app.ts):
+
+- `base: { service: "members-service" }` on every line, so mixed logs from several
+  services stay attributable.
+- `level` from `LOG_LEVEL` (ConfigMap, `values.yaml` → `config.logLevel`). Pino levels are
+  numbers: 30 info, 40 warn, 50 error.
+- `/health` has `logLevel: "silent"`. Probes every few seconds from 2 Pods would drown
+  the real requests. They're excluded from the metrics too.
+- Fastify adds a `reqId` to every line of a request, so you can follow one request through
+  its lines. Traces later extend that idea across services.
+
+### 9.7 metrics-server vs. Prometheus: two different metrics systems
+
+| | metrics-server | Prometheus |
+| --- | --- | --- |
+| Data | Current CPU/memory per Pod, no history | Any metric your apps expose, with history |
+| Used by | `kubectl top`, **HPA** | Grafana dashboards, alerts |
+| Installed by | `minikube addons enable metrics-server` | kube-prometheus-stack |
+
+The HPA from §7.6 never worked because metrics-server was off. It logged
+`FailedGetResourceMetric` for days. Enabling it fixed the HPA (`cpu: 2%/70%`); Prometheus
+had nothing to do with it. (Grafana can *also* show CPU, through Prometheus's own
+kubelet scrape, in the built-in "Kubernetes / Compute Resources" dashboards.)
+
+### 9.8 What setting it up taught (real problems we hit)
+
+| Problem | Lesson |
+| --- | --- |
+| The ticket named a Fastify Prometheus plugin, and the OTel Fastify instrumentation turned out to be deprecated (moved to `@fastify/otel`) | Check `npm view <pkg> deprecated` before adopting. Keep the ticket's goal, choose the how, and record why (ADR-0009) |
+| `NodeSDK` exports **traces** over OTLP to `localhost:4318` by default | Defaults assume a Collector exists. We set `OTEL_TRACES_EXPORTER=none`, otherwise every request logs a failed export |
+| A first draft added a `SIGTERM` handler to flush the SDK | Any SIGTERM listener disables Node's default exit, so Pods would hang 30 s until SIGKILL. A pull exporter has nothing to flush |
+| After deploying, a mystery series appeared: status 200, **no route** | The exporter's own `/metrics` server is a Node `http` server, so the instrumentation counted Prometheus's scrapes. Found by looking at real data, then pinned with a failing test, then fixed by ignoring the metrics port |
+| The metric is `http_server_request_duration`, with no `_seconds` suffix | The unit is in the `# UNIT` line. Read the real `/metrics` output before writing queries |
+| A new ServiceMonitor didn't show up in Targets for ~1 min | The Operator regenerates config, then Prometheus reloads. Check the generated config before assuming the selector is wrong |
+| `cms.local` resolves to Traefik's LoadBalancer IP (`10.109.105.150`), not `127.0.0.1` as the k8s runbook assumed | Ask the cluster (`kubectl get ingress` → ADDRESS) instead of trusting a hardcoded IP |
+| HPA still `<unknown>` right after enabling metrics-server | New Pods' CPU is ignored for a few minutes. Read `kubectl describe hpa` conditions before changing anything |
+| After a reinstall, 10 fresh 404s showed an error rate of **0** | A series is created on its first observation, so Prometheus's first sample of it was already `10`. `rate()` only sees increases *between* samples, so the jump from "no series" to 10 is invisible. The next 404s registered at once. In production you'd pre-initialise counters to 0 for known label values, or alert on `increase()` over longer windows |
+
+---
+
+## 10. Using AI tools (learning goal #5)
 
 The development method itself is a learning goal: **issue-driven development with Claude
 Code + Linear**. Each chunk of work maps to a Linear ticket (CMS-5, CMS-6, CMS-12 …, visible
@@ -552,7 +790,7 @@ The takeaway as a modern developer: AI tools are most effective when scoped by c
 tickets, anchored by written decisions (ADRs), and verified by tests — exactly the loop
 this repo models.
 
-### 9.1 How the agent is configured (`.claude/`)
+### 10.1 How the agent is configured (`.claude/`)
 
 An AI agent only follows the conventions it can see. Claude Code gives you five ways to
 make it see them. Each one has a different trigger and a different cost:
@@ -585,7 +823,7 @@ Two design points are worth remembering:
 
 ---
 
-## 10. Self-check — can you explain each of these?
+## 11. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -621,7 +859,11 @@ in parentheses (and the file it links) is where to look.
 - [ ] Readiness vs. liveness: which one stops a bad rollout, and which restarts a container? (§7.3)
 - [ ] Why does `/api/members/health` reach the service as `/health`? (§7.4)
 - [ ] Why must migrations be backward compatible when the image can be rolled back? (§7.5)
-- [ ] Why isn't the HPA scaling right now? (§7.6)
+- [ ] Why couldn't the HPA scale before stage 7, and what fixed it? (§7.6, §9.7)
+- [ ] Why can `scripts/cluster-up.sh` be run twice, but the old `helm install traefik` couldn't? (§7.7)
+- [ ] Why must the monitoring stack be installed before members-service? (§7.7)
+- [ ] How do you find minikube's real memory cap, and why is `free` inside the node misleading? (§7.7)
+- [ ] Why does the script check `/etc/hosts` and the tunnel instead of fixing them? (§7.7)
 
 **CI/CD**
 
@@ -630,23 +872,45 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why tag images with the commit SHA instead of `latest`? (§8.2)
 - [ ] Why can't GitHub's cloud runners deploy to minikube, and how is the self-hosted runner kept safe? (§8.3)
 
+**Observability**
+
+- [ ] Metrics, logs, traces: which one answers "how often", "what exactly", "where did the time go"? (§9.1)
+- [ ] OTel SDK vs. instrumentation vs. exporter: which part would change to switch backends? (§9.2)
+- [ ] Why must `instrumentation.js` load with `--import` before the app? (§9.2)
+- [ ] Why is the label `/members/:id` and never the raw URL? What breaks otherwise? (§9.3)
+- [ ] A new ServiceMonitor is ignored by Prometheus. What label do you check first? (§9.4)
+- [ ] Explain `sum by (http_route) (rate(..._count[5m]))` piece by piece. (§9.5)
+- [ ] Why p95 instead of the average? Why show 4xx and 5xx separately? (§9.5)
+- [ ] metrics-server vs. Prometheus: which one does the HPA use? (§9.7)
+- [ ] Why were Prometheus's scrapes being counted as requests, and how was that caught? (§9.8)
+
 **AI tools**
 
-- [ ] When would you put a convention in CLAUDE.md, in a rule, or in a skill? (§9.1)
-- [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§9.1)
-- [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§9.1)
-- [ ] How does `/start-ticket` decide which ticket is next? (§9.1)
+- [ ] When would you put a convention in CLAUDE.md, in a rule, or in a skill? (§10.1)
+- [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§10.1)
+- [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§10.1)
+- [ ] How does `/start-ticket` decide which ticket is next? (§10.1)
 
 ---
 
-## 11. Where to go next
+## 12. Where to go next
 
-The next stage is **Observability** (roadmap stage 7): Prometheus to collect metrics,
-Grafana to see them, plus structured logs. Stages 5–6 left natural starting points:
-enabling `metrics-server` so the HPA finally works (§7.6), the `/health` endpoints, and
-the deploy summaries CI already writes. After that, stage 8 repeats the DDD pattern in the
-Events service, and it gets the CI/CD pipeline for free by following the same folder
-conventions (`apps/<svc>`, `charts/<svc>`).
+The next stage is the **Events service** (roadmap stage 8). It repeats the DDD pattern in
+a second bounded context and gets CI/CD *and* observability for free by following the
+same conventions (`apps/<svc>`, `charts/<svc>`, `src/instrumentation.ts`, a ServiceMonitor).
+It appears in the RED dashboard's "Service" dropdown automatically. `/new-service`
+has the checklist.
+
+Observability has natural next steps that wait for a real need (ADR-0009):
+
+- **Traces**: once Members and Events talk (stage 9, NATS), add an OTel Collector and
+  Tempo, and put trace IDs in log lines. Then one request can be followed across services.
+- **Alerting**: `PrometheusRule`s (e.g. 5xx ratio > 1% for 5 min) routed by Alertmanager,
+  which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
+- **Log aggregation**: Loki, so logs from all Pods are searchable in Grafana instead of
+  one `kubectl logs` at a time.
+
+To rebuild everything from scratch at any time: `scripts/cluster-up.sh --fresh` (§7.7).
 
 Read, in this order, to go deeper than this guide:
 
@@ -654,5 +918,6 @@ Read, in this order, to go deeper than this guide:
 2. [`docker-local-dev.md`](docker-local-dev.md) — the container workflow, hands-on
 3. [`k8s-local-dev.md`](k8s-local-dev.md) — the Kubernetes deploy, hands-on
 4. [`ci-cd.md`](ci-cd.md) — the pipeline, runner setup and debugging
-5. [`adr/0007-learning-scope-and-roadmap.md`](adr/0007-learning-scope-and-roadmap.md) — the why behind the sequencing
-6. [`adr/context-map.md`](adr/context-map.md) — the strategic DDD picture
+5. [`observability.md`](observability.md) — metrics, dashboards and logs, hands-on
+6. [`adr/0007-learning-scope-and-roadmap.md`](adr/0007-learning-scope-and-roadmap.md) — the why behind the sequencing
+7. [`adr/context-map.md`](adr/context-map.md) — the strategic DDD picture

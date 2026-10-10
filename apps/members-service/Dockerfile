@@ -121,7 +121,10 @@ USER node
 # publish the port or make it reachable. That happens at runtime with:
 #   docker run -p 3001:3001 members-service   (host-port:container-port)
 # or via the "ports:" key in docker-compose.yml.
-EXPOSE 3001
+#   3001 — the API.
+#   9464 — Prometheus metrics (/metrics), served by the OpenTelemetry SDK on its
+#          own port so it is never routed through the public Ingress.
+EXPOSE 3001 9464
 
 # HEALTHCHECK tells Docker how to test whether the container is working.
 # Docker runs this command on a schedule and marks the container "healthy" or
@@ -151,5 +154,11 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 #
 # Note: database migrations are intentionally NOT run here. In Kubernetes those
 # belong in an init container / Job (see the K8s ticket, CMS-14).
+#
+# "--import ./dist/instrumentation.js" makes Node run the OpenTelemetry setup
+# BEFORE our app code. OTel instruments libraries (http, fastify) by patching
+# them as they load, so it has to be first. Preloading with --import is what the
+# OTel docs recommend for ESM apps: it guarantees the patches are in place before
+# any library loads. See src/instrumentation.ts.
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "dist/index.js"]
+CMD ["node", "--import", "./dist/instrumentation.js", "dist/index.js"]

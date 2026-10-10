@@ -51,6 +51,12 @@ spec:
             - name: http
               containerPort: 3001
               protocol: TCP
+            # Prometheus metrics, served by the OpenTelemetry SDK
+            # (src/instrumentation.ts). A separate port keeps /metrics off the
+            # public Ingress, which only routes to "http".
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
 
           # Environment variables from ConfigMap
           envFrom:

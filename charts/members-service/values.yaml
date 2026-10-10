@@ -26,6 +26,7 @@ autoscaling:
 config:
   nodeEnv: production
   port: "3001"
+  logLevel: info   # pino level: debug | info | warn | error — raise to debug while troubleshooting
 
 # The actual DB URL goes in secret.yaml; this key just names the secret
 database:
@@ -41,3 +42,16 @@ ingress:
   host: cms.local
   path: /api/members
 
+# Prometheus metrics (OpenTelemetry SDK, see apps/members-service/src/instrumentation.ts)
+metrics:
+  port: 9464
+  serviceMonitor:
+    # A ServiceMonitor is a custom resource from the Prometheus Operator
+    # (installed by kube-prometheus-stack, see docs/observability.md). On a
+    # cluster without it the CRD doesn't exist and the install would fail, so
+    # it is off by default; deploy.yml turns it on with --set.
+    enabled: false
+    interval: 15s
+    # kube-prometheus-stack's Prometheus only picks up ServiceMonitors that
+    # carry its release label.
+    release: kube-prometheus-stack

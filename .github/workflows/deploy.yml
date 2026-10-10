@@ -151,6 +151,9 @@ jobs:
       # --rollback-on-failure : if they never do, roll back to the previous release
       #                         (Helm 4's name for the old --atomic flag)
       # The SHA tag means every deploy is a new, traceable image (never "latest").
+      # metrics.serviceMonitor.enabled: register the service with Prometheus.
+      #   Needs kube-prometheus-stack installed in the cluster first (its CRDs),
+      #   see docs/observability.md. Charts without metrics simply ignore it.
       - name: Helm upgrade
         run: |
           helm upgrade --install "${{ matrix.service }}" "./charts/${{ matrix.service }}" \
@@ -158,6 +161,7 @@ jobs:
             --set image.tag="$TAG" \
             --set image.pullPolicy=IfNotPresent \
             --set ingress.enabled=true \
+            --set metrics.serviceMonitor.enabled=true \
             --wait --rollback-on-failure --timeout 4m
 
       - name: Summary

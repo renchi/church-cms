@@ -9,14 +9,14 @@ The project exists so the user can learn (ADR-0007). A ticket isn't done until i
 
 ## Every ticket updates `docs/study-guide.md`
 
-- **A new or extended numbered section** for the concept, in the same shape as §7 (Kubernetes) and §8 (CI/CD):
+- **A new or extended numbered section** for the concept, in the same shape as §7 (Kubernetes), §8 (CI/CD) and §9 (Observability):
   1. **The concept.** What it is and what problem it solves, in plain language first, then the vocabulary.
   2. **How we did it here.** The real files, linked as `path:line`.
   3. **Why this way.** The trade-off and the ADR it relates to, plus what was deliberately deferred.
   4. **What setting it up taught.** A problem → lesson table of real issues hit during the ticket (like §8.4). Fill it in during implementation; don't invent entries.
 - **§0 roadmap status** and the goal list at the top (e.g. "stage 7 done").
-- **§10 self-check**: add 4–8 questions, each pointing to its section (`(§9.3)`).
-- **§11 where to go next**, plus the "known gaps" lists if the ticket closes or opens one.
+- **§11 self-check**: add 4–8 questions, each pointing to its section (`(§9.3)`).
+- **§12 where to go next**, plus the "known gaps" lists if the ticket closes or opens one.
 - If a new companion doc is added, list it in the "companion docs" list at the top.
 
 ## Runbooks (`docs/<topic>.md`)

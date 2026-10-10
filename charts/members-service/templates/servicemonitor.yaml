@@ -1,0 +1,25 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+# ServiceMonitor = "Prometheus, please scrape this Service".
+# It is a Prometheus Operator custom resource: the Operator watches for these
+# and rewrites Prometheus's scrape config, so we never edit prometheus.yml by
+# hand. It finds the Service by label, then scrapes every Pod behind it.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "members-service.fullname" . }}
+  labels:
+    {{- include "members-service.labels" . | nindent 4 }}
+    # Prometheus only selects ServiceMonitors carrying this label.
+    release: {{ .Values.metrics.serviceMonitor.release }}
+spec:
+  # Use the Service's app.kubernetes.io/name label ("members-service") as the
+  # `job` label on every scraped series, so dashboards can filter by service.
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      {{- include "members-service.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics          # the Service port name, not a number
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}

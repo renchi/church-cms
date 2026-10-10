@@ -68,6 +68,8 @@ sudo -E minikube tunnel
 | Web frontend | <http://cms.local> |
 | Members API health | <http://cms.local/api/members/health> (expect `{"status":"ok"}`) |
 | Traefik dashboard (routers, services, middlewares) | <http://traefik.cms.local/dashboard/> |
+| Grafana: RED dashboard (rate, errors, latency per service) | <http://grafana.cms.local> → Dashboards → *CMS — Service RED metrics* ([setup](observability.md)) |
+| Prometheus: scrape targets (is each Pod `up`?) | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` → <http://localhost:9090/targets> |
 
 If `cms.local` doesn't resolve, the `/etc/hosts` entry is missing. See step 3 of
 [k8s-local-dev.md](k8s-local-dev.md).
@@ -113,5 +115,7 @@ The first measured run took **2 min 37 s** from merge to both services live.
 | CI jobs **cancelled**, "not acquired by Runner" | <https://www.githubstatus.com>. It's a GitHub outage; re-run later |
 | `cms.local` doesn't load | Is `minikube tunnel` running? Is minikube up? |
 | Pods not Ready | Kubernetes Dashboard → the pod → Events and Logs |
+| API slow or erroring | Grafana RED dashboard → which route, since when → then `kubectl logs` for those requests |
+| Grafana panels say **No data** | Prometheus Targets: is `members-service` up? See [observability troubleshooting](observability.md#troubleshooting) |
 
 More symptoms and fixes: the debugging table in [ci-cd.md](ci-cd.md#debugging).

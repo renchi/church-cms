@@ -1,0 +1,26 @@
+# Values for the Traefik Helm chart (the Ingress controller). Install / upgrade:
+#
+#   helm upgrade --install traefik traefik/traefik --version 41.6.1 \
+#     -n traefik --create-namespace -f k8s/traefik-values.yaml
+#
+# These were originally passed as --set flags (docs/k8s-local-dev.md §2). A values
+# file is easier to read, can carry comments, and makes re-installs identical.
+
+ports:
+  traefik:
+    expose:
+      # Expose Traefik's own API/dashboard port (8080) on the Service, so the
+      # Ingress in k8s/traefik-dashboard-ingress.yaml can route
+      # http://traefik.cms.local/dashboard/ to it.
+      default: true
+
+ingressRoute:
+  dashboard:
+    # Don't let the chart create its own IngressRoute (a Traefik-specific CRD)
+    # for the dashboard; we route to it with a standard Kubernetes Ingress instead.
+    enabled: false
+
+api:
+  # Serve the dashboard without authentication. Fine for a local learning
+  # cluster, never for anything reachable from a network.
+  insecure: true

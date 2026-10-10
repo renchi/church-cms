@@ -1,0 +1,64 @@
+# Values for the kube-prometheus-stack Helm chart, tuned for a single-node
+# minikube used for learning. Install / upgrade (see docs/observability.md):
+#
+#   helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace -f k8s/monitoring/kube-prometheus-stack-values.yaml
+#
+# What the stack contains:
+#   - Prometheus Operator: watches ServiceMonitor objects and turns them into
+#     Prometheus scrape config (our chart ships one: charts/members-service).
+#   - Prometheus: pulls (scrapes) /metrics endpoints and stores time series.
+#   - Grafana: dashboards on top of Prometheus (preconfigured as a data source).
+#   - Alertmanager: routes alerts. Installed but not used yet.
+#   - node-exporter + kube-state-metrics: node and Kubernetes-object metrics,
+#     which power the built-in "Kubernetes / Compute Resources" dashboards.
+
+grafana:
+  # Reachable at http://grafana.cms.local through Traefik, like cms.local.
+  # Needs the /etc/hosts entry and `minikube tunnel` (docs/k8s-local-dev.md §3).
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hosts:
+      - grafana.cms.local
+    path: /
+  # The dashboard sidecar loads any ConfigMap labelled grafana_dashboard: "1"
+  # as a dashboard (on by default; stated here so it's visible). That is how
+  # k8s/monitoring/service-red-dashboard.yaml gets into Grafana.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+prometheus:
+  prometheusSpec:
+    # Keep two days of data — plenty for experiments, small on disk.
+    retention: 2d
+    # Prometheus only scrapes ServiceMonitors labelled release=kube-prometheus-stack
+    # (the chart default). Our chart sets that label; see
+    # charts/members-service/templates/servicemonitor.yaml.
+    resources:
+      requests: { cpu: 100m, memory: 400Mi }
+      limits: { memory: 1Gi }
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 64Mi }
+
+# minikube runs these control-plane components bound to localhost inside the
+# node, so Prometheus can't reach them: their targets would show DOWN forever
+# and fire alerts. Not scraping them is the usual minikube setting.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
