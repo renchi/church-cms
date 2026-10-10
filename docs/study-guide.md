@@ -377,7 +377,7 @@ browser bundles — the Dockerfile comment explains why our server-only page doe
 
 Even at two services, several distributed-systems ideas are already in play:
 
-- **Service boundaries** — Members (core) and the soon-to-come Events service are separate
+- **Service boundaries** — Members (core) and Events (stage 8, §10) are separate
   deployables with separate databases. They communicate over the network, not shared memory.
 - **Synchronous now, asynchronous later** — Phase 1 is HTTP between services (the web app
   calls the API directly). Phase 2 (stage 9) introduces **NATS** for async **domain
@@ -622,7 +622,7 @@ The decision record: [ADR-0009](adr/0009-observability-opentelemetry.md).
 | --- | --- | --- | --- |
 | **Metrics** | *How much / how often / how fast*, as numbers over time. Cheap to store, great for graphs and alerts | 0.86 req/s, p95 = 7 ms | ✅ Prometheus + Grafana |
 | **Logs** | *What exactly happened* in one event | `{"reqId":"req-e","res":{"statusCode":404}}` | ✅ JSON on stdout, `kubectl logs` |
-| **Traces** | *Where did the time go* as one request crosses services | members → events → NATS | ⏳ with Events (stage 8/9) |
+| **Traces** | *Where did the time go* as one request crosses services | members → events → NATS | ⏳ with NATS (stage 9), once requests cross services |
 
 You usually start from a **metric** (error rate went up), narrow it with **labels** (only
 `/members/:id`, only 404s), then read the **logs** for those requests. Traces join that
@@ -819,6 +819,20 @@ Vocabulary:
 - **Domain event**: a past-tense fact (`AttendanceRecorded`), the future contract
   between contexts.
 
+Four more terms come up as soon as a rule spans several aggregates, because each
+aggregate is saved on its own, without one transaction around all of them:
+
+- **Race condition**: two requests interleave so that both pass a check before either
+  writes. Example: two check-ins for the same member both see "not checked in yet".
+- **Idempotent**: doing it twice has the same effect as doing it once. Cancelling an
+  already-cancelled event is a harmless no-op, so a failed cancel can just be retried.
+- **Optimistic locking**: don't lock anything while working; at the moment of saving,
+  check that nobody else saved since you loaded (a `version` number), and fail with a
+  conflict if they did.
+- **Eventual consistency**: a rule that isn't true at every instant, but becomes true
+  shortly after. Today that happens inside one use case (cancel, then decline the
+  volunteers); at stage 9 it happens across services through NATS events.
+
 ### 10.2 How we did it here
 
 - **Three aggregates**, one file each, in
@@ -826,12 +840,12 @@ Vocabulary:
   is separate from `ServiceEvent` because a service with 500 attendees would otherwise be
   one huge aggregate that every check-in has to lock (ADR-0004's decision log).
 - **A rule that needs another aggregate**: `Attendance.record()` takes the event and asks
-  [`event.isOpenForCheckIn()`](../apps/events-service/src/domain/ServiceEvent.ts#L239)
+  [`event.isOpenForCheckIn()`](../apps/events-service/src/domain/ServiceEvent.ts#L256)
   ([`Attendance.ts:65`](../apps/events-service/src/domain/Attendance.ts#L65)).
 - **Uniqueness across aggregates** ("one check-in per member per event"): the use case
   checks first for a friendly 409
   ([`RecordAttendanceUseCase.ts:29`](../apps/events-service/src/application/RecordAttendanceUseCase.ts#L29)),
-  and a unique index ([`schema.prisma:62`](../apps/events-service/prisma/schema.prisma#L62))
+  and a unique index ([`schema.prisma:65`](../apps/events-service/prisma/schema.prisma#L65))
   settles races. Its error is mapped to the same 409
   ([`uniqueViolation.ts:8`](../apps/events-service/src/infrastructure/uniqueViolation.ts#L8)).
 - **A use case touching many aggregates**: cancelling saves the event, then declines
@@ -845,7 +859,7 @@ Vocabulary:
 - **A value object**: [`Venue`](../apps/events-service/src/domain/ServiceEvent.ts#L27),
   stored as three flat columns ([`schema.prisma:29`](../apps/events-service/prisma/schema.prisma#L29)).
 - **Time as a parameter**: domain methods take `now`, so tests pin the clock
-  ([`ServiceEvent.ts:152`](../apps/events-service/src/domain/ServiceEvent.ts#L152)).
+  ([`ServiceEvent.ts:170`](../apps/events-service/src/domain/ServiceEvent.ts#L170)).
 - **Its own database**: a second Postgres, both in Kubernetes
   ([`k8s/events-postgres.yaml`](../k8s/events-postgres.yaml)) and in Compose (`events-db`
   on host port 5433, [`docker-compose.yml`](../docker-compose.yml)). `memberId` columns
@@ -885,6 +899,7 @@ Vocabulary:
 | `curl http://…/members?limit=1` failed in zsh with `no matches found` | zsh treats `?` as a glob. Quote URLs that contain `?` or `&` |
 | Code review: an edit made on a stale copy could save `status: scheduled` over a cancellation | "Load, change, save everything" loses updates when two requests overlap. A `version` column turns the silent overwrite into a `409` (optimistic locking). The column came as a **second** migration: `init` was already applied in the cluster, and Prisma rejects an applied migration whose checksum changed |
 | Code review: cancelling saved the event *last*, so a volunteer assigned during the cancel stayed `pending` | Rules across aggregates without a transaction need an argument that **every** interleaving is covered. Saving the event first, plus a re-check on the assign side, closes it. Cancel became idempotent so it stays retryable |
+| After adding the `version` column, editing an event created **before** the migration returned `500` (`Unique constraint failed on the fields: (id)`) | The repository uses version `0` to mean "never saved, INSERT it", and the migration gave existing rows `DEFAULT 0`. So old rows were inserted again. Fix: `DEFAULT 1`, plus a test that inserts a row the way the *previous* release would. Lesson: a migration must be checked against the data that already exists, not just against a fresh database (which is all the integration tests use) |
 | Running the "stop the database" exercise, the 500 body contained Prisma's message and the DB hostname | Default error handlers leak internals. Recorded as a gap for both services rather than fixed in one |
 
 ---

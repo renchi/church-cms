@@ -73,7 +73,7 @@ three such rules here, and each one is solved differently.
 
 [`Attendance.record()`](../apps/events-service/src/domain/Attendance.ts#L52) receives the
 `ServiceEvent` itself and asks it
-[`isOpenForCheckIn()`](../apps/events-service/src/domain/ServiceEvent.ts#L239). The event
+[`isOpenForCheckIn()`](../apps/events-service/src/domain/ServiceEvent.ts#L256). The event
 answers a question about its own state; `Attendance` doesn't read `status` and
 re-implement the rule. This is fine because both aggregates are in the **same** context.
 (Passing a `Member` in would not be fine. That's another context.)
@@ -84,11 +84,11 @@ No single `Attendance` can know whether another one exists. The use case checks 
 ([`RecordAttendanceUseCase.ts:29`](../apps/events-service/src/application/RecordAttendanceUseCase.ts#L29)),
 which gives a clear `409`. That check alone has a race: two requests can both read
 "not checked in yet" before either writes. The real guarantee is the unique index
-([`schema.prisma:62`](../apps/events-service/prisma/schema.prisma#L62)). Only one INSERT
+([`schema.prisma:65`](../apps/events-service/prisma/schema.prisma#L65)). Only one INSERT
 can win, and the loser's Prisma error `P2002` is translated into the same
 `ConflictError` ([`uniqueViolation.ts`](../apps/events-service/src/infrastructure/uniqueViolation.ts#L8)).
 An integration test fires two check-ins at once and expects exactly one `201` and one
-`409` ([`eventRoutes.integration.test.ts:193`](../apps/events-service/src/api/eventRoutes.integration.test.ts#L193)).
+`409` ([`eventRoutes.integration.test.ts:194`](../apps/events-service/src/api/eventRoutes.integration.test.ts#L194)).
 
 ### 3.3 "Cancelling declines all volunteers": several saves, no transaction
 
@@ -136,7 +136,7 @@ inside it, so an invalid `Venue` can't exist anywhere in the code.
 
 It needs no table, either. The repository flattens it into three columns, `venueName`,
 `venueAddress` and `venueIsOnline` ([`schema.prisma:29`](../apps/events-service/prisma/schema.prisma#L29)),
-and [`toRow()`](../apps/events-service/src/infrastructure/PrismaServiceEventRepository.ts#L25)
+and [`toRow()`](../apps/events-service/src/infrastructure/PrismaServiceEventRepository.ts#L27)
 is the only code that knows that.
 
 ---
@@ -145,7 +145,7 @@ is the only code that knows that.
 
 Three rules depend on the clock: "scheduled in the future", "check-in opens 2 hours
 before", and the cancellation timestamp. Every domain method takes `now: Date = new Date()`
-([`ServiceEvent.schedule`](../apps/events-service/src/domain/ServiceEvent.ts#L152)).
+([`ServiceEvent.schedule`](../apps/events-service/src/domain/ServiceEvent.ts#L170)).
 Production passes nothing and gets the real clock. Tests pass a fixed date, so
 "exactly two hours before" is tested exactly, and no test breaks at midnight.
 
