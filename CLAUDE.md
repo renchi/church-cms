@@ -48,9 +48,9 @@ Never work directly on main. Scaffold new services with `/new-service`, and only
 
 ```
 apps/       # deployable services (members-service, events-service, web)
-packages/   # shared packages (e.g. @cms/events for domain event types)
+packages/   # shared packages: @cms/events, the cross-context message contract + NATS plumbing
 charts/     # one Helm chart per deployable app
-k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik, monitoring, ...)
+k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik, monitoring, NATS, ...)
 scripts/    # cluster-up.sh: idempotent bootstrap that runs the k8s + observability runbooks
 docs/       # learning material and runbooks (see Docs index)
 docs/adr/   # architecture decision records. Read these before changing architecture
@@ -83,7 +83,7 @@ Full context map: [`docs/adr/context-map.md`](docs/adr/context-map.md). Details 
 - **Members is the core domain.** Every other context references a `memberId`. It never duplicates person data.
 - **Each context owns its own database.** One Postgres per service. No context reads another's database.
 - **Anti-corruption layer:** never import another context's code. Reference it by ID. ESLint enforces this (`no-restricted-imports`).
-- **Cross-context communication:** sync HTTP now. Async domain events over NATS come at stage 9: `AttendanceRecorded` (Events → Members) and `MemberArchived` (Members → Events).
+- **Cross-context communication:** async domain events over NATS JetStream (stage 9, ADR-0010): `MemberArchived` (Members → Events) and `AttendanceRecorded` (Events → Members). Wire types, subjects and the outbox/consumer plumbing live in `packages/events` (`@cms/events`). Publishers write to a transactional outbox (never publish directly from a use case); consumers are idempotent via `UnitOfWork.runOnce`. A new cross-context event is a new type in `@cms/events` plus a mapping in the publisher's `infrastructure/outbox.ts`.
 
 ## Environments
 
@@ -105,7 +105,8 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `Offering` covers tithes + offerings (no separate `Tithe` aggregate)  | Pledge tracking / tithe commitment analysis is prioritised                   | 0003        |
 | `ServiceEvent` covers services + one-off events (no split aggregates) | Type-specific invariants appear in more than one or two places               | 0004        |
 | `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
-| Phase 1 uses sync HTTP between services                               | Stage 9 of the roadmap: wire NATS for async events                           | 0007        |
+| One outbox relay batch at a time per service (advisory lock)          | One relay can't keep up, or polling latency/load matters                     | 0010        |
+| Only `MemberArchived` and `AttendanceRecorded` cross the bus          | A context needs another event (e.g. Comms/Groups consuming `MemberRegistered`) | 0010        |
 | OTel metrics only, Prometheus pull; no Collector or traces            | Events service + NATS live, or traces wanted                                 | 0009        |
 
 ## ADR index
@@ -121,6 +122,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | 0007 | Learning scope & roadmap: two-service slice first                    |
 | 0008 | Database hosting strategy (Docker → minikube → managed cloud)        |
 | 0009 | Observability: OpenTelemetry instrumentation, Prometheus + Grafana   |
+| 0010 | Async messaging: NATS JetStream, transactional outbox, idempotent consumers |
 
 ## Docs index
 
@@ -133,4 +135,5 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `docs/k8s-local-dev.md`       | Runbook: minikube, Traefik, Helm deploys                                                                      |
 | `docs/ci-cd.md`               | Runbook: GitHub Actions, self-hosted runner, debugging                                                        |
 | `docs/observability.md`       | Runbook: Prometheus, Grafana, metrics and logs, with hands-on exercises                                       |
+| `docs/messaging.md`           | Runbook: NATS JetStream, following an event across services, replay and idempotency exercises                |
 | `docs/status-dashboards.md`   | Where to watch the pipeline and the cluster                                                                   |

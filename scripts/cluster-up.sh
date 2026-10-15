@@ -11,6 +11,7 @@
 # step does and why, read that section:
 #   docs/k8s-local-dev.md   — minikube, Traefik, Postgres, images, Helm deploys
 #   docs/observability.md   — metrics-server, Prometheus, Grafana
+#   docs/messaging.md       — NATS JetStream, the message bus between services
 #
 # Idempotent: safe to run again at any time. Every step either creates something
 # or brings it to the declared state ("helm upgrade --install", "kubectl apply"),
@@ -27,9 +28,9 @@ set -euo pipefail   # stop on the first error, on unset variables, and on failur
 # Versions are pinned so a run months from now installs exactly what was tested.
 TRAEFIK_CHART_VERSION=41.6.1
 KPS_CHART_VERSION=92.2.0          # kube-prometheus-stack
-# Resources for a NEW cluster. Prometheus + Grafana + the apps already use ~2.7 GB;
-# the Events service and NATS come next. An existing cluster can't be resized —
-# that needs --fresh.
+NATS_CHART_VERSION=2.15.0
+# Resources for a NEW cluster. Prometheus + Grafana + both services + NATS fit in
+# this. An existing cluster can't be resized — that needs --fresh.
 MINIKUBE_MEMORY_MB=6144
 MINIKUBE_CPUS=4
 # Pin the container runtime: we build images straight into minikube's Docker
@@ -120,7 +121,8 @@ minikube addons enable metrics-server
 step "k8s-local-dev §2" "Traefik Ingress controller (chart $TRAEFIK_CHART_VERSION)"
 helm repo add traefik https://traefik.github.io/charts --force-update >/dev/null
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null
-helm repo update traefik prometheus-community >/dev/null
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/ --force-update >/dev/null
+helm repo update traefik prometheus-community nats >/dev/null
 helm_quiet upgrade --install traefik traefik/traefik \
   --version "$TRAEFIK_CHART_VERSION" \
   -n traefik --create-namespace \
@@ -150,6 +152,17 @@ step "k8s-local-dev §5" "Postgres for members-service and events-service (one e
 kubectl apply -f k8s/postgres.yaml -f k8s/events-postgres.yaml
 kubectl rollout status deployment/members-postgres --timeout=3m
 kubectl rollout status deployment/events-postgres --timeout=3m
+
+# --- NATS --------------------------------------------------------------------
+# Before the apps, so they find it on their first connection attempt (they'd
+# keep retrying anyway, and their outboxes would hold events until then).
+step "messaging §1" "NATS JetStream (chart $NATS_CHART_VERSION)"
+helm_quiet upgrade --install nats nats/nats \
+  --version "$NATS_CHART_VERSION" \
+  -n nats --create-namespace \
+  -f k8s/nats-values.yaml \
+  --wait --timeout 4m
+ok "NATS ready"
 
 # --- 4. Images ---------------------------------------------------------------
 # Build straight into minikube's own Docker daemon, so the cluster can use the
@@ -322,6 +335,21 @@ targets_up() {
 for job in members-service events-service; do
   if wait_for 180 "$job targets up in Prometheus" targets_up "$job"; then
     ok "Prometheus scrapes $job (2 pods up)"
+  else
+    smoke_ok=false
+  fi
+done
+
+# Each service creates its durable consumer on the OTHER service's stream when it
+# connects (ADR-0010). Both existing means both services reached NATS.
+# consumer_exists <stream> <durable>
+consumer_exists() {
+  kubectl exec -n nats deploy/nats-box -- nats consumer info "$1" "$2" >/dev/null 2>&1
+}
+for pair in "MEMBERS events-service" "EVENTS members-service"; do
+  read -r stream durable <<<"$pair"
+  if wait_for 60 "consumer $durable on stream $stream" consumer_exists "$stream" "$durable"; then
+    ok "NATS: $durable consumes from $stream"
   else
     smoke_ok=false
   fi

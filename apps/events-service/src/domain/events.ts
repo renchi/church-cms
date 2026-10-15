@@ -1,10 +1,12 @@
 // Domain events: facts about something that already happened in this context,
 // named in the past tense. Payloads follow ADR-0004.
 //
-// For now the aggregates only RETURN these; nothing publishes them yet. Wiring
-// them onto NATS is stage 9 (CMS-22). That is also when the ones other contexts
-// consume (AttendanceRecorded → Members) move to the shared @cms/events package,
-// which becomes the published contract between the two services.
+// The aggregates RETURN these; they never publish anything. The one another
+// context consumes, AttendanceRecorded (→ Members), is handed to the
+// repository, saved to the outbox in the same transaction, and published to
+// NATS by the outbox relay (ADR-0010). Its WIRE shape is a separate type in
+// @cms/events (AttendanceRecordedV1), mapped in infrastructure/outbox.ts, so
+// this internal type can change without breaking Members.
 import type { EventType, VenueProps } from "./ServiceEvent.js";
 import type { VolunteerRole } from "./VolunteerAssignment.js";
 

@@ -181,6 +181,25 @@ kubectl get pods -l 'app in (members-postgres, events-postgres)' --watch
 
 > **If the Pod stays Pending:** the PersistentVolumeClaim may still be provisioning. Run `kubectl get pvc` and wait for `STATUS` to show `Bound`, then the Pod will start automatically.
 
+### 5b. Install NATS (the message bus)
+
+The two services exchange domain events (`MemberArchived`, `AttendanceRecorded`)
+through NATS JetStream, installed like Traefik: a Helm chart, in its own namespace.
+Do it **before** the services, so they connect on their first try. (They'd keep
+retrying if it were missing, and HTTP still works, but no events would flow.)
+
+```bash
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+helm upgrade --install nats nats/nats --version 2.15.0 \
+  -n nats --create-namespace -f k8s/nats-values.yaml --wait
+kubectl get pods -n nats
+# nats-0                     2/2   Running   0   40s
+# nats-box-...               1/1   Running   0   40s
+```
+
+What NATS is, what the values do, and how to watch events flow:
+[`messaging.md`](messaging.md).
+
 ---
 
 ## 6. Prisma migrations (automatic)
@@ -554,7 +573,9 @@ idempotent, so a cancel that failed half-way can simply be retried
 
 ---
 
-## Next: observability
+## Next: observability and messaging
 
 To see metrics and dashboards for what you just deployed (Prometheus, Grafana,
 metrics-server for the HPA), follow [`observability.md`](observability.md).
+To watch the two services talk to each other through NATS, follow
+[`messaging.md`](messaging.md).

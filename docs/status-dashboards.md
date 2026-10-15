@@ -72,6 +72,7 @@ sudo -E minikube tunnel
 | Traefik dashboard (routers, services, middlewares) | <http://traefik.cms.local/dashboard/> |
 | Grafana: RED dashboard (rate, errors, latency per service) | <http://grafana.cms.local> → Dashboards → *CMS — Service RED metrics* ([setup](observability.md)) |
 | Prometheus: scrape targets (is each Pod `up`?) | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` → <http://localhost:9090/targets> |
+| NATS: streams and consumers as JSON (messages stored, pending per consumer) | `kubectl -n nats port-forward pod/nats-0 8222` → <http://localhost:8222/jsz?consumers=true> ([runbook](messaging.md)) |
 
 If `cms.local` doesn't resolve, the `/etc/hosts` entry is missing. See step 3 of
 [k8s-local-dev.md](k8s-local-dev.md).
@@ -84,6 +85,12 @@ kubectl get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.spec.te
                                        # which commit each service is running
 kubectl logs <members-pod> -c migrate  # migration output (same for <events-pod>)
 helm history members-service           # every deploy, including rollbacks (or events-service)
+
+# Messaging (docs/messaging.md): is anything stuck between the services?
+kubectl exec -n nats deploy/nats-box -- nats stream ls          # messages stored per stream
+kubectl exec -n nats deploy/nats-box -- nats consumer ls MEMBERS # "Unprocessed" > 0 for long = a stuck consumer
+kubectl exec deploy/members-postgres -- psql -U cms_user -d members_db -tAc \
+  'SELECT count(*) FROM "OutboxMessage" WHERE "publishedAt" IS NULL'   # > 0 for long = the relay can't publish
 ```
 
 ---
@@ -118,6 +125,7 @@ The first measured run took **2 min 37 s** from merge to both services live.
 | `cms.local` doesn't load | Is `minikube tunnel` running? Is minikube up? |
 | Pods not Ready | Kubernetes Dashboard → the pod → Events and Logs |
 | API slow or erroring | Grafana RED dashboard → which route, since when → then `kubectl logs` for those requests |
+| A change in one service never shows up in the other (archive → volunteers still pending; check-in → count unchanged) | The two terminal checks under "Messaging" above: unpublished outbox rows point at the publisher (or NATS), unprocessed consumer messages at the consumer. See [messaging troubleshooting](messaging.md#troubleshooting) |
 | Grafana panels say **No data** | Prometheus Targets: is `members-service` (or `events-service`) up? See [observability troubleshooting](observability.md#troubleshooting) |
 
 More symptoms and fixes: the debugging table in [ci-cd.md](ci-cd.md#debugging).

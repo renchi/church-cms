@@ -55,6 +55,11 @@ COPY apps/events-service/package.json  ./apps/events-service/package.json
 # --frozen-lockfile fails the build if pnpm-lock.yaml is out of date.
 # This guarantees the container always uses exactly the versions that were
 # tested, with no silent upgrades.
+# The shared @cms/events package (ADR-0010) is copied WHOLE, source included,
+# before the install: pnpm runs its "prepare" script (tsc) during install, which
+# builds packages/events/dist. It's small and rarely changes, so this costs
+# little caching.
+COPY packages/events                   ./packages/events
 RUN pnpm install --frozen-lockfile
 
 # Source files change on every commit — this layer is almost never cached,

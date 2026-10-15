@@ -11,6 +11,13 @@ spec:
       {{- include "members-service.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      # Kubernetes only replaces Pods when this Pod template changes, and a
+      # changed ConfigMap isn't part of it: running Pods would keep the old
+      # environment (e.g. no NATS_URL) until something else restarted them.
+      # Hashing the rendered ConfigMap into an annotation fixes that: new
+      # config → new hash → new template → a rolling update.
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "members-service.selectorLabels" . | nindent 8 }}
     spec:

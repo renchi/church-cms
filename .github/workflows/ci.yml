@@ -97,3 +97,6 @@ jobs:
       # the 70% thresholds in vitest.config.ts.
       - run: pnpm --filter members-service test:coverage
       - run: pnpm --filter events-service test:coverage
+      # The shared @cms/events package: its integration test runs a real NATS
+      # server in Docker (ADR-0010: dedupe, durable consumers, replay).
+      - run: pnpm --filter @cms/events test

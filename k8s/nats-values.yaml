@@ -1,0 +1,64 @@
+# Values for the official NATS Helm chart (CMS-22, ADR-0010).
+#
+# Install (docs/messaging.md §1, also run by scripts/cluster-up.sh):
+#   helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+#   helm upgrade --install nats nats/nats --version 2.15.0 \
+#     -n nats --create-namespace -f k8s/nats-values.yaml
+#
+# NATS is a cluster add-on like Traefik and Prometheus: installed once from the
+# runbook, in its own namespace, not by deploy.yml. The services reach it at
+#   nats://nats.nats.svc.cluster.local:4222   (<service>.<namespace>.svc...)
+# which is `config.natsUrl` in both service charts.
+#
+# Only the settings we change are listed; everything else keeps the chart's
+# defaults (`helm show values nats/nats --version 2.15.0` lists them all).
+
+config:
+  # One server, not a cluster. `cluster.enabled` stays false (the default).
+  # In production you'd run 3, so a stream can keep a copy on each (replicas: 3)
+  # and survive losing a server. One is plenty for learning on minikube.
+
+  jetstream:
+    # JetStream is the persistence layer: streams stored on disk, durable
+    # consumers, redelivery, replay. Without it NATS only forwards messages to
+    # whoever is listening right now; a stopped service would miss them.
+    enabled: true
+    fileStore:
+      enabled: true
+      pvc:
+        enabled: true
+        # The chart's default is 10Gi. Our streams hold a few KB of events, and
+        # minikube's disk is shared with Postgres, Prometheus and the images.
+        size: 1Gi
+    # Memory-backed streams lose their messages when NATS restarts, which
+    # would defeat replay. Ours are all file-backed (StorageType.File in
+    # packages/events/src/nats.ts), so memory streams stay off.
+    memoryStore:
+      enabled: false
+
+  # The HTTP monitoring endpoint on port 8222 (on by default; listed so it's
+  # obvious where docs/messaging.md's `kubectl port-forward ... 8222` goes).
+  monitor:
+    enabled: true
+    port: 8222
+
+container:
+  image:
+    # The server version that goes with chart 2.15.0. docker-compose.yml and
+    # the integration tests run the same version.
+    tag: 2.15.0-alpine
+  merge:
+    # Requests: what the scheduler reserves for NATS. Limits: the most it may use.
+    # NATS is small: a few MB at idle, well under these.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+
+# nats-box: a small Pod with the `nats` CLI, already configured to reach the
+# server. docs/messaging.md uses it to inspect streams and consumers:
+#   kubectl exec -n nats deploy/nats-box -- nats stream ls
+natsBox:
+  enabled: true

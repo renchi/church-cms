@@ -80,3 +80,27 @@ model VolunteerAssignment {
   // member may still hold two different roles in one event.
   @@unique([eventId, memberId, role])
 }
+
+// The transactional outbox (ADR-0010). RecordAttendanceUseCase saves the
+// Attendance and an AttendanceRecorded row here IN ONE TRANSACTION; the outbox
+// relay (src/infrastructure/messaging.ts) then publishes it to NATS and sets
+// publishedAt. Named "Message", not "Event": in this context "event" already
+// means a church service or event.
+model OutboxMessage {
+  id          String    @id // the message id; also sent as the Nats-Msg-Id header
+  subject     String // the NATS subject, e.g. cms.events.attendance.recorded
+  payload     Json // the wire event from @cms/events
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime? // null = not published yet
+
+  // The relay's query: unpublished rows, oldest first.
+  @@index([publishedAt, createdAt])
+}
+
+// Message ids already processed (ADR-0010). JetStream delivers at least once;
+// the consumer inserts the id in the same transaction as its change, so a
+// second delivery of MemberArchived changes nothing.
+model ProcessedMessage {
+  id          String   @id
+  processedAt DateTime @default(now())
+}

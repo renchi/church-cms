@@ -1,0 +1,33 @@
+{
+  "name": "@cms/events",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The published contract between bounded contexts: wire event types, NATS subjects, and the outbox/consumer plumbing both services share.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude '**/*.integration.test.ts'"
+  },
+  "dependencies": {
+    "@nats-io/jetstream": "^3.4.0",
+    "@nats-io/transport-node": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "testcontainers": "^10.28.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

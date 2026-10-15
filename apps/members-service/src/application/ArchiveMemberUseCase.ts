@@ -7,7 +7,10 @@ export class ArchiveMemberUseCase {
   async execute(id: string): Promise<void> {
     const member = await this.repo.findById(id);
     if (!member) throw new NotFoundError("Member not found");
-    member.archive();
-    await this.repo.save(member);
+    const event = member.archive();
+    // Saved with the member, in one transaction. The outbox relay then
+    // publishes it, and the Events context declines the member's future
+    // volunteer assignments (ADR-0004, ADR-0010).
+    await this.repo.save(member, [event]);
   }
 }

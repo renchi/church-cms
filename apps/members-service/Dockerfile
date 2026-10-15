@@ -56,6 +56,11 @@ COPY apps/members-service/package.json ./apps/members-service/package.json
 # Copy the other apps' manifests so pnpm can resolve the full workspace graph.
 COPY apps/web/package.json             ./apps/web/package.json
 COPY apps/events-service/package.json  ./apps/events-service/package.json
+# The shared @cms/events package (ADR-0010) is copied WHOLE, source included,
+# before the install: pnpm runs its "prepare" script (tsc) during install, which
+# builds packages/events/dist. It's small and rarely changes, so this costs
+# little caching.
+COPY packages/events                   ./packages/events
 RUN pnpm install --frozen-lockfile
 # --frozen-lockfile = fail if pnpm-lock.yaml is out of date. Ensures the build
 # always uses exactly the versions that were tested, with no silent upgrades.
@@ -67,9 +72,11 @@ COPY apps/members-service/tsconfig.json ./apps/members-service/tsconfig.json
 COPY apps/members-service/prisma        ./apps/members-service/prisma
 COPY apps/members-service/src           ./apps/members-service/src
 
-# Generate the Prisma client: reads schema.prisma and writes two things into
-# node_modules — (1) TypeScript types for our DB models, and (2) a platform-
-# specific query-engine binary (.so.node file) for the current OS + OpenSSL.
+# Generate the Prisma client: reads schema.prisma and writes two things —
+# (1) TypeScript types for our DB models, and (2) a platform-specific
+# query-engine binary (.so.node file) for the current OS + OpenSSL.
+# They go into apps/members-service/generated/client, not into node_modules
+# (see the `output` comment in prisma/schema.prisma).
 RUN pnpm --filter members-service exec prisma generate
 
 # Compile TypeScript → JavaScript. Output lands in apps/members-service/dist/.
@@ -110,8 +117,15 @@ ENV NODE_ENV=production
 #   ./prisma                 — the schema, kept so "prisma migrate deploy" can run later
 COPY --from=builder --chown=node:node /repo/node_modules                 /repo/node_modules
 COPY --from=builder --chown=node:node /repo/apps/members-service/node_modules ./node_modules
+# @cms/events: the service's node_modules/@cms/events is a symlink to
+# /repo/packages/events (a pnpm workspace link), so the package's built dist,
+# package.json and its own node_modules must exist at that same path.
+COPY --from=builder --chown=node:node /repo/packages/events               /repo/packages/events
 COPY --from=builder --chown=node:node /repo/apps/members-service/dist         ./dist
 COPY --from=builder --chown=node:node /repo/apps/members-service/prisma       ./prisma
+# The Prisma client, generated into this service's own folder instead of the
+# shared node_modules (see the `output` comment in prisma/schema.prisma).
+COPY --from=builder --chown=node:node /repo/apps/members-service/generated    ./generated
 
 # Switch to the unprivileged "node" user for all instructions from here on.
 # Best practice: if an attacker exploits a bug in our app, they get a limited

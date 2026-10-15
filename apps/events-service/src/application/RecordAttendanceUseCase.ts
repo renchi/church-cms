@@ -28,8 +28,10 @@ export class RecordAttendanceUseCase {
     const existing = await this.attendances.findByEventAndMember(eventId, input.memberId.trim());
     if (existing) throw new ConflictError("Member is already checked in to this event");
 
-    const { attendance } = Attendance.record({ event, ...input });
-    await this.attendances.save(attendance);
+    const { attendance, domainEvent } = Attendance.record({ event, ...input });
+    // Saved with the attendance, in one transaction. The outbox relay then
+    // publishes it, and Members updates the attendance summary (ADR-0010).
+    await this.attendances.save(attendance, [domainEvent]);
     return { id: attendance.id };
   }
 }

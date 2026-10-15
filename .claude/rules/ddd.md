@@ -33,7 +33,10 @@ import { Member } from "../members/domain/Member";
 - Shared contracts (domain event payloads) live in `packages/` (`@cms/events`) only.
 - **Members is the core domain.** Other contexts store `memberId` and never copy person data.
 - Each context owns its database. Never read another context's DB.
-- Phase 1 uses synchronous HTTP between services. Phase 2 (stage 9) uses NATS events: `AttendanceRecorded` (Events → Members) and `MemberArchived` (Members → Events).
+- Contexts talk through NATS JetStream events (stage 9, ADR-0010): `AttendanceRecorded` (Events → Members) and `MemberArchived` (Members → Events).
+  - A use case never publishes. It passes the domain events to `repo.save(aggregate, events)`, which writes them to the `OutboxMessage` table in the same transaction; the outbox relay publishes them.
+  - Domain event types stay in each service's `domain/events.ts`. The wire types live in `@cms/events`; `infrastructure/outbox.ts` maps one to the other.
+  - A consumer's use case runs inside `UnitOfWork.runOnce(messageId, work)`, so a redelivered message changes nothing.
 
 ## Modelling decisions already made (from the ADRs)
 
