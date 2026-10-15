@@ -52,6 +52,9 @@ x-members-base: &members-base
     # here differs from apps/members-service/.env (which uses localhost for
     # running the service directly on your machine, outside Docker).
     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@members-db:5432/${POSTGRES_DB}
+    # The NATS server below, by service name. Both services publish and consume
+    # domain events through it (ADR-0010, docs/messaging.md).
+    NATS_URL: nats://nats:4222
   networks:
     - cms-network
 
@@ -65,6 +68,7 @@ x-events-base: &events-base
   image: church-cms-events-service:latest
   environment:
     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@events-db:5432/events_db
+    NATS_URL: nats://nats:4222
   networks:
     - cms-network
 
@@ -144,6 +148,11 @@ services:
         # the migrate job depends on), so the app only starts once the database
         # exists, is reachable, AND has the current schema applied.
         condition: service_completed_successfully
+      # Only "started", not "healthy": the service doesn't need NATS to serve
+      # HTTP. It keeps retrying the connection and its outbox holds events
+      # until NATS is reachable (ADR-0010).
+      nats:
+        condition: service_started
 
   # ─── Events: database, migration job, service ──────────────────────────────
   # A second, independent Postgres. Nothing in members-db is visible from here
@@ -184,6 +193,28 @@ services:
     depends_on:
       events-migrate:
         condition: service_completed_successfully
+      nats:
+        condition: service_started
+
+  # ─── Message bus (CMS-22, ADR-0010) ─────────────────────────────────────────
+  # NATS with JetStream: members-service and events-service exchange domain
+  # events through it (MemberArchived, AttendanceRecorded). See docs/messaging.md.
+  nats:
+    image: nats:2.15.0-alpine
+    # -js         turn on JetStream (persistent streams). Without it, NATS is
+    #             fire-and-forget: a message with no listener is simply lost.
+    # -sd /data   where JetStream stores streams on disk (the volume below), so
+    #             messages survive "docker compose restart nats".
+    # -m 8222     the HTTP monitoring endpoint: http://localhost:8222/jsz shows
+    #             streams and consumers as JSON.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222" # clients (pnpm dev on the host can use nats://localhost:4222)
+      - "8222:8222" # monitoring
+    volumes:
+      - nats-data:/data
+    networks:
+      - cms-network
 
   # ─── Web frontend ───────────────────────────────────────────────────────────
   web:
@@ -263,6 +294,7 @@ volumes:
   # across all services. Docker creates it on first run if it doesn't exist.
   members-db-data:
   events-db-data:
+  nats-data:
 
 networks:
   # All services share this bridge network so they can reach each other by

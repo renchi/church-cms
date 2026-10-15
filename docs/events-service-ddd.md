@@ -41,7 +41,7 @@ graph LR
 | [`ServiceEvent.ts`](../apps/events-service/src/domain/ServiceEvent.ts)               | The `ServiceEvent` aggregate, the `Venue` value object, `EventType`, `EventStatus` |
 | [`Attendance.ts`](../apps/events-service/src/domain/Attendance.ts)                   | The `Attendance` aggregate, `CheckInMethod`, the 2-hour check-in window            |
 | [`VolunteerAssignment.ts`](../apps/events-service/src/domain/VolunteerAssignment.ts) | The `VolunteerAssignment` aggregate, `VolunteerRole`, `AssignmentStatus`           |
-| [`events.ts`](../apps/events-service/src/domain/events.ts)                           | Domain event types (returned, not yet published)                                   |
+| [`events.ts`](../apps/events-service/src/domain/events.ts)                           | Domain event types. `AttendanceRecorded` is published via the outbox (ADR-0010)    |
 | `*Repository.ts`                                                                     | One repository interface per aggregate root                                        |
 
 ---
@@ -126,6 +126,31 @@ The integration test "optimistic locking" plays this exact story.
 
 ---
 
+### 3.5 Reacting to another context: `MemberArchived` (stage 9)
+
+When Members archives someone, ADR-0004 says Events should take them off future
+rotas. Events doesn't ask Members; it **reacts to a message** (ADR-0010):
+
+- A durable NATS consumer, `events-service`, reads `cms.members.archived` from the
+  `MEMBERS` stream ([`messaging.ts`](../apps/events-service/src/infrastructure/messaging.ts)).
+- [`DeclineAssignmentsForArchivedMemberUseCase`](../apps/events-service/src/application/DeclineAssignmentsForArchivedMemberUseCase.ts)
+  finds the member's `pending` or `confirmed` assignments on events that are still
+  `scheduled` and haven't started
+  ([`findActiveForMemberOnFutureEvents`](../apps/events-service/src/infrastructure/PrismaVolunteerAssignmentRepository.ts)),
+  and declines each one. Past events are history and stay as they were.
+- All of that runs inside `UnitOfWork.runOnce(messageId, …)`: one transaction that
+  also records the message id in `ProcessedMessage`. A redelivered message finds the
+  id and changes nothing. Unlike §3.3, this **is** one transaction. If the id were
+  recorded on its own and the declines failed half-way, the retry would find the id,
+  skip the message as a duplicate, and the job would never be finished. In one
+  transaction, a failure rolls back the id too, so the retry starts again from scratch.
+
+In the other direction, recording a check-in saves the `Attendance` and an
+`AttendanceRecorded` outbox row in one transaction
+([`PrismaAttendanceRepository.ts`](../apps/events-service/src/infrastructure/PrismaAttendanceRepository.ts)).
+If the unique constraint rejects a duplicate check-in, the outbox row rolls back too,
+so Members never counts a check-in that didn't happen.
+
 ## 4. The Venue value object
 
 A value object has no id and is defined only by its values. Two venues called "Main
@@ -187,19 +212,22 @@ the ADR:
 | `EventType`: Sunday Service, Prayer Meeting, Youth, Special | `"service" \| "event"`. A prayer meeting is an `event` with a title                     |
 | `Location` value object                                     | `Venue` (name, address, isOnline)                                                       |
 | separate `date` and `time`                                  | one `scheduledAt` plus `durationMinutes`                                                |
-| "`EventCreated` published to message bus"                   | Stage 9 (CMS-22). The aggregates return their domain events; nothing publishes them yet |
+| "`EventCreated` published to message bus"                   | Stage 9 (CMS-22) publishes only `AttendanceRecorded`, the one event another context consumes. `EventCreated` waits for a consumer |
 
 ---
 
 ## 8. Known gaps (deliberate)
 
-- **Domain events aren't published.** They're returned and dropped. CMS-22 adds NATS,
-  and then the shared contract for `AttendanceRecorded` moves to `packages/` (`@cms/events`).
+- **Only `AttendanceRecorded` is published.** The other domain events (`EventCreated`,
+  `EventCancelled`, `VolunteerDeclined` …) are still returned and dropped, because no
+  other context consumes them yet. Publishing one is a type in `@cms/events` plus a
+  case in `infrastructure/outbox.ts` (ADR-0010).
 - **`memberId` isn't checked against Members.** Events only checks that it's a UUID.
   Checking that the member exists would mean a synchronous call to members-service on
   every check-in, which couples their availability: if Members is down, nobody can check
-  in. Stage 9 offers a better option, a local list of known members kept up to date
-  from `MemberRegistered`/`MemberArchived` events.
+  in. NATS now makes a better option possible: a local list of known members kept up
+  to date from `MemberRegistered`/`MemberArchived` events. Not built; Members doesn't
+  publish `MemberRegistered` yet.
 - **No auth.** `createdById` and `assignedById` come in the request body until the
   Identity context exists. Then they come from the token.
 - **Not reachable through the API yet:** the `ongoing`/`completed` transitions,

@@ -32,6 +32,12 @@ config:
   nodeEnv: production
   port: "3002"
   logLevel: info   # pino level: debug | info | warn | error — raise to debug while troubleshooting
+  # The NATS server (ADR-0010, docs/messaging.md). NATS is a cluster add-on in
+  # its own "nats" namespace, so the address is the full Service DNS name:
+  # <service>.<namespace>.svc.cluster.local. Set it to "" to run without
+  # messaging: the service still works, and its outbox keeps events until
+  # messaging is turned back on.
+  natsUrl: nats://nats.nats.svc.cluster.local:4222
 
 # The actual DB URL goes in secret.yaml; this key just names the secret
 database:

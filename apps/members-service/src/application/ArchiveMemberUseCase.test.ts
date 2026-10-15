@@ -15,7 +15,7 @@ function makeRepo(overrides?: Partial<MemberRepository>): MemberRepository {
 }
 
 describe("ArchiveMemberUseCase", () => {
-  it("archives the member and persists the change", async () => {
+  it("archives the member and saves it together with the MemberArchived event", async () => {
     const { member } = Member.register({ name: "Alice", email: "alice@example.com" });
     const repo = makeRepo({ findById: vi.fn().mockResolvedValue(member) });
     const useCase = new ArchiveMemberUseCase(repo);
@@ -23,7 +23,9 @@ describe("ArchiveMemberUseCase", () => {
     await useCase.execute(member.id);
 
     expect(member.status).toBe("archived");
-    expect(repo.save).toHaveBeenCalledWith(member);
+    expect(repo.save).toHaveBeenCalledWith(member, [
+      expect.objectContaining({ type: "MemberArchived", memberId: member.id }),
+    ]);
   });
 
   it("throws NotFoundError when the member does not exist", async () => {

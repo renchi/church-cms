@@ -1,4 +1,4 @@
-import type { PrismaClient, VolunteerAssignmentRow } from "./prisma.js";
+import type { Db, VolunteerAssignmentRow } from "./prisma.js";
 import {
   VolunteerAssignment,
   type AssignmentStatus,
@@ -17,7 +17,7 @@ function toAssignment(row: VolunteerAssignmentRow): VolunteerAssignment {
 }
 
 export class PrismaVolunteerAssignmentRepository implements VolunteerAssignmentRepository {
-  constructor(private readonly prisma: PrismaClient = defaultPrisma) {}
+  constructor(private readonly prisma: Db = defaultPrisma) {}
 
   async findByEventMemberAndRole(
     eventId: string,
@@ -32,6 +32,19 @@ export class PrismaVolunteerAssignmentRepository implements VolunteerAssignmentR
 
   async findByEventId(eventId: string): Promise<VolunteerAssignment[]> {
     const rows = await this.prisma.volunteerAssignment.findMany({ where: { eventId } });
+    return rows.map(toAssignment);
+  }
+
+  async findActiveForMemberOnFutureEvents(memberId: string, now: Date): Promise<VolunteerAssignment[]> {
+    const rows = await this.prisma.volunteerAssignment.findMany({
+      where: {
+        memberId,
+        status: { in: ["pending", "confirmed"] },
+        // A filter on the related ServiceEvent: Prisma turns this into a JOIN.
+        // Both tables are in this context's database, so that's allowed.
+        event: { status: "scheduled", scheduledAt: { gt: now } },
+      },
+    });
     return rows.map(toAssignment);
   }
 

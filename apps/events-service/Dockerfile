@@ -57,6 +57,11 @@ COPY apps/events-service/package.json ./apps/events-service/package.json
 # Copy the other apps' manifests so pnpm can resolve the full workspace graph.
 COPY apps/members-service/package.json ./apps/members-service/package.json
 COPY apps/web/package.json             ./apps/web/package.json
+# The shared @cms/events package (ADR-0010) is copied WHOLE, source included,
+# before the install: pnpm runs its "prepare" script (tsc) during install, which
+# builds packages/events/dist. It's small and rarely changes, so this costs
+# little caching.
+COPY packages/events                   ./packages/events
 RUN pnpm install --frozen-lockfile
 # --frozen-lockfile = fail if pnpm-lock.yaml is out of date. Ensures the build
 # always uses exactly the versions that were tested, with no silent upgrades.
@@ -115,6 +120,10 @@ ENV NODE_ENV=production
 # of in node_modules (see prisma/schema.prisma).
 COPY --from=builder --chown=node:node /repo/node_modules                 /repo/node_modules
 COPY --from=builder --chown=node:node /repo/apps/events-service/node_modules ./node_modules
+# @cms/events: the service's node_modules/@cms/events is a symlink to
+# /repo/packages/events (a pnpm workspace link), so the package's built dist,
+# package.json and its own node_modules must exist at that same path.
+COPY --from=builder --chown=node:node /repo/packages/events               /repo/packages/events
 COPY --from=builder --chown=node:node /repo/apps/events-service/dist         ./dist
 COPY --from=builder --chown=node:node /repo/apps/events-service/prisma       ./prisma
 COPY --from=builder --chown=node:node /repo/apps/events-service/generated    ./generated

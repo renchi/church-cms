@@ -81,6 +81,43 @@ describe("Member.update", () => {
   });
 });
 
+describe("Member.recordAttendance", () => {
+  const sunday = new Date("2026-10-11T09:00:00Z");
+  const nextSunday = new Date("2026-10-18T09:00:00Z");
+
+  it("starts a new member with an empty summary", () => {
+    const { member } = Member.register({ name: "Alice", email: "alice@example.com" });
+    expect(member.attendanceCount).toBe(0);
+    expect(member.lastAttendedAt).toBeNull();
+  });
+
+  it("counts each attendance and remembers the date", () => {
+    const { member } = Member.register({ name: "Alice", email: "alice@example.com" });
+    member.recordAttendance(sunday);
+    member.recordAttendance(nextSunday);
+    expect(member.attendanceCount).toBe(2);
+    expect(member.lastAttendedAt).toEqual(nextSunday);
+  });
+
+  it("keeps the latest date when attendances arrive out of order", () => {
+    // Messages can arrive late (a consumer was down, a retry), so the summary
+    // must not move backwards in time.
+    const { member } = Member.register({ name: "Alice", email: "alice@example.com" });
+    member.recordAttendance(nextSunday);
+    member.recordAttendance(sunday);
+    expect(member.attendanceCount).toBe(2);
+    expect(member.lastAttendedAt).toEqual(nextSunday);
+  });
+
+  it("still counts attendance for an archived member", () => {
+    // The check-in happened before the archive message reached Events; it's a fact.
+    const { member } = Member.register({ name: "Alice", email: "alice@example.com" });
+    member.archive();
+    member.recordAttendance(sunday);
+    expect(member.attendanceCount).toBe(1);
+  });
+});
+
 describe("Member.reconstitute", () => {
   it("round-trips through snapshot", () => {
     const { member } = Member.register({ name: "Alice", email: "alice@example.com" });

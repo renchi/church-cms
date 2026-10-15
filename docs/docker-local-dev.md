@@ -40,12 +40,20 @@ docker compose up --build
 The first run builds the service images, then starts each service's chain **in
 order**: `members-db` → `members-migrate` (applies the schema, exits) →
 `members-service`, and the same for Events: `events-db` → `events-migrate` →
-`events-service`. `web` and `adminer` run alongside. When it settles you have:
+`events-service`. `nats`, `web` and `adminer` run alongside. When it settles you have:
 
 - Members API at <http://localhost:3001> — try `curl localhost:3001/health`
 - Events API at <http://localhost:3002> — try `curl localhost:3002/events`
 - Adminer at <http://localhost:8080>
 - Members Postgres at `localhost:5432`, Events Postgres at `localhost:5433`
+- NATS at `localhost:4222`, its monitoring page at <http://localhost:8222/jsz?consumers=true>
+  (streams and consumers). The services find it as `nats://nats:4222` (`NATS_URL`).
+  See [`messaging.md`](messaging.md) for what flows through it.
+
+> **Running a service with `pnpm dev` instead?** Set `NATS_URL=nats://localhost:4222`
+> to use the Compose NATS. Without `NATS_URL`, the service logs a warning and runs with
+> messaging off: archives and check-ins still work, and their events wait in the
+> outbox table until a run with NATS publishes them.
 
 > **Why two Postgres containers?** Each service owns its database (ADR-0008), so
 > Events gets its own server, not just its own schema. Inside the Compose network both
@@ -87,6 +95,7 @@ docker compose restart members-service  # restart a single service
 docker compose exec members-db psql -U cms_user -d members_db   # psql into the DB
 docker compose exec events-db psql -U cms_user -d events_db     # ...or the Events DB
 docker compose up -d --build events-service   # rebuild and restart only Events (and its DB chain)
+docker compose logs -f members-service events-service | grep -i 'message\|outbox'   # watch events flow
 ```
 
 ### Stop / clean up

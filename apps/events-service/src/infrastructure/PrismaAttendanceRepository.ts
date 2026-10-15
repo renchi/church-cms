@@ -1,24 +1,42 @@
-import type { PrismaClient } from "./prisma.js";
+import { inTransaction, type Db, type Prisma } from "./prisma.js";
 import { Attendance, type CheckInMethod } from "../domain/Attendance.js";
 import type { AttendanceRepository } from "../domain/AttendanceRepository.js";
+import type { AttendanceRecordedEvent } from "../domain/events.js";
+import { toOutboxMessage } from "./outbox.js";
 import { prisma as defaultPrisma } from "./prisma.js";
 import { rethrowUniqueViolation } from "./uniqueViolation.js";
 
 export class PrismaAttendanceRepository implements AttendanceRepository {
-  constructor(private readonly prisma: PrismaClient = defaultPrisma) {}
+  constructor(private readonly db: Db = defaultPrisma) {}
 
   async findByEventAndMember(eventId: string, memberId: string): Promise<Attendance | null> {
     // `eventId_memberId` is the name Prisma gives the @@unique([eventId, memberId]) index.
-    const row = await this.prisma.attendance.findUnique({
+    const row = await this.db.attendance.findUnique({
       where: { eventId_memberId: { eventId, memberId } },
     });
     return row ? Attendance.reconstitute({ ...row, method: row.method as CheckInMethod }) : null;
   }
 
   // An Attendance never changes once recorded, so this is a plain insert.
-  async save(attendance: Attendance): Promise<void> {
+  // The transactional outbox (ADR-0010): the attendance and its outbox row are
+  // written in ONE transaction. If the insert hits the unique constraint (a
+  // duplicate check-in), the whole transaction rolls back, outbox row included,
+  // so Members never counts a check-in that didn't happen.
+  async save(attendance: Attendance, events: AttendanceRecordedEvent[] = []): Promise<void> {
+    const messages = events.map(toOutboxMessage);
     await rethrowUniqueViolation(
-      this.prisma.attendance.create({ data: attendance.toSnapshot() }),
+      inTransaction(this.db, async (tx) => {
+        await tx.attendance.create({ data: attendance.toSnapshot() });
+        if (messages.length > 0) {
+          await tx.outboxMessage.createMany({
+            data: messages.map((m) => ({
+              id: m.id,
+              subject: m.subject,
+              payload: m.payload as unknown as Prisma.InputJsonValue,
+            })),
+          });
+        }
+      }),
       "Member is already checked in to this event"
     );
   }

@@ -73,6 +73,10 @@ Each layer should feel solid before starting the next.
 | 8   | Build Events service                                 | CMS-18                 | repeat DDD pattern in a 2nd context |
 | 9   | Wire NATS between Members ↔ Events                   | CMS-22                 | **system design / async events**    |
 
+Stage 9 is designed in [ADR-0010](0010-async-messaging-nats.md). CMS-22 originally
+also wired Communications and Groups subscribers; those were dropped from the ticket
+because both services are deferred.
+
 After stage 9 the learner has touched every goal end-to-end. The deferred contexts
 (Finance, Comms, Groups, Identity) can then be added one at a time as extra practice.
 

@@ -10,8 +10,19 @@ export interface MemberSnapshot {
   email: string;
   phone: string | null;
   status: MemberStatus;
+  // A denormalised summary of attendance, which the Events context owns. We
+  // never ask Events for it: we keep our own copy, updated from the
+  // AttendanceRecorded events it publishes (context map; ADR-0010). It may lag
+  // a moment behind Events. That's eventual consistency.
+  attendanceCount: number;
+  lastAttendedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  // Optimistic locking. The version that was loaded; 0 means "new, never saved".
+  // The repository only writes if the stored version still matches, so two
+  // writers that loaded the same member (an HTTP archive and the attendance
+  // consumer, or two consumer Pods) can't silently overwrite each other.
+  version: number;
 }
 
 function isValidEmail(email: string): boolean {
@@ -36,6 +47,15 @@ export class Member {
   get status() {
     return this.snap.status;
   }
+  get attendanceCount() {
+    return this.snap.attendanceCount;
+  }
+  get lastAttendedAt() {
+    return this.snap.lastAttendedAt;
+  }
+  get version() {
+    return this.snap.version;
+  }
   get createdAt() {
     return this.snap.createdAt;
   }
@@ -57,8 +77,11 @@ export class Member {
       email: params.email.toLowerCase().trim(),
       phone: params.phone?.trim() ?? null,
       status: "active",
+      attendanceCount: 0,
+      lastAttendedAt: null,
       createdAt: now,
       updatedAt: now,
+      version: 0,
     });
 
     return {
@@ -85,6 +108,18 @@ export class Member {
     this.snap.status = "archived";
     this.snap.updatedAt = new Date();
     return { type: "MemberArchived", memberId: this.id, occurredAt: this.snap.updatedAt };
+  }
+
+  // Called when Events reports a check-in. Allowed for archived members too:
+  // the check-in really happened, even if the archive overtook its message.
+  // Messages can arrive out of order, so the date only ever moves forward.
+  // This returns no event: it's a copy of another context's fact, not a new one.
+  recordAttendance(checkedInAt: Date): void {
+    this.snap.attendanceCount += 1;
+    if (!this.snap.lastAttendedAt || checkedInAt > this.snap.lastAttendedAt) {
+      this.snap.lastAttendedAt = checkedInAt;
+    }
+    this.snap.updatedAt = new Date();
   }
 
   toSnapshot(): MemberSnapshot {

@@ -16,7 +16,9 @@ describe("RecordAttendanceUseCase", () => {
     });
 
     expect(result.id).toBeTruthy();
-    expect(attendances.save).toHaveBeenCalledOnce();
+    expect(attendances.save).toHaveBeenCalledWith(expect.objectContaining({ id: result.id }), [
+      expect.objectContaining({ type: "AttendanceRecorded", memberId: MEMBER, eventId: event.id }),
+    ]);
   });
 
   it("throws ConflictError when the member is already checked in", async () => {

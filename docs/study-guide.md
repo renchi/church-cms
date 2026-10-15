@@ -6,7 +6,7 @@ exercised, mapped to the **five learning goals** in
 
 1. **Docker & containers**
 2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability)_
-3. **System design**
+3. **System design** _(stage 9 done: async events between services)_
 4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
 5. **Using AI tools** — issue-driven development
 
@@ -19,6 +19,7 @@ This guide is the **map**. The companion docs are the **detail**:
 - [`ci-cd.md`](ci-cd.md) — the GitHub Actions pipeline, self-hosted runner, debugging
 - [`status-dashboards.md`](status-dashboards.md) — where to watch the pipeline and the cluster
 - [`observability.md`](observability.md) — Prometheus, Grafana, metrics and logs, with exercises
+- [`messaging.md`](messaging.md) — NATS JetStream between the services: following an event, replay and idempotency exercises
 
 Read this top to bottom once. Then, whenever a section feels thin, open the file it
 points at (`file_path:line`) and read the real code — that is where the learning sticks.
@@ -27,7 +28,8 @@ points at (`file_path:line`) and read the real code — that is where the learni
 
 ## 0. Where we are on the roadmap
 
-The roadmap is a 9-stage sequence. **Stages 1–8 are done.** That is the scope of this guide.
+The roadmap is a 9-stage sequence. **All 9 stages are done**, so every learning goal
+has now been exercised end to end. That is the scope of this guide.
 
 | #   | Stage                                         | Status  | What it taught                      |
 | --- | --------------------------------------------- | ------- | ----------------------------------- |
@@ -39,7 +41,7 @@ The roadmap is a 9-stage sequence. **Stages 1–8 are done.** That is the scope 
 | 6   | CI/CD pipeline                                | ✅ done | automation                          |
 | 7   | Observability (Prometheus + Grafana)          | ✅ done | operating distributed systems       |
 | 8   | Build Events service                          | ✅ done | repeat the DDD pattern              |
-| 9   | Wire NATS between Members ↔ Events            | ⬜ next | async events / eventual consistency |
+| 9   | Wire NATS between Members ↔ Events            | ✅ done | async events / eventual consistency |
 
 Knowing what is **deliberately not built yet** is itself part of the learning: the
 architecture is sequenced so you learn each layer once, well, instead of building the
@@ -473,6 +475,12 @@ Pod never becomes Ready, so a broken migration stops the rollout.
 - **Dev credentials live in the chart's Secret template.** That's fine for local
   learning. Real deployments inject them from outside (platform secrets, External
   Secrets, Sealed Secrets).
+- ~~**A ConfigMap change doesn't restart the Pods.**~~ Fixed in stage 9: a
+  `checksum/config` annotation on the Pod template (§11.2), so new config means new Pods.
+- **A rebuilt `:local` image doesn't restart the Pods either.** `scripts/cluster-up.sh`
+  rebuilds `members-service:local`, but the tag is the same, so Helm sees no change and
+  the old code keeps running. CI is unaffected, since it deploys a new `:<sha>` tag every
+  time. Workaround: `kubectl rollout restart deploy/<name>` after a local rebuild.
 
 ### 7.7 Automating the runbook: an idempotent bootstrap script
 
@@ -904,7 +912,199 @@ aggregate is saved on its own, without one transaction around all of them:
 
 ---
 
-## 11. Using AI tools (learning goal #5)
+## 11. Async messaging with NATS (roadmap stage 9)
+
+Stage 8 gave us two bounded contexts that know nothing about each other. But each one
+needs to *react* to things that happen in the other: Events must stop counting on a
+member who was archived, and Members wants to show how often someone attends. This
+stage connects them **without** connecting their code or their databases. The
+runbook is [`messaging.md`](messaging.md); the decision record is
+[ADR-0010](adr/0010-async-messaging-nats.md).
+
+### 11.1 The concept
+
+**Sync vs. async.** With sync HTTP, Members would *call* Events ("decline this
+member's volunteer slots") and wait for the answer. If Events is down, archiving fails
+too, and Members has to know who cares about archives. With **publish/subscribe**,
+Members announces a fact ("member X was archived") to a **message broker** and moves
+on. Whoever subscribed reacts in their own time. Members doesn't know or care who
+listens. A third subscriber later (Finance, Groups) needs no change in Members.
+
+**NATS** is the broker: one small server. Messages are published to a **subject**,
+a dot-separated name like `cms.members.archived`. Subscribers can use wildcards
+(`cms.members.>` = everything under `cms.members`).
+
+**Core NATS vs. JetStream.** Core NATS is fire-and-forget: a message with no
+listener at that moment is gone. **JetStream** adds persistence:
+
+- A **stream** stores every message on its subjects, on disk (`MEMBERS` stores `cms.members.>`).
+- A **durable consumer** is a named reader of a stream. The server remembers, by name,
+  which messages it has acknowledged. If the service stops and restarts, it picks up
+  where it left off and receives everything it missed: **replay**.
+- Each message must be answered: **ack** (done), **nak** (failed, redeliver later) or
+  **term** (can never succeed, stop trying). An unanswered message is redelivered after
+  a timeout.
+
+That redelivery is what makes it reliable, and it creates the two classic problems of
+messaging:
+
+1. **At-least-once delivery → idempotency.** If the consumer does its work but crashes
+   before acking, the message comes again. So handling a message twice must have the
+   same effect as handling it once. Otherwise one check-in is counted twice.
+2. **The dual-write problem → the transactional outbox.** A use case must change its
+   database *and* publish a message. Those are two systems, so no single transaction
+   covers both. Crash between them and you've either announced something that wasn't
+   saved, or saved something nobody hears about. The fix: write the message into an
+   **outbox table** in the *same* database transaction as the change. A separate
+   **relay** loop then publishes outbox rows and marks them done.
+
+**Eventual consistency.** After a check-in, Members' attendance count is out of date
+for a moment, until the message arrives. The system is consistent *eventually*, not at
+every instant. That's the price of not making Events wait for Members.
+
+**The wire contract.** What travels between contexts is a published contract, versioned
+and validated, separate from either context's internal model. It's the anti-corruption
+layer from §10, applied to messages.
+
+### 11.2 How we did it here
+
+Two flows, one in each direction:
+
+| Event                | From → To         | Subject                          | Effect                                                         |
+| -------------------- | ----------------- | -------------------------------- | -------------------------------------------------------------- |
+| `MemberArchived`     | Members → Events  | `cms.members.archived`           | Volunteer assignments on future, scheduled events → `declined` |
+| `AttendanceRecorded` | Events → Members  | `cms.events.attendance.recorded` | `Member.attendanceCount` +1, `lastAttendedAt` moves forward    |
+
+**The shared package `@cms/events`** ([`packages/events/src`](../packages/events/src)),
+the only code both services may import:
+
+- The contract: subject and stream names
+  ([`contract.ts:14`](../packages/events/src/contract.ts#L14)), a common **envelope**
+  `{ id, type, version, occurredAt, data }`
+  ([`contract.ts:38`](../packages/events/src/contract.ts#L38)), and `parse*` functions
+  that validate incoming JSON
+  ([`contract.ts:105`](../packages/events/src/contract.ts#L105)).
+- Idempotent setup: `ensureStream` and `ensureConsumer`, "create, or update to this
+  config" ([`nats.ts:51`](../packages/events/src/nats.ts#L51),
+  [`nats.ts:78`](../packages/events/src/nats.ts#L78)).
+- The outbox relay ([`outboxRelay.ts:66`](../packages/events/src/outboxRelay.ts#L66)) and
+  the ack/nak/term decision for each message
+  ([`consumer.ts:37`](../packages/events/src/consumer.ts#L37)). Neither knows about
+  Prisma: each service passes in functions over its own tables.
+
+**Publishing (the outbox), using archive as the example:**
+
+1. `ArchiveMemberUseCase` takes the event that `member.archive()` returns and passes it
+   to `repo.save(member, [event])`
+   ([`ArchiveMemberUseCase.ts:10`](../apps/members-service/src/application/ArchiveMemberUseCase.ts#L10)).
+   The use case never talks to NATS.
+2. The repository maps the domain event to the wire format
+   ([`outbox.ts:21`](../apps/members-service/src/infrastructure/outbox.ts#L21)) and writes
+   the member row and an `OutboxMessage` row in **one** transaction
+   ([`PrismaMemberRepository.ts:79`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L79)).
+3. The relay, about once a second, publishes unpublished rows in order, with the row id
+   as the `Nats-Msg-Id` header ([`nats.ts:116`](../packages/events/src/nats.ts#L116)), and
+   sets `publishedAt`. If publishing fails, it stops the batch and retries next tick, so
+   order is kept. Both Pods run a relay, but each batch first takes a Postgres advisory
+   lock ([`outbox.ts`](../apps/members-service/src/infrastructure/outbox.ts)), so only one
+   of them publishes at a time.
+   If it crashes after publishing but before marking, it publishes again and JetStream
+   drops the duplicate id within the stream's 2-minute `duplicate_window`.
+
+Events does the same for check-ins
+([`PrismaAttendanceRepository.ts:25`](../apps/events-service/src/infrastructure/PrismaAttendanceRepository.ts#L25)).
+A rejected duplicate check-in rolls back the outbox row together with the attendance.
+
+**Consuming (idempotently), using archive as the example:**
+
+1. events-service has a durable consumer named `events-service` on the `MEMBERS` stream,
+   filtered to `cms.members.archived`.
+2. Each message is parsed (bad JSON or a wrong version → `term`), then handed to
+   `DeclineAssignmentsForArchivedMemberUseCase`
+   ([`DeclineAssignmentsForArchivedMemberUseCase.ts:21`](../apps/events-service/src/application/DeclineAssignmentsForArchivedMemberUseCase.ts#L21)).
+3. The use case runs inside `UnitOfWork.runOnce(messageId, work)`. The Prisma version
+   opens a transaction, inserts the message id into `ProcessedMessage` with
+   `ON CONFLICT DO NOTHING` (`skipDuplicates`,
+   [`PrismaUnitOfWork.ts:16`](../apps/events-service/src/infrastructure/PrismaUnitOfWork.ts#L16)),
+   and runs `work` only if a row was actually inserted. The processed id and the
+   declined assignments commit together, so a redelivery finds the id and does nothing.
+4. Success → `ack`. A database error → `nak` with a growing delay (1 s, 2 s, 4 s … 30 s),
+   retried with no limit ([`consumer.ts`](../packages/events/src/consumer.ts)). A limit
+   would quietly drop good messages during a long database outage.
+
+**Concurrent writers.** Two consumer Pods, or the consumer and an HTTP archive, can
+load the same `Member` at once. If both saved their whole copy, the second would
+undo the first's change: a lost attendance, or even an archive reverted. `Member` has
+a `version` column, as `ServiceEvent` does (§10.2): a save only applies if the version
+is still the one loaded, otherwise `ConflictError`. HTTP answers `409`; the consumer
+rolls back and `nak`s, and the redelivery works on fresh data.
+
+Members' side is the same shape, with `Member.recordAttendance()`
+([`Member.ts:117`](../apps/members-service/src/domain/Member.ts#L117)): it counts the
+attendance and only moves `lastAttendedAt` *forward*, because messages can arrive out of order.
+
+**Startup and shutdown.** Messaging starts *after* the HTTP server, in the background
+([`index.ts:34`](../apps/members-service/src/index.ts#L34)). While NATS is down, HTTP
+works and events wait in the outbox. Each service declares **both** streams from the
+shared config ([`messaging.ts:49`](../apps/members-service/src/infrastructure/messaging.ts#L49)),
+so either can start first. On SIGTERM, the consumer stops, the relay finishes its batch,
+and the connection drains.
+
+**Infrastructure:** NATS from the official Helm chart in its own `nats` namespace
+([`k8s/nats-values.yaml`](../k8s/nats-values.yaml)): one server, JetStream on a 1 Gi
+PVC, plus `nats-box` for inspecting it. Compose gets a `nats` service. Both charts pass
+`NATS_URL` through their ConfigMap, and a `checksum/config` annotation
+([`deployment.yaml:20`](../charts/members-service/templates/deployment.yaml#L20)) makes a
+ConfigMap change roll the Pods.
+
+### 11.3 Why this way
+
+- **NATS over Kafka (ADR-0010):** same ideas (streams, consumers, replay) for a fraction
+  of the moving parts. One small server fits next to Prometheus in a 6 GB minikube.
+- **Outbox over "publish after save":** "publish after save" is simpler and *usually*
+  works. The outbox is the version that is still correct when a Pod is killed at the
+  worst moment. Learning that difference is the point of this stage.
+- **Idempotency by a processed-ids table, not by "naturally idempotent" handlers:**
+  declining is naturally idempotent, but counting attendance is not. One mechanism for
+  both is easier to reason about than two.
+- **A shared package for the contract, but separate domain types:** each context keeps
+  its own `domain/events.ts`. Only the wire shape is shared, so neither domain can leak
+  into the other.
+- **The ticket was re-scoped.** CMS-22 originally wired subscribers into Communications
+  and Groups. Both are deferred (ADR-0007), so the ticket now covers the two live services.
+- **One relay at a time, by an advisory lock.** Each service runs 2 Pods, and each Pod
+  runs a relay. Each batch first takes a Postgres advisory lock, a lock on a number we
+  choose rather than on a row. Only the Pod holding it publishes, so no row goes out
+  twice and the order holds. Simpler than `FOR UPDATE SKIP LOCKED`, which shares rows
+  between relays but gives up global order.
+- **Deliberately deferred** (ADR-0010's evolution table): relays sharing the work
+  (`FOR UPDATE SKIP LOCKED`), pruning `ProcessedMessage`, `V2` events, tracing
+  across the bus (OTel context in message headers), and a 3-node NATS cluster.
+
+### 11.4 What setting it up taught (real problems we hit)
+
+| Problem | Lesson |
+| --- | --- |
+| The ticket asked for subscribers in Communications and Groups | Both services are deferred (ADR-0007). The ticket was re-scoped in Linear to the two live services before any code. Check a ticket against the ADRs *first*; it may predate them |
+| `AttendanceRecorded`'s payload has an `eventId` (the church event). Using `eventId` as the dedupe key too would have collided | Separate the **envelope** (`id`, `type`, `version`, `occurredAt`) from the **data**. The message's identity and the business fields never share a name |
+| A table called `OutboxEvent` in events-service, where "event" already means a church service | Names matter most where two languages meet. Both services call them `OutboxMessage` and `ProcessedMessage` |
+| `StreamNotFoundError` exists in `@nats-io/jetstream` but isn't exported from its public API | Don't reach into a library's internal paths. Check the public `JetStreamApiError.code` against `JetStreamApiCodes.StreamNotFound` instead ([`nats.ts`](../packages/events/src/nats.ts)) |
+| The consumer's "already processed?" check and its change must commit together, but each repository method ran on its own | A `UnitOfWork` port in the application layer: `runOnce` opens the transaction and hands the use case repositories bound to it. `inTransaction` lets a repository's `save` join an open transaction instead of opening its own |
+| CI typechecks and tests **before** building, so `@cms/events`' `dist/` didn't exist yet | A `prepare` script: pnpm runs it for workspace packages during `pnpm install`, so `dist/` exists right after install, in CI, locally and in Docker |
+| `prepare` runs during the Docker `pnpm install` too, so a Dockerfile that only copied the package's `package.json` would fail (`tsc` with no sources), even web's | Copy the whole (small) `packages/events` before the install in **all three** Dockerfiles. The service images also copy it into the runtime stage, because `node_modules/@cms/events` is a symlink into it |
+| Adding `NATS_URL` to the ConfigMap wouldn't have reached running Pods | Kubernetes only rolls Pods when the Pod **template** changes. A `checksum/config` annotation (the ConfigMap's hash) puts the config into the template. On the first deploy, the members Pods rolled by themselves |
+| Chart `nats` 2.15.1 had been released two days earlier | Pin a version that has been out for a while (2.15.0, three weeks), and run the same server version in Compose and the tests |
+| `nats-0` showed `FailedScheduling: unbound immediate PersistentVolumeClaims` on the first install | The volume didn't exist yet; minikube's provisioner created it a few seconds later. Read an event's *age and count* before treating it as a failure |
+| The ADR first said "more than one replica" was a *future* trigger for a smarter relay, but the charts already run 2 | Verifying in the real cluster caught that both Pods run a relay. At first I documented it as "harmless, thanks to dedupe", but the code review pointed out that the comments still promised ordering. The fix was small: a Postgres advisory lock per batch, so one relay publishes at a time |
+| Code review: two consumer Pods could each take a different attendance message for the same member, both read `count = 5`, and both write `6` | Moving work into background consumers creates **concurrent writers** that HTTP alone never had. The same lost update could even revert an archive. Optimistic locking (`Member.version`) turns it into a conflict; the consumer `nak`s and the retry reads fresh data |
+| The `version` column couldn't go into the messaging migration: that migration was already applied in the cluster | Once a migration has run anywhere, it's frozen. Prisma rejects a changed checksum, so the column is a second migration. Same lesson as §10.4 |
+| Code review: `max_deliver: 10` with a 1–30 s backoff gives up after ~2.5 minutes | A redelivery limit turns a long database outage into **silently lost messages**. Transient failures retry with no limit; only messages that can never succeed are `term`ed |
+| Code review: if the consumer loop died, the Pod stayed Ready but processed nothing | The loop is now supervised, and the service exits on failure so Kubernetes restarts it. Testing that took two tries: deleting a consumer is noticed **instantly** if a pull request is open, but only at the next heartbeat check (~30 s) if not. A test with a 15 s timeout failed once in five runs; the budget now covers both paths |
+| `nats stream info` on a missing stream doesn't say "not found"; it tries to prompt for a stream name | Runbook text should come from running the command, not from memory. The troubleshooting table uses the message actually seen |
+
+---
+
+## 12. Using AI tools (learning goal #5)
 
 The development method itself is a learning goal: **issue-driven development with Claude
 Code + Linear**. Each chunk of work maps to a Linear ticket (CMS-5, CMS-6, CMS-12 …, visible
@@ -923,7 +1123,7 @@ The takeaway as a modern developer: AI tools are most effective when scoped by c
 tickets, anchored by written decisions (ADRs), and verified by tests — exactly the loop
 this repo models.
 
-### 11.1 How the agent is configured (`.claude/`)
+### 12.1 How the agent is configured (`.claude/`)
 
 An AI agent only follows the conventions it can see. Claude Code gives you five ways to
 make it see them. Each one has a different trigger and a different cost:
@@ -956,7 +1156,7 @@ Two design points are worth remembering:
 
 ---
 
-## 12. Self-check — can you explain each of these?
+## 13. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -987,6 +1187,19 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why do domain methods take a `now` parameter? (§10.2)
 - [ ] Why does `Attendance.memberId` have no foreign key, and why doesn't Events check that the member exists? (§10.2, §10.3)
 - [ ] Why did generating the events-service Prisma client break members-service, and what fixed it? (§10.4)
+
+**Async messaging (NATS)**
+
+- [ ] Archiving a member could call Events over HTTP instead. What would that couple, and what does publishing a message decouple? (§11.1)
+- [ ] What does JetStream add to core NATS, and what makes a consumer "durable"? (§11.1)
+- [ ] What is the dual-write problem, and how does the outbox make "save and publish" safe even if the Pod is killed between the two? (§11.1, §11.2)
+- [ ] The relay publishes a row and crashes before marking it published. What happens next, and which two mechanisms stop the duplicate doing harm? (§11.2)
+- [ ] Why must the processed message id be inserted in the same transaction as the change? What breaks if it's committed on its own? (§11.2)
+- [ ] When does a consumer `ack`, `nak` and `term` a message, and why does a `nak` get a growing delay? (§11.2)
+- [ ] Why does `recordAttendance` only move `lastAttendedAt` forward? (§11.2)
+- [ ] Why do both services declare both streams, and why doesn't that break "each publisher owns its stream"? (§11.2, ADR-0010)
+- [ ] The attendance consumer and an HTTP archive load the same member at once. What goes wrong without `Member.version`, and what happens to each writer with it? (§11.2, §11.4)
+- [ ] Both Pods run an outbox relay. What stops them publishing the same row twice, and why is a redelivery limit (`max_deliver`) a bad idea here? (§11.2, §11.3)
 
 **Stack & system design**
 
@@ -1030,27 +1243,37 @@ in parentheses (and the file it links) is where to look.
 
 **AI tools**
 
-- [ ] When would you put a convention in CLAUDE.md, in a rule, or in a skill? (§11.1)
-- [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§11.1)
-- [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§11.1)
-- [ ] How does `/start-ticket` decide which ticket is next? (§11.1)
+- [ ] When would you put a convention in CLAUDE.md, in a rule, or in a skill? (§12.1)
+- [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§12.1)
+- [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§12.1)
+- [ ] How does `/start-ticket` decide which ticket is next? (§12.1)
 
 ---
 
-## 13. Where to go next
+## 14. Where to go next
 
-The next stage is **NATS** (roadmap stage 9, CMS-22): the two contexts start talking.
-The pieces are waiting for it. Events already returns `AttendanceRecorded` and
-`EventCancelled` from its aggregates (§10.3), and Members returns `MemberArchived`.
-Stage 9 publishes them, moves the shared payloads into `packages/` (`@cms/events`), and
-lets each side react: Members keeps an attendance summary, and Events declines an
-archived member's future volunteer slots. That's **eventual consistency**: the other
-side catches up a moment later, instead of both changing in one transaction.
+All nine roadmap stages are done. From here, ADR-0007 suggests adding the deferred
+contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
+Each one is now mostly a matter of applying patterns already learned. The most
+interesting next contexts are the ones that add a new kind of message flow:
+
+- **Communications** consuming `MemberRegistered` (a welcome email): Members would
+  publish its first new event type since stage 9. It's a type in `@cms/events`, a case in
+  `outbox.ts`, and nothing changes on the Events side (§11.3, ADR-0010).
+- **Validating `memberId` in Events from messages**: a local list of known members,
+  kept up to date from `MemberRegistered`/`MemberArchived`, instead of a sync call
+  ([`events-service-ddd.md` §8](events-service-ddd.md#8-known-gaps-deliberate)).
+
+Messaging has its own next steps, each with a trigger (ADR-0010's evolution table):
+a multi-replica-safe relay, pruning `ProcessedMessage`, a `V2` event alongside `V1`,
+and a 3-node NATS cluster.
 
 Observability has natural next steps that wait for a real need (ADR-0009):
 
-- **Traces**: once Members and Events talk (stage 9, NATS), add an OTel Collector and
-  Tempo, and put trace IDs in log lines. Then one request can be followed across services.
+- **Traces**: Members and Events now talk through NATS, so this trigger has fired. An
+  OTel Collector and Tempo, with trace context carried in message headers, would let
+  you follow one archive from the HTTP request, through the outbox and NATS, to the
+  declined assignments. For now, follow a message by its `id` in both services' logs.
 - **Alerting**: `PrometheusRule`s (e.g. 5xx ratio > 1% for 5 min) routed by Alertmanager,
   which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
 - **Log aggregation**: Loki, so logs from all Pods are searchable in Grafana instead of
@@ -1066,5 +1289,6 @@ Read, in this order, to go deeper than this guide:
 3. [`k8s-local-dev.md`](k8s-local-dev.md) — the Kubernetes deploy, hands-on
 4. [`ci-cd.md`](ci-cd.md) — the pipeline, runner setup and debugging
 5. [`observability.md`](observability.md) — metrics, dashboards and logs, hands-on
-6. [`adr/0007-learning-scope-and-roadmap.md`](adr/0007-learning-scope-and-roadmap.md) — the why behind the sequencing
-7. [`adr/context-map.md`](adr/context-map.md) — the strategic DDD picture
+6. [`messaging.md`](messaging.md) — NATS, the outbox and idempotent consumers, hands-on
+7. [`adr/0007-learning-scope-and-roadmap.md`](adr/0007-learning-scope-and-roadmap.md) — the why behind the sequencing
+8. [`adr/context-map.md`](adr/context-map.md) — the strategic DDD picture

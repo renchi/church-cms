@@ -47,6 +47,7 @@ export function makeVolunteerRepo(
   return {
     findByEventMemberAndRole: vi.fn().mockResolvedValue(null),
     findByEventId: vi.fn().mockResolvedValue([]),
+    findActiveForMemberOnFutureEvents: vi.fn().mockResolvedValue([]),
     save: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };

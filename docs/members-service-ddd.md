@@ -152,9 +152,36 @@ could swap Postgres for MongoDB and the use cases would not change at all.
 
 **Domain Events — `MemberRegistered`, `MemberUpdated`, `MemberArchived`**
 Plain typed objects returned whenever something meaningful happens inside the
-aggregate. Currently collected but not published (Phase 1 is synchronous HTTP).
-In Phase 2 they will be sent to NATS so other services — like `events-service`
-— can react without the Members service needing to call them directly.
+aggregate. The aggregate never publishes them itself. Since CMS-22 (ADR-0010),
+`MemberArchived` crosses to the Events context:
+
+1. `ArchiveMemberUseCase` passes the event to `repo.save(member, [event])`.
+2. `PrismaMemberRepository` maps it to the wire format (`infrastructure/outbox.ts`)
+   and writes the member and an `OutboxMessage` row in **one transaction**.
+3. The outbox relay (`infrastructure/messaging.ts`) publishes it to NATS, and
+   events-service declines the member's future volunteer assignments.
+
+`MemberRegistered` and `MemberUpdated` stay internal: no other context consumes
+them yet, so they produce no outbox row.
+
+**Consuming: the attendance summary**
+Members also *receives* `AttendanceRecorded` from Events and keeps a copy on
+`Member`: `attendanceCount` and `lastAttendedAt`, via `Member.recordAttendance()`.
+Events owns attendance; this is a denormalised read-only copy, so a member's profile
+can show it without calling Events. `RecordAttendanceInSummaryUseCase` runs inside
+`UnitOfWork.runOnce(messageId, …)`, which records the message id in
+`ProcessedMessage` in the same transaction, so a redelivered message is counted
+once. The summary can lag a moment behind Events (eventual consistency).
+
+**Optimistic locking (`version`)**
+Since the consumer writes to `Member` in the background, two writers can load the
+same member at once: an HTTP request and the consumer, or the consumers in two Pods.
+`Member` carries the `version` it was loaded with (0 = never saved), and
+`PrismaMemberRepository.save` only updates the row if the stored version still
+matches. Otherwise it throws `ConflictError`: the API answers `409`, and the consumer
+rolls back and retries the message on fresh data. Without it, the second save would
+silently undo the first, losing an attendance or even reverting an archive.
+Walkthrough: [study-guide §11](study-guide.md#11-async-messaging-with-nats-roadmap-stage-9).
 
 **Error types**
 | Type | Meaning | HTTP status |
