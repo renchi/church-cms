@@ -1,56 +1,70 @@
 // Server component: fetches the member list from members-service at request time.
 
-type MemberStatus = "active" | "archived";
+import Link from "next/link";
+import {
+  fetchMember,
+  fetchMembers,
+  MEMBERS_API_URL,
+  type Member,
+  type MemberListResponse,
+} from "@/lib/membersApi";
 
-interface Member {
-  id: string;
-  name: string;
-  email: string;
-  phone: string | null;
-  status: MemberStatus;
-  createdAt: string;
-  updatedAt: string;
+// In Next.js 15, searchParams is a Promise: the page awaits it. A repeated
+// parameter (?registered=a&registered=b) arrives as an array, hence the union.
+interface MembersPageProps {
+  searchParams: Promise<{ registered?: string | string[] }>;
 }
 
-interface MemberListResponse {
-  data: Member[];
-  meta: { page: number; limit: number; total: number; pages: number };
-}
-
-const API_URL = process.env.NEXT_PUBLIC_MEMBERS_API_URL ?? "http://localhost:3001";
-
-async function fetchMembers(): Promise<MemberListResponse> {
-  // no-store: always show fresh data from the service rather than a cached snapshot.
-  const res = await fetch(`${API_URL}/members`, { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`members-service responded ${res.status}`);
+// The registration Server Action redirects to /members?registered=<id>. The banner
+// shows the name members-service has for that id, so a crafted link can't make it
+// say anything else. An unknown id, an array or a lookup failure: no banner.
+async function findRegistered(registered: string | string[] | undefined): Promise<Member | null> {
+  if (typeof registered !== "string" || !registered) return null;
+  try {
+    return await fetchMember(registered);
+  } catch {
+    return null;
   }
-  // Validate the shape so an unexpected 200 payload (e.g. a misconfigured URL
-  // pointing at another service) surfaces as the error state, not a render crash.
-  const body = (await res.json()) as Partial<MemberListResponse>;
-  if (!Array.isArray(body.data)) {
-    throw new Error("Unexpected response shape from members-service");
-  }
-  return body as MemberListResponse;
 }
 
-export default async function MembersPage() {
+export default async function MembersPage({ searchParams }: MembersPageProps) {
+  const registered = await findRegistered((await searchParams).registered);
   let response: MemberListResponse | null = null;
-  let error: string | null = null;
+  let failed = false;
 
   try {
     response = await fetchMembers();
   } catch (err) {
-    error = err instanceof Error ? err.message : "Failed to reach members-service";
+    // The details (including the internal MEMBERS_API_URL) go to the server log,
+    // `kubectl logs deploy/web-web`, not to the visitor's browser.
+    console.error(`Could not load members from ${MEMBERS_API_URL}:`, err);
+    failed = true;
   }
 
   return (
     <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">Members</h1>
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-2xl font-semibold">Members</h1>
+        <Link
+          href="/members/new"
+          className="rounded bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-700"
+        >
+          Register member
+        </Link>
+      </div>
 
-      {error && (
+      {registered && (
+        <div
+          role="status"
+          className="rounded border border-green-200 bg-green-50 p-4 text-sm text-green-700"
+        >
+          Registered {registered.name}
+        </div>
+      )}
+
+      {failed && (
         <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          Could not load members from <code>{API_URL}</code>: {error}
+          Could not load members. Try again in a moment.
         </div>
       )}
 

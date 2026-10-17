@@ -18,6 +18,12 @@ describe("Member.register", () => {
     expect(member.email).toBe("bob@example.com");
   });
 
+  it("treats a blank phone as no phone", () => {
+    // A form's empty phone field arrives as "" or "  ". That means "no phone", not a phone of "".
+    const { member } = Member.register({ name: "Alice", email: "alice@example.com", phone: "  " });
+    expect(member.phone).toBeNull();
+  });
+
   it("stores phone when provided", () => {
     const { member } = Member.register({
       name: "Alice",
@@ -66,6 +72,12 @@ describe("Member.update", () => {
   it("clears phone when null is passed", () => {
     const { member } = Member.register({ name: "Alice", email: "alice@example.com", phone: "123" });
     member.update({ phone: null });
+    expect(member.phone).toBeNull();
+  });
+
+  it("clears phone when a blank phone is passed", () => {
+    const { member } = Member.register({ name: "Alice", email: "alice@example.com", phone: "123" });
+    member.update({ phone: "" });
     expect(member.phone).toBeNull();
   });
 

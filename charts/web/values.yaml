@@ -12,6 +12,14 @@ service:
 config:
   nodeEnv: production
   port: "3000"
+  # Where server-side code (pages, Server Actions) reaches members-service.
+  # This is the in-cluster Service DNS name, <release>-<chart> = members-service-members-service.
+  # The browser never uses it: it can't resolve cluster DNS. Becomes MEMBERS_API_URL.
+  # COUPLING: it assumes members-service is installed as Helm release "members-service",
+  # the repo's naming convention (release = app name; deploy.yml and cluster-up.sh both
+  # rely on it). Installing it under another release name means overriding this:
+  #   --set config.membersApiUrl=http://<release>-members-service:3001
+  membersApiUrl: http://members-service-members-service:3001
 
 ingress:
   enabled: false    # flip to true at deploy time: --set ingress.enabled=true

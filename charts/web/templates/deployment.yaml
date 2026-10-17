@@ -25,6 +25,10 @@ spec:
               value: {{ .Values.config.nodeEnv | quote }}
             - name: PORT
               value: {{ .Values.config.port | quote }}
+            # Without this the app falls back to localhost:3001 and /members shows
+            # "Could not load members" (the bug fixed in CMS-26).
+            - name: MEMBERS_API_URL
+              value: {{ .Values.config.membersApiUrl | quote }}
           readinessProbe:
             httpGet:
               path: /

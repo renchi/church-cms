@@ -239,12 +239,13 @@ services:
       - "3000:3000"
 
     environment:
-      # NEXT_PUBLIC_MEMBERS_API_URL is read by the members page at request time.
-      # Inside Docker, services reach each other by service name — Docker's
-      # internal DNS resolves "members-service" to the right container IP.
-      # This URL is only valid server-side (inside the Docker network); browser
-      # requests go to localhost:3001 via the exposed port, not this address.
-      NEXT_PUBLIC_MEMBERS_API_URL: http://members-service:3001
+      # MEMBERS_API_URL is read by server-side code only (apps/web/lib/membersApi.ts):
+      # the members pages and the registration Server Action. Inside Docker,
+      # services reach each other by service name — Docker's internal DNS
+      # resolves "members-service" to the right container IP. This URL is only
+      # valid inside the Docker network, which is why it has no NEXT_PUBLIC_
+      # prefix: the browser never calls it.
+      MEMBERS_API_URL: http://members-service:3001
 
     # "init: true" tells Docker to inject its own tini binary (/usr/bin/docker-init)
     # as PID 1 in this container.  This gives us signal forwarding and zombie

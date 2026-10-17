@@ -366,6 +366,19 @@ if $network_ok; then
       smoke_ok=false; fail "$url returned $code"
     fi
   done
+  # A status code isn't enough for /members: when web can't reach members-service
+  # the page still returns 200, with an error box. So check the content too, and
+  # look for what a working page shows (the table, or "No members yet"), not just
+  # for the absence of the error: an empty body or a 502 also lacks the error text.
+  # -f makes curl fail on 4xx/5xx, so those land in the "else" branch.
+  members_page=$(curl -sf -m 5 http://cms.local/members || true)
+  if grep -q "Could not load members" <<<"$members_page"; then
+    smoke_ok=false; fail "http://cms.local/members shows 'Could not load members' (web can't reach members-service; check MEMBERS_API_URL and kubectl logs deploy/web-web)"
+  elif grep -qE "<table|No members yet" <<<"$members_page"; then
+    ok "http://cms.local/members loads the member list"
+  else
+    smoke_ok=false; fail "http://cms.local/members returned an error status or no member list"
+  fi
 else
   warn "skipping HTTP checks until the tunnel and /etc/hosts are fixed (see above)"
 fi

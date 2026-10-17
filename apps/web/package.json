@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude '**/*.integration.test.ts'"
   },
   "dependencies": {
     "next": "^15.5.19",
@@ -22,6 +24,7 @@
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.3.8",
     "tailwindcss": "^4.3.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
   }
 }

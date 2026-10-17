@@ -384,6 +384,11 @@ curl http://cms.local/api/events/health
 curl -I http://cms.local
 # Expected: HTTP/1.1 200 OK
 
+# 2b. The members page can reach members-service. A 200 isn't enough here: when the
+#     web Pod can't reach the API, the page still returns 200, with an error box.
+curl -s http://cms.local/members | grep -c "Could not load members"
+# Expected: 0
+
 # 3. Traefik dashboard
 curl -I http://traefik.cms.local/dashboard/
 # Expected: HTTP/1.1 200 OK
@@ -489,6 +494,9 @@ minikube delete
 | `cms.local` doesn't answer and you can't `sudo` for the tunnel | Port-forward Traefik and send `Host: cms.local` (§7b) |
 | `zsh: no matches found: http://…?limit=1` | zsh reads `?` as a glob: quote the URL |
 | An API returns `500` with `P1001 Can't reach database server` | That service's Postgres is down: `kubectl get pods -l app=<svc>-postgres` (see Exercise 2) |
+| `/members` shows "Could not load members. Try again in a moment." | The reason is in the web log, not on the page: `kubectl logs deploy/web-web \| grep -A3 "Could not load members from"`. If the URL there is `http://localhost:3001`, the Pod has no `MEMBERS_API_URL` and is calling itself: `kubectl exec deploy/web-web -- printenv MEMBERS_API_URL` should print `http://members-service-members-service:3001` (set by `config.membersApiUrl` in `charts/web/values.yaml`) |
+| `/` returns `502` or nothing for a moment right after deploying web | The old Pod stopped while Traefik still routed to it (web has one replica). Retry after a few seconds. A known gap |
+| The registration form says "Couldn't reach the members service" | Same check as above, then `kubectl get pods -l app.kubernetes.io/instance=members-service` |
 
 ---
 
@@ -626,6 +634,82 @@ Fix it the way the script does: `scripts/cluster-up.sh --no-sudo` builds
 then prints `✔ members-service-members-service runs members-service:local-…`. Run the script a
 second time with no code change: the tag is the same, so the Pod names don't change.
 Clean up the extra tag with `docker rmi members-service:trap`.
+
+---
+
+## Exercise: register a member through the UI
+
+Follow one registration from the browser to the database (study-guide §5). Run it with
+the stack up. You need a desktop browser for the DevTools part.
+
+1. Open DevTools (<kbd>F12</kbd>) → **Network**, and tick **Preserve log** (a redirect
+   clears the list otherwise). Go to <http://cms.local/members> and click **Register member**.
+2. Register someone new, e.g. "Ruth Example" with `ruth@example.com`, phone empty.
+   Expected:
+   - You land on `/members` with a green **Registered Ruth Example** banner, and Ruth is in the list.
+   - In Network, the `new` row is a **POST** answered **303 See Other**. Under *Headers*
+     there's no `Location`; instead there's `x-action-redirect: /members?registered=<Ruth's id>;push`. The URL carries her id, not
+     her name: the list page looks the name up, so nobody can craft a link with a fake banner.
+     With JavaScript on, the form posts with `fetch`, and Next.js streams the `/members`
+     page back **in the same response**, so its client router switches page without a
+     second request. The URL bar still changes to `/members?registered=…`.
+   - *Payload* on the POST shows `name` and `email`. The request headers include
+     `Next-Action: <id>`, which tells Next.js which Server Action to run.
+   - Want the classic two-request Post/Redirect/Get? DevTools → ⋮ → *Run command* →
+     "Disable JavaScript", and submit again: now the POST is answered `303` with
+     `Location: /members?registered=…`, and the browser sends its own GET. Same action,
+     same result. Re-enable JavaScript afterwards.
+3. Press **Refresh**. Expected: a GET only. No resubmission prompt, and no second Ruth.
+4. Go back to the form and register `ruth@example.com` again. Expected: a red
+   **Email already registered** banner, both fields still filled in, and the POST answered
+   **200**, not 303. The error came back with the page; nothing redirected.
+5. Check the row in Postgres:
+
+   ```bash
+   kubectl exec deploy/members-postgres -- sh -c \
+     'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select name, email, phone from \"Member\" where email = '"'"'ruth@example.com'"'"'"'
+   #      name     |      email       | phone
+   # --------------+------------------+-------
+   #  Ruth Example | ruth@example.com |          ← phone is NULL: a blank field is left out, not stored as ""
+   # (1 row)
+   ```
+
+6. **Break it on purpose.** Point the web Pod at a wrong URL, then register someone:
+
+   ```bash
+   kubectl set env deploy/web-web MEMBERS_API_URL=http://nowhere:3001
+   kubectl rollout status deploy/web-web
+   # deployment "web-web" successfully rolled out
+   ```
+
+   Expected: `/members` shows *Could not load members. Try again in a moment.* (no
+   internal address on the page). The reason is in the log:
+
+   ```bash
+   kubectl logs deploy/web-web | grep -A3 "Could not load members from" | tail -4
+   # Could not load members from http://nowhere:3001: TypeError: fetch failed
+   #     at async h (.next/server/app/members/page.js:2:7533)
+   #     at async k (.next/server/app/members/page.js:2:8160) {
+   #   [cause]: [Error: getaddrinfo EAI_AGAIN nowhere] {     ← DNS can't resolve "nowhere"
+   ```
+
+   The form shows **Couldn't reach the members service, try again.** with your values kept, and
+   `scripts/cluster-up.sh --no-sudo` would now fail. Restore the chart's value:
+
+   ```bash
+   helm upgrade web ./charts/web --reuse-values --wait
+   # Error: UPGRADE FAILED: conflict occurred while applying object default/web-web …
+   #   conflict with "kubectl-set" … env[name="MEMBERS_API_URL"].value
+   helm upgrade web ./charts/web --reuse-values --force-conflicts --wait | grep REVISION
+   # REVISION: …
+   kubectl exec deploy/web-web -- printenv MEMBERS_API_URL
+   # http://members-service-members-service:3001
+   ```
+
+   Why the first upgrade fails: Helm 4 uses **server-side apply**, where the API server
+   records which client owns each field. `kubectl set env` took ownership of that one
+   value, so Helm won't silently overwrite it. `--force-conflicts` takes it back. It's
+   the same protection that stops two tools fighting over a resource without anyone noticing.
 
 ---
 
