@@ -455,7 +455,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:22`](../charts/web/values.yaml#L22)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:377`](../scripts/cluster-up.sh#L377)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:381`](../scripts/cluster-up.sh#L381)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -681,7 +681,8 @@ can each pass alone and still break when combined, and this catches that.
 3. After a successful upgrade, `scripts/prune-deploy-images.sh` removes that service's
    old images on the host and inside minikube. It keeps the two tags `helm history` says
    were deployed most recently (now, and what a `helm rollback` would need); failed
-   revisions don't count. A final `cleanup` job clears old build cache once per deploy.
+   revisions don't count. A final `cleanup` job caps build cache at 3 GB per daemon
+   (`scripts/prune-build-cache.sh`, which `cluster-up.sh` uses too).
 
 Tagging by **commit SHA** (not `latest`) means every deploy is a real change that
 Kubernetes rolls out, and `kubectl get deploy -o jsonpath='{..image}'` tells you exactly
@@ -713,6 +714,9 @@ Because the repo is public, the security rules matter:
 | After the CMS-26 deploy the runner's disk was at **99%** (0.9 GB free), and the documented `docker builder prune` had freed **0 B** a few hours before | Two things fill a CI machine: build cache *and* the images themselves. Every deploy added a ~1.3 GB `<sha>` image per service, twice (built on the host, pulled into minikube), and nothing removed them. Deploy now prunes them itself, keeping the rollback target. Lesson: when you make artefacts unique per commit (good for traceability), you also own deleting them. Never reach for `docker image prune -a` here: minikube's own container runs on an untagged image |
 | Code review of that cleanup: the first version picked "the previous image" by creation date | Dates don't say what was *deployed*: a cache-hit rebuild keeps an old date, and an image from a failed, rolled-back deploy is newer than the real rollback target. The record of what ran is `helm history`, so the script reads that. Ask "which system already knows this?" before inferring it |
 | A second review of the cleanup: a failing `helm history` gave an empty list, which read as "keep nothing" and would have deleted the running images; `eval "$(minikube docker-env)"` "succeeded" when minikube was down and pruned the host twice | A destructive script must **fail closed**: no answer means remove nothing. Two bash traps hid the failures: a command inside `mapfile < <(…)` can fail unnoticed, and `eval "$(cmd)"` succeeds when `cmd` fails, because it evals an empty string. Assign first (`x=$(cmd)`), then use it. The script also gained `DRY_RUN=1`, so you can see what it would remove before trusting it |
+| The first real Deploy with the cleanup removed every old image correctly, yet left the disk at 6.8 GB: ~11 GB of build cache, all from that day | "Older than 24 h" is a policy about *age*; the problem was *size*. A busy day (many `/verify` builds, two full deploys) never ages out. The cleanup now caps cache by size (`--max-used-space`), which bounds disk whatever the day looks like. Measure the first real run before calling a fix done |
+| Review of the guardrails: `check-env.sh` grepped chart *templates*, so a name in a comment or in a block that's off by default counted as "set"; it also missed Prisma's `env("DATABASE_URL")` | Check the artefact, not the source: the script now runs `helm template` with Deploy's flags and reads what would reach the Pod. And "every variable the app reads" includes reads you don't write as `process.env` (Prisma, workspace packages) |
+| A third review round: `DATABASE_URL` set only on the migration *init* container still counted as set; CI's shallow clone silently skipped the new "moved line" error | Know *which* object you're checking: the app container's `env`, not any `- name:` in the chart. And a check that only runs where history exists isn't a gate until CI has that history (`fetch-depth: 0`). Each review round found narrower cases; stop when the remaining ones are documented trade-offs, not bugs |
 
 ---
 
@@ -1280,9 +1284,19 @@ and each step has a mechanical core:
 
 - [`scripts/check-docs.sh`](../scripts/check-docs.sh) fails on a doc link to a missing file,
   a line link past the end of its file, or a label like `` `x.ts:29` `` whose anchor says
-  `#L31`. It *warns* about line links into files this branch changed, because only a person
-  can tell whether line 52 is still the right line. CI runs it in
-  [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`).
+  `#L31`. For line links into files this branch changed, it compares the target line on
+  `main` with the branch: if that text moved to another line (and was unique on both
+  sides), that's an **error** naming the new line, or the shifted range; if the text
+  itself changed, a warning printing both versions, because only a person can tell
+  whether the doc's sentence is still true. CI runs it in
+  [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`), with full git history so
+  the comparison with `main` happens there too.
+- [`scripts/check-env.sh`](../scripts/check-env.sh) fails when an app reads an env var
+  (`process.env.X`, Prisma's `env("X")`, or a read in a workspace package it uses) that
+  its chart, rendered with Deploy's flags, never sets. CI runs it next to `check-docs.sh`.
+- [`.claude/rules/web.md`](../.claude/rules/web.md) holds the web app's conventions, loaded
+  whenever the agent works under `apps/web`. Services have had `ddd.md` from the start; the
+  web app had nothing, so CMS-26's review had to catch what a rule could have prevented.
 - [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) §4 tags images by content, and its
   smoke test checks that every Deployment runs that tag.
 - [`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md) runs the PR → CI →
@@ -1317,6 +1331,8 @@ that fires on everything.
 | The first run of `check-docs.sh` failed on `main`: study-guide §2.2 linked to `Dockerfile#L317`, in a 179-line file. Several reviews had read past it | Reviewers check what changed, not what rotted. Only a check that looks at *everything*, every time, finds rot |
 | Line links can't be checked for *correctness*, only for existence | Split it: errors for what a script can decide, warnings that name the exact link for what it can't |
 | The new "is the Pod on this tag?" smoke check killed the script silently: it asked for `deploy/members-service`, but the charts name it `members-service-members-service` (`<release>-<chart>`), and `set -e` exited on the failed `kubectl` | Test a new check against the real cluster, not the name you expect. A check that can't find its target must report "not found", not take the script down with it |
+| CMS-26's retro: the web chart never set `MEMBERS_API_URL`, and `/members` was broken in the cluster while every check passed | Ask what check *would* have failed, then build it: `check-env.sh` compares what each app reads with what its chart sets. Mechanical rules become scripts; judgement calls (`web.md`) become rules the reviewer and the agent both see |
+| CMS-26 produced 16 "is line N still right?" warnings per run, checked by hand three times, and one existing link had moved anyway | A warning that's usually decidable is a missing check. `check-docs.sh` now compares the line with `main` and turns "it moved" into an error with the new line number. Writing it hit two bash traps: `grep -q` + `pipefail` (SIGPIPE → exit 141), and a second `=~` resetting `BASH_REMATCH` |
 | `check-docs.sh` passed locally but failed on its first CI run: `docker-local-dev.md` linked to `apps/members-service/.env`, which exists on this machine but is gitignored | A check that reads the working tree sees files nobody else has. It now rejects links to gitignored files, so the local run and CI give the same answer. Run new checks in CI before trusting a local green |
 | Running `scripts/cluster-up.sh --skip-build` with Claude Code's `!` prefix still didn't start the tunnel, and printed no reason | `!` runs the command with no terminal, so sudo can't ask for a password and the script quietly stays check-only. Steps that need a human (a password, a browser login) must run in the human's own terminal, and the script now says so when it can't ask |
 | Two full rebuilds while testing this took the disk from 11 GB to 4.9 GB free (92%), mostly build cache | Every rebuild leaves cache behind. The script now deletes superseded `local-*` tags. Build cache still needs a `docker builder prune -af` (host and minikube), which is why `/ship` checks the disk before pushing |
@@ -1457,6 +1473,7 @@ in parentheses (and the file it links) is where to look.
 - [ ] How does `/start-ticket` decide which ticket is next? (§12.1)
 - [ ] Why can rebuilding an image under the same tag make `/verify` pass on old code? How does a `local-<sha>` tag fix it? (§12.2, §7.6)
 - [ ] Which documentation mistakes does `scripts/check-docs.sh` fail on, and which does it only warn about? Why the split? (§12.2)
+- [ ] Which CMS-26 bug would `scripts/check-env.sh` have caught, and why doesn't it check `docker-compose.yml`? (§12.2)
 - [ ] Why does the disk check come *before* the push in `/ship`, not after the merge? (§12.2, `ci-cd.md`)
 - [ ] Name one gate in this workflow that's mechanical and one that's judgement. Why isn't review mechanical? (§12.2)
 - [ ] What does `Bash(git checkout *)` allow besides switching branches? How would you narrow an allow rule? (§12.3)

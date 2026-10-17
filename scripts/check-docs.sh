@@ -7,10 +7,15 @@
 #   - a relative link points to a file that doesn't exist        [text](../apps/x.ts)
 #   - a line link points past the end of its file                [text](../apps/x.ts#L300)
 #   - a link's label and its line disagree                       [`x.ts:29`](../apps/x.ts#L31)
+#   - a line link into a file this branch changed, whose target line's text now
+#     sits on another line: it moved (the error names the new line)
 #
-# Warnings (exit 0) — things only a human can judge, computed from this branch's
-# diff against main (skipped when main isn't available, e.g. CI's shallow clone):
-#   - a doc links to a line in a file this branch changed: the line may have moved
+# Warnings (exit 0) — things only a human can judge. These and the "moved" error
+# compare this branch with main, so they're skipped when main isn't available
+# (a shallow clone; CI's lint-typecheck checks out full history for this reason):
+#   - a line link into a changed file whose target line's text changed: is the
+#     doc's sentence still true? (both versions are printed)
+#   - a line link added on this branch: its target text is printed to confirm
 #   - code changed but docs/study-guide.md didn't (.claude/rules/docs-learning.md)
 #
 # Why a script: on CMS-18 the review had to "fix code links whose line numbers
@@ -34,10 +39,65 @@ if [[ -n "$base" ]]; then
   changed=$( { git diff --name-only "$base"; git ls-files --others --exclude-standard; } | sort -u)
 fi
 
+# Line $n of a file, without leading/trailing whitespace. Reads stdin.
+# It reads to the end on purpose (no `exit`, no `grep -q` below): stopping early
+# kills the writer (`git show`) with SIGPIPE, and pipefail turns that into a failure.
+line_text() { awk -v n="$1" 'NR == n { gsub(/^[ \t]+|[ \t]+$/, ""); print }'; }
+
+# A line link into a file this branch changed. Decide what we can mechanically,
+# so only real judgement calls are left as warnings:
+#   - the link already existed on main and its line still holds the same text → fine
+#   - that text now sits on exactly one other line                       → error: it moved
+#   - the text changed or is gone                                         → warning, old vs new
+#   - the link is new on this branch                                      → warning with the target text
+# (CMS-26: a pre-existing link to Member.ts:117 silently moved to 124, and 16
+# "is line N still right?" warnings each had to be opened by hand.)
+# Line numbers where a line's trimmed text equals $1, in the file on stdin.
+# Via ENVIRON, not `awk -v`: -v turns backslashes in the text (\d, \n) into escapes.
+lines_equal_to() { T="$1" awk '{ s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s) } s == ENVIRON["T"] { print NR }'; }
+
+# How often a fixed string occurs in the text on stdin (occurrences, not lines:
+# two links on one line count twice).
+# grep exits 1 on zero matches, and with pipefail that would abort the script.
+count_of() { { grep -oF -- "$1" || true; } | wc -l; }
+
+check_moved_line() {
+  local doc=$1 lineno=$2 target=$3 file=$4 n=$5 end=$6 now old matches before after
+  now=$(line_text "$n" <"$file")
+  # "New" = this link appears more often in the doc now than on main (a second
+  # link to the same line elsewhere is new too, and gets confirmed like one).
+  before=$(count_of "($target)" <<<"$base_doc")
+  after=$(count_of "($target)" <"$doc")
+  if (( after > before )) || ! git cat-file -e "$base:$file" 2>/dev/null; then
+    warn "$doc:$lineno → $target: new link, points at: ${now:-<blank line>}"
+    return
+  fi
+  old=$(git show "$base:$file" | line_text "$n")
+  [[ "$now" == "$old" ]] && return
+  # Only call it a move when the text is distinctive (short lines like "}" match all
+  # over a file) and unique on BOTH sides: if main had two copies and one was
+  # deleted, the remaining one isn't where the link's line went.
+  if (( ${#old} >= 12 )); then
+    matches=$(lines_equal_to "$old" <"$file")
+    if [[ -n "$matches" && "$matches" != *$'\n'* ]] \
+      && [[ "$(git show "$base:$file" | lines_equal_to "$old" | wc -l)" -eq 1 ]]; then
+      local fix="L$matches"
+      # A range moves as a whole: suggest the end too, shifted by the same amount.
+      [[ -n "$end" ]] && fix="L$matches-L$(( end + matches - n ))"
+      err "$doc:$lineno → $target: the line it pointed at moved; use #$fix (${old:0:60})"
+      return
+    fi
+  fi
+  warn "$doc:$lineno → $target: line $n changed. Was: ${old:0:60} · Now: ${now:-<blank line>}"
+}
+
 # --- 1. Links ----------------------------------------------------------------
 mapfile -t docs < <(find docs -name '*.md'; echo CLAUDE.md)
 for doc in "${docs[@]}"; do
   dir=$(dirname "$doc")
+  # This doc as it is on main, read once per doc (check_moved_line compares with it).
+  base_doc=""
+  [[ -n "$base" ]] && base_doc=$(git show "$base:$doc" 2>/dev/null || true)
   # grep -o prints each "[label](target)" on its own line, with -n its line number.
   # Inline links only; reference-style links aren't used in this repo.
   while IFS= read -r match; do
@@ -65,7 +125,9 @@ for doc in "${docs[@]}"; do
 
     # Line anchors look like #L52 or #L52-L60 (GitHub's format). Check the last line.
     if [[ "$anchor" =~ ^L([0-9]+)(-L([0-9]+))?$ ]]; then
-      last=${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}
+      first=${BASH_REMATCH[1]}   # saved now: the label match below resets BASH_REMATCH
+      range_end=${BASH_REMATCH[3]:-}
+      last=${BASH_REMATCH[3]:-$first}
       # awk counts the last line even without a trailing newline; wc -l would not.
       length=$(awk 'END { print NR }' "$resolved")
       if ((last > length)); then
@@ -79,7 +141,7 @@ for doc in "${docs[@]}"; do
       fi
       # The file changed on this branch, so the line it points at may have moved.
       if grep -qxF "$resolved" <<<"$changed"; then
-        warn "$doc:$lineno → $target: $resolved changed on this branch; is line ${anchor#L} still the right one?"
+        check_moved_line "$doc" "$lineno" "$target" "$resolved" "$first" "${range_end:-}"
       fi
     fi
   done < <(grep -noE '\[[^]]*\]\([^) ]+\)' "$doc" || true)

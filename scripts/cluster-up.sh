@@ -247,6 +247,10 @@ for i in "${!IMAGES[@]}"; do
   scripts/prune-deploy-images.sh "${releases[$i]}" "${IMAGES[$i]}" 1 >/dev/null \
     || warn "couldn't clean up old ${IMAGES[$i]} images (disk may fill; see docs/ci-cd.md)"
 done
+# Build cache inside minikube grows with every build here. Cap it by size, with
+# the same script (and cap) as Deploy's cleanup job: the newest layers stay.
+scripts/prune-build-cache.sh >/dev/null \
+  || warn "couldn't cap minikube's build cache (scripts/prune-build-cache.sh failed)"
 
 # --- 3. Tunnel and /etc/hosts ------------------------------------------------
 # Both need root. We only use sudo when it's actually needed, say why first, and

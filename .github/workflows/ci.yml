@@ -28,7 +28,12 @@ jobs:
     name: lint-typecheck
     runs-on: ubuntu-latest
     steps:
+      # Full history, so check-docs.sh can compare the PR with origin/main and
+      # fail on a line link whose target moved. A shallow clone has no main, and
+      # would skip that check (and the warnings) without a word.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # pnpm 9 matches the lockfile (and the Dockerfiles' corepack pin).
       - uses: pnpm/action-setup@v4
         with:
@@ -48,8 +53,13 @@ jobs:
       - run: pnpm lint
       # Broken doc links (missing files, line links past the end of a file) fail
       # the build like a lint error. The learning docs are a deliverable here.
-      # CI's checkout is shallow, so the script skips its branch-diff warnings.
+      # With the full-history checkout above it also compares with origin/main:
+      # a moved line link fails here, as it does locally.
       - run: scripts/check-docs.sh
+      # Every env var an app reads must be set by its Helm chart. Catches the
+      # CMS-26 bug class: compose sets a variable, the chart forgets it, and the
+      # app silently falls back to a default that's wrong in the cluster.
+      - run: scripts/check-env.sh
       - run: pnpm -r typecheck
       - run: pnpm build
 

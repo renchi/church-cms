@@ -189,7 +189,11 @@ jobs:
           if minikube_env=$(minikube docker-env); then
             eval "$minikube_env"
             prune "$IMAGE"                     # minikube: where the Pods pull it
-            prune "$local_repo"                # minikube: local-* builds left by /verify
+            # local-* builds left by /verify, with the same keep-2 rule: when the
+            # revision before this deploy was a /verify build, `helm rollback`
+            # goes back to it, and with pullPolicy=Never it can't be pulled.
+            # One deploy later it's no longer among the newest two, and goes.
+            prune "$local_repo"
             eval "$(minikube docker-env -u)"
           else
             echo "::warning::minikube docker-env failed: minikube's images were not cleaned"
@@ -205,23 +209,30 @@ jobs:
             echo "- Duration: $(( $(date +%s) - STARTED_AT ))s"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Once per deploy, after every service: clear build cache older than a day, on
-  # the host (Deploy's builds) and inside minikube (scripts/cluster-up.sh builds
-  # there). Recent layers stay, so the next build is still fast. Then record the
-  # free disk in the run summary, where /ship reads it.
+  # Once per deploy, after every service: cap the build cache by size on the
+  # host (Deploy's builds) and inside minikube (scripts/cluster-up.sh builds
+  # there), via scripts/prune-build-cache.sh. Then record what it reclaimed and
+  # the free disk in the run summary.
   cleanup:
     needs: [changes, deploy]
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.services != '[]' }}
     runs-on: [self-hosted, linux, ARM64, minikube]
     continue-on-error: true
     steps:
+      # For scripts/prune-build-cache.sh, at the commit being deployed.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
       - name: Prune build cache and report disk
         run: |
           # The "Total" line says how much each prune reclaimed, per daemon.
-          host=$(docker builder prune -af --filter until=24h | tail -1)
+          # Each part may fail on its own (an older commit without the script, a
+          # daemon error) without skipping the others or the disk report below.
+          host=$(scripts/prune-build-cache.sh) || { host="failed"; echo "::warning::host build-cache prune failed"; }
           if minikube_env=$(minikube docker-env); then
             eval "$minikube_env"
-            mk=$(docker builder prune -af --filter until=24h | tail -1)
+            mk=$(scripts/prune-build-cache.sh) || { mk="failed"; echo "::warning::minikube build-cache prune failed"; }
             eval "$(minikube docker-env -u)"
           else
             mk="skipped: minikube docker-env failed"
