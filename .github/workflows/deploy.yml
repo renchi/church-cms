@@ -168,6 +168,23 @@ jobs:
             --set metrics.serviceMonitor.enabled=true \
             --wait --rollback-on-failure --timeout 4m
 
+      # Every deploy leaves a ~1.3 GB image per service on the host (built here)
+      # and inside minikube (pulled from ghcr.io). Nothing removed them, and one
+      # deploy took the runner's disk to 99% (CMS-26). Keep this tag and the
+      # previous one (what a rollback would need); remove the rest. Runs only
+      # after a successful upgrade, so a failed deploy keeps everything.
+      - name: Remove superseded images
+        run: |
+          # Build cache older than a day goes too; recent layers stay, so a
+          # follow-up deploy still rebuilds fast.
+          scripts/prune-deploy-images.sh "$IMAGE" "$TAG"
+          docker builder prune -af --filter until=24h >/dev/null
+          eval "$(minikube docker-env)"
+          scripts/prune-deploy-images.sh "$IMAGE" "$TAG"
+          docker builder prune -af --filter until=24h >/dev/null
+          eval "$(minikube docker-env -u)"
+          df -h / | tail -1
+
       - name: Summary
         if: always()
         run: |

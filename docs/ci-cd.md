@@ -122,6 +122,15 @@ Only services whose files changed are rebuilt:
 
 Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA tag makes it obvious which commit is running and makes every deploy a real change that Kubernetes rolls out.
 
+Unique tags also mean unique images, about 1.3 GB per service per deploy, stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. The job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places after a successful upgrade. It keeps the current tag, the previous one (the rollback target) and `main`, and clears build cache older than 24 h. Its last line is `df -h /`, so every deploy log shows the free disk:
+
+```
+# ghcr.io/renchi/church-cms/web: keeping <this sha> and <previous sha> (rollback target)
+#   removed ghcr.io/renchi/church-cms/web:<an older sha>      ← one line per removed tag, if any
+# (the same again for minikube's Docker)
+# /dev/sda2        62G   44G   16G  73% /                       ← should stay ≥ 10G
+```
+
 ### Shipping a ticket with `/ship`
 
 After `/verify` and `/code-review`, the agent's `/ship` skill ([`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md)) runs the rest of this section in order. The same steps work by hand:
@@ -177,6 +186,7 @@ What CMS-18 needed for events-service, in order:
 | Symptom | Likely cause / fix |
 |---|---|
 | Deploy job stuck in "Queued" | Runner offline: `sudo ~/actions-runner/svc.sh status`, then `start` |
+| A Deploy job fails before any step runs, or `no space left on device` | Disk full. `df -h /`, then `docker system df` on the host and after `eval "$(minikube docker-env)"`. Old `<sha>` images: `scripts/prune-deploy-images.sh <image> <running-tag>` (the `/ship` skill, step 2, has the loop). Build cache: `docker builder prune -af`. Never `docker image prune -a` on the host: it deletes the untagged `kicbase` image minikube runs on |
 | `docker: permission denied` in runner | Runner user not in `docker` group: `sudo usermod -aG docker $USER`, then restart the service |
 | `kubernetes cluster unreachable` | minikube stopped: `minikube start` |
 | `helm: command not found` | Runner PATH is stale; see the note in setup step 1 |

@@ -678,6 +678,9 @@ can each pass alone and still break when combined, and this catches that.
 2. `deploy` (one job per service) runs `docker build`, then `docker push` to
    `ghcr.io/renchi/church-cms/<svc>:<commit-sha>`, then
    `helm upgrade --install --wait --rollback-on-failure`.
+3. After a successful upgrade, `scripts/prune-deploy-images.sh` removes that service's
+   superseded `<sha>` images on the host and inside minikube, keeping the current tag and
+   the previous one (the image a `helm rollback` would need).
 
 Tagging by **commit SHA** (not `latest`) means every deploy is a real change that
 Kubernetes rolls out, and `kubectl get deploy -o jsonpath='{..image}'` tells you exactly
@@ -706,6 +709,7 @@ Because the repo is public, the security rules matter:
 | Pods `ImagePullBackOff` / `unauthorized` | Private registry images need credentials, so we made the packages public |
 | Helm 4 warning: `--atomic` deprecated | Watch tool deprecations in logs; renamed to `--rollback-on-failure` |
 | The ticket said "kubeconfig secret" | Tickets can be wrong about *how*. Keep the *goal* and record the deviation (PR + Linear comment) |
+| After the CMS-26 deploy the runner's disk was at **99%** (0.9 GB free), and the documented `docker builder prune` had freed **0 B** a few hours before | Two things fill a CI machine: build cache *and* the images themselves. Every deploy added a ~1.3 GB `<sha>` image per service, twice (built on the host, pulled into minikube), and nothing removed them. Deploy now prunes them itself, keeping the rollback target. Lesson: when you make artefacts unique per commit (good for traceability), you also own deleting them. Never reach for `docker image prune -a` here: minikube's own container runs on an untagged image |
 
 ---
 

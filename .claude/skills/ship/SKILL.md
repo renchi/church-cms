@@ -22,12 +22,18 @@ Runs the PR → CI → Merge → Deploy → Done rows of the CLAUDE.md Workflow 
 df -h /     # Avail should be ≥ 10G. A Deploy that rebuilds all three images needs ~8 GB
 ```
 
-If less than ~10 GB is free, tell the user before pushing and offer the prune (it only deletes build cache, not images in use):
+If less than ~10 GB is free, tell the user before pushing and offer the cleanup. Two things fill the disk: build cache, and superseded `<image>:<sha>` deploy images (about 1.3 GB per service per deploy, on the host and inside minikube). `scripts/prune-deploy-images.sh` removes the second kind, keeping the current and previous tag. Deploy runs it after every upgrade, so leftovers come from older deploys or local builds.
 
 ```bash
 docker builder prune -af
-eval "$(minikube docker-env)" && docker builder prune -af; eval "$(minikube docker-env -u)"
+for s in members-service events-service web; do
+  scripts/prune-deploy-images.sh "ghcr.io/renchi/church-cms/$s" "$(kubectl get deploy "$s-$s" -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*://')"
+done
+eval "$(minikube docker-env)" && docker builder prune -af   # then the same loop, inside minikube
+eval "$(minikube docker-env -u)"
 ```
+
+Never use `docker image prune -a` on the host: minikube runs on an untagged `kicbase` image, which it deletes.
 
 A change to `pnpm-lock.yaml` or another shared file redeploys **every** service. Say so when the diff has one.
 
@@ -68,7 +74,7 @@ gh run list --workflow=Deploy --commit "$sha" --json databaseId,status   # repea
 gh run watch <run-id> --exit-status
 ```
 
-If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed and how long it took.
+If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed, how long it took, and `df -h /` afterwards: the "Remove superseded images" step prints it. Below ~10 GB, say so before the next ticket starts.
 
 ## 7. Close the loop
 
