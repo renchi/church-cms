@@ -7,10 +7,15 @@
 #   - a relative link points to a file that doesn't exist        [text](../apps/x.ts)
 #   - a line link points past the end of its file                [text](../apps/x.ts#L300)
 #   - a link's label and its line disagree                       [`x.ts:29`](../apps/x.ts#L31)
+#   - a line link into a file this branch changed, whose target line's text now
+#     sits on another line: it moved (the error names the new line)
 #
-# Warnings (exit 0) — things only a human can judge, computed from this branch's
-# diff against main (skipped when main isn't available, e.g. CI's shallow clone):
-#   - a doc links to a line in a file this branch changed: the line may have moved
+# Warnings (exit 0) — things only a human can judge. These and the "moved" error
+# compare this branch with main, so they're skipped when main isn't available
+# (e.g. CI's shallow clone):
+#   - a line link into a changed file whose target line's text changed: is the
+#     doc's sentence still true? (both versions are printed)
+#   - a line link added on this branch: its target text is printed to confirm
 #   - code changed but docs/study-guide.md didn't (.claude/rules/docs-learning.md)
 #
 # Why a script: on CMS-18 the review had to "fix code links whose line numbers
@@ -50,8 +55,12 @@ line_text() { awk -v n="$1" 'NR == n { gsub(/^[ \t]+|[ \t]+$/, ""); print }'; }
 check_moved_line() {
   local doc=$1 lineno=$2 target=$3 file=$4 n=$5 now old matches
   now=$(line_text "$n" <"$file")
-  if ! git show "$base:$doc" 2>/dev/null | grep -F "($target)" >/dev/null \
-    || ! git cat-file -e "$base:$file" 2>/dev/null; then
+  # "New" = this link appears more often in the doc now than on main (a second
+  # link to the same line elsewhere is new too, and gets confirmed like one).
+  local before after
+  before=$(git show "$base:$doc" 2>/dev/null | grep -cF "($target)" || true)
+  after=$(grep -cF "($target)" "$doc" || true)
+  if (( after > before )) || ! git cat-file -e "$base:$file" 2>/dev/null; then
     warn "$doc:$lineno → $target: new link, points at: ${now:-<blank line>}"
     return
   fi
@@ -59,7 +68,8 @@ check_moved_line() {
   [[ "$now" == "$old" ]] && return
   # Short lines ("}", "") match all over a file, so only trust a distinctive one.
   if (( ${#old} >= 12 )); then
-    matches=$(awk -v t="$old" '{ s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s) } s == t { print NR }' "$file")
+    # Via ENVIRON, not `awk -v`: -v turns backslashes in the text (\d, \n) into escapes.
+    matches=$(T="$old" awk '{ s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s) } s == ENVIRON["T"] { print NR }' "$file")
     if [[ -n "$matches" && "$matches" != *$'\n'* ]]; then
       err "$doc:$lineno → $target: the line it pointed at moved to L$matches (${old:0:60})"
       return

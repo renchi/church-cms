@@ -189,10 +189,11 @@ jobs:
           if minikube_env=$(minikube docker-env); then
             eval "$minikube_env"
             prune "$IMAGE"                     # minikube: where the Pods pull it
-            # local-* builds left by /verify: keep 1. Once this CI deploy is the
-            # newest revision, no local build is kept: a rollback of the CI
-            # release goes to a ghcr image, and a local build is just rebuilt.
-            prune "$local_repo" 1
+            # local-* builds left by /verify, with the same keep-2 rule: when the
+            # revision before this deploy was a /verify build, `helm rollback`
+            # goes back to it, and with pullPolicy=Never it can't be pulled.
+            # One deploy later it's no longer among the newest two, and goes.
+            prune "$local_repo"
             eval "$(minikube docker-env -u)"
           else
             echo "::warning::minikube docker-env failed: minikube's images were not cleaned"
@@ -208,26 +209,28 @@ jobs:
             echo "- Duration: $(( $(date +%s) - STARTED_AT ))s"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Once per deploy, after every service: cap the build cache on the host
-  # (Deploy's builds) and inside minikube (scripts/cluster-up.sh builds there).
-  # A size cap, not an age limit: one busy day of /verify runs and deploys left
-  # ~11 GB of same-day cache, which "older than 24h" never touched (CMS-26).
-  # --max-used-space keeps the most recently used layers up to the cap, so the
-  # next build still hits the cache. Then record the free disk in the run summary.
+  # Once per deploy, after every service: cap the build cache by size on the
+  # host (Deploy's builds) and inside minikube (scripts/cluster-up.sh builds
+  # there), via scripts/prune-build-cache.sh. Then record what it reclaimed and
+  # the free disk in the run summary.
   cleanup:
     needs: [changes, deploy]
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.services != '[]' }}
     runs-on: [self-hosted, linux, ARM64, minikube]
     continue-on-error: true
     steps:
+      # For scripts/prune-build-cache.sh, at the commit being deployed.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
       - name: Prune build cache and report disk
         run: |
           # The "Total" line says how much each prune reclaimed, per daemon.
-          cap=3GB   # per daemon: roughly one full set of the three services' layers
-          host=$(docker builder prune -af --max-used-space "$cap" | tail -1)
+          host=$(scripts/prune-build-cache.sh)     # the cap is defined there
           if minikube_env=$(minikube docker-env); then
             eval "$minikube_env"
-            mk=$(docker builder prune -af --max-used-space "$cap" | tail -1)
+            mk=$(scripts/prune-build-cache.sh)
             eval "$(minikube docker-env -u)"
           else
             mk="skipped: minikube docker-env failed"

@@ -681,7 +681,8 @@ can each pass alone and still break when combined, and this catches that.
 3. After a successful upgrade, `scripts/prune-deploy-images.sh` removes that service's
    old images on the host and inside minikube. It keeps the two tags `helm history` says
    were deployed most recently (now, and what a `helm rollback` would need); failed
-   revisions don't count. A final `cleanup` job caps build cache at 3 GB per daemon.
+   revisions don't count. A final `cleanup` job caps build cache at 3 GB per daemon
+   (`scripts/prune-build-cache.sh`, which `cluster-up.sh` uses too).
 
 Tagging by **commit SHA** (not `latest`) means every deploy is a real change that
 Kubernetes rolls out, and `kubectl get deploy -o jsonpath='{..image}'` tells you exactly
@@ -714,6 +715,7 @@ Because the repo is public, the security rules matter:
 | Code review of that cleanup: the first version picked "the previous image" by creation date | Dates don't say what was *deployed*: a cache-hit rebuild keeps an old date, and an image from a failed, rolled-back deploy is newer than the real rollback target. The record of what ran is `helm history`, so the script reads that. Ask "which system already knows this?" before inferring it |
 | A second review of the cleanup: a failing `helm history` gave an empty list, which read as "keep nothing" and would have deleted the running images; `eval "$(minikube docker-env)"` "succeeded" when minikube was down and pruned the host twice | A destructive script must **fail closed**: no answer means remove nothing. Two bash traps hid the failures: a command inside `mapfile < <(…)` can fail unnoticed, and `eval "$(cmd)"` succeeds when `cmd` fails, because it evals an empty string. Assign first (`x=$(cmd)`), then use it. The script also gained `DRY_RUN=1`, so you can see what it would remove before trusting it |
 | The first real Deploy with the cleanup removed every old image correctly, yet left the disk at 6.8 GB: ~11 GB of build cache, all from that day | "Older than 24 h" is a policy about *age*; the problem was *size*. A busy day (many `/verify` builds, two full deploys) never ages out. The cleanup now caps cache by size (`--max-used-space`), which bounds disk whatever the day looks like. Measure the first real run before calling a fix done |
+| Review of the guardrails: `check-env.sh` grepped chart *templates*, so a name in a comment or in a block that's off by default counted as "set"; it also missed Prisma's `env("DATABASE_URL")` | Check the artefact, not the source: the script now runs `helm template` with Deploy's flags and reads what would reach the Pod. And "every variable the app reads" includes reads you don't write as `process.env` (Prisma, workspace packages) |
 
 ---
 
@@ -1287,7 +1289,8 @@ and each step has a mechanical core:
   only a person can tell whether the doc's sentence is still true. CI runs it in
   [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`).
 - [`scripts/check-env.sh`](../scripts/check-env.sh) fails when an app reads an env var
-  (`process.env.X`) that its Helm chart never sets. CI runs it next to `check-docs.sh`.
+  (`process.env.X`, Prisma's `env("X")`, or a read in a workspace package it uses) that
+  its chart, rendered with Deploy's flags, never sets. CI runs it next to `check-docs.sh`.
 - [`.claude/rules/web.md`](../.claude/rules/web.md) holds the web app's conventions, loaded
   whenever the agent works under `apps/web`. Services have had `ddd.md` from the start; the
   web app had nothing, so CMS-26's review had to catch what a rule could have prevented.
