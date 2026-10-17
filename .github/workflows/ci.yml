@@ -50,6 +50,10 @@ jobs:
       # the build like a lint error. The learning docs are a deliverable here.
       # CI's checkout is shallow, so the script skips its branch-diff warnings.
       - run: scripts/check-docs.sh
+      # Every env var an app reads must be set by its Helm chart. Catches the
+      # CMS-26 bug class: compose sets a variable, the chart forgets it, and the
+      # app silently falls back to a default that's wrong in the cluster.
+      - run: scripts/check-env.sh
       - run: pnpm -r typecheck
       - run: pnpm build
 

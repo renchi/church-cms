@@ -25,7 +25,8 @@ pnpm --filter members-service test       # unit + integration
 scripts/cluster-up.sh                    # bring up / update the whole minikube stack, then smoke-test it
 scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postgres data)
 scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, only check tunnel + /etc/hosts
-scripts/check-docs.sh                    # broken doc links, stale line links, missing study-guide update (also runs in CI)
+scripts/check-docs.sh                    # broken doc links, moved line links, missing study-guide update (also runs in CI)
+scripts/check-env.sh                     # every env var an app reads is set by its Helm chart (also runs in CI)
 ```
 
 ## Workflow
@@ -59,7 +60,7 @@ docs/adr/   # architecture decision records. Read these before changing architec
 - `tsconfig.base.json` is the base TS config that services extend. Target ES2022, `NodeNext` module resolution, strict mode, ESM.
 - Services use **Fastify + Prisma** (members-service, events-service). The frontend uses **Next.js 15**.
 - Each service's Prisma client must generate into its own folder (`output` in `schema.prisma`, as events-service does). pnpm shares one `@prisma/client`, so default outputs overwrite each other.
-- Path-scoped conventions load automatically from `.claude/rules/`: `ddd.md` (service code), `k8s-helm.md` (charts, k8s, workflows, Dockerfiles), `testing.md` (tests), `docs-learning.md` (docs).
+- Path-scoped conventions load automatically from `.claude/rules/`: `ddd.md` (service code), `web.md` (the Next.js app), `k8s-helm.md` (charts, k8s, workflows, Dockerfiles), `testing.md` (tests), `docs-learning.md` (docs).
 
 ## Active vs deferred services
 

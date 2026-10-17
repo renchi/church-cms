@@ -230,21 +230,37 @@ Push it and open a draft PR (`gh pr create --draft`) to watch the `lint-typechec
 go red at the same step. Then clean up: `gh pr close --delete-branch`, `git checkout main`,
 `git branch -D scratch/docs-gate`.
 
-**2. The warning a script can't decide.** Add a blank line at the top of
+**2. A moved line, and a changed one.** Add a blank line at the top of
 `apps/events-service/src/domain/Attendance.ts` (don't commit) and run the check again:
 
 ```bash
-scripts/check-docs.sh
-# ! docs/events-service-ddd.md:74 → ../apps/events-service/src/domain/Attendance.ts#L52: apps/events-service/src/domain/Attendance.ts changed on this branch; is line 52 still the right one?
-# ! docs/study-guide.md:856 → …Attendance.ts#L65: … changed on this branch; is line 65 still the right one?
+sed -i '1i\\' apps/events-service/src/domain/Attendance.ts
+scripts/check-docs.sh; echo "exit=$?"
+# ✘ docs/events-service-ddd.md:74 → ../apps/events-service/src/domain/Attendance.ts#L52: the line it pointed at moved to L53 (static record()
+# ✘ docs/study-guide.md:947 → ../apps/events-service/src/domain/Attendance.ts#L65: the line it pointed at moved to L66 (if (!event.isOpenForCheckIn()) {)
+# 2 error(s), 1 warning(s)
+# exit=1
 # (the doc line numbers before the → move as the docs grow; the targets after it are what matter)
 ```
 
-Every line below the blank one moved down by one, so both links are now off by one, yet
-both files still exist and are long enough. The script can't tell whether a link is
-*right*, only that it *might* have moved, so it warns and leaves the decision to you.
-That's the split this whole workflow uses: mechanical checks for what a machine can
-decide, review for the rest. Undo with `git checkout -- apps/events-service/src/domain/Attendance.ts`.
+Every line below the blank one moved down by one. The script compares each link's target
+line on `main` with this branch: the same text now sits one line lower, so the link is
+wrong, and it says where to point it. Now undo that, and instead *rename* the method on the
+linked line:
+
+```bash
+git checkout -- apps/events-service/src/domain/Attendance.ts
+sed -i '52s/static record(/static checkIn(/' apps/events-service/src/domain/Attendance.ts
+scripts/check-docs.sh
+# ! docs/events-service-ddd.md:74 → ../apps/events-service/src/domain/Attendance.ts#L52: line 52 changed. Was: static record( · Now: static checkIn(
+# ✔ docs OK (2 warning(s))
+```
+
+The line is still at L52 but says something else. Is the doc's sentence about it still
+true? Only a reader can tell, so this one stays a warning, with both versions printed so
+you don't have to open the file. That's the split this whole workflow uses: mechanical
+checks for what a machine can decide, review for the rest. Undo with
+`git checkout -- apps/events-service/src/domain/Attendance.ts`.
 
 ## Exercise: the image cleanup
 

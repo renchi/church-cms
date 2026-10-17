@@ -1280,9 +1280,16 @@ and each step has a mechanical core:
 
 - [`scripts/check-docs.sh`](../scripts/check-docs.sh) fails on a doc link to a missing file,
   a line link past the end of its file, or a label like `` `x.ts:29` `` whose anchor says
-  `#L31`. It *warns* about line links into files this branch changed, because only a person
-  can tell whether line 52 is still the right line. CI runs it in
+  `#L31`. For line links into files this branch changed, it compares the target line on
+  `main` with the branch: if that text moved to another line, that's an **error** naming
+  the new line; if the text itself changed, a warning printing both versions, because
+  only a person can tell whether the doc's sentence is still true. CI runs it in
   [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`).
+- [`scripts/check-env.sh`](../scripts/check-env.sh) fails when an app reads an env var
+  (`process.env.X`) that its Helm chart never sets. CI runs it next to `check-docs.sh`.
+- [`.claude/rules/web.md`](../.claude/rules/web.md) holds the web app's conventions, loaded
+  whenever the agent works under `apps/web`. Services have had `ddd.md` from the start; the
+  web app had nothing, so CMS-26's review had to catch what a rule could have prevented.
 - [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) §4 tags images by content, and its
   smoke test checks that every Deployment runs that tag.
 - [`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md) runs the PR → CI →
@@ -1317,6 +1324,8 @@ that fires on everything.
 | The first run of `check-docs.sh` failed on `main`: study-guide §2.2 linked to `Dockerfile#L317`, in a 179-line file. Several reviews had read past it | Reviewers check what changed, not what rotted. Only a check that looks at *everything*, every time, finds rot |
 | Line links can't be checked for *correctness*, only for existence | Split it: errors for what a script can decide, warnings that name the exact link for what it can't |
 | The new "is the Pod on this tag?" smoke check killed the script silently: it asked for `deploy/members-service`, but the charts name it `members-service-members-service` (`<release>-<chart>`), and `set -e` exited on the failed `kubectl` | Test a new check against the real cluster, not the name you expect. A check that can't find its target must report "not found", not take the script down with it |
+| CMS-26's retro: the web chart never set `MEMBERS_API_URL`, and `/members` was broken in the cluster while every check passed | Ask what check *would* have failed, then build it: `check-env.sh` compares what each app reads with what its chart sets. Mechanical rules become scripts; judgement calls (`web.md`) become rules the reviewer and the agent both see |
+| CMS-26 produced 16 "is line N still right?" warnings per run, checked by hand three times, and one existing link had moved anyway | A warning that's usually decidable is a missing check. `check-docs.sh` now compares the line with `main` and turns "it moved" into an error with the new line number. Writing it hit two bash traps: `grep -q` + `pipefail` (SIGPIPE → exit 141), and a second `=~` resetting `BASH_REMATCH` |
 | `check-docs.sh` passed locally but failed on its first CI run: `docker-local-dev.md` linked to `apps/members-service/.env`, which exists on this machine but is gitignored | A check that reads the working tree sees files nobody else has. It now rejects links to gitignored files, so the local run and CI give the same answer. Run new checks in CI before trusting a local green |
 | Running `scripts/cluster-up.sh --skip-build` with Claude Code's `!` prefix still didn't start the tunnel, and printed no reason | `!` runs the command with no terminal, so sudo can't ask for a password and the script quietly stays check-only. Steps that need a human (a password, a browser login) must run in the human's own terminal, and the script now says so when it can't ask |
 | Two full rebuilds while testing this took the disk from 11 GB to 4.9 GB free (92%), mostly build cache | Every rebuild leaves cache behind. The script now deletes superseded `local-*` tags. Build cache still needs a `docker builder prune -af` (host and minikube), which is why `/ship` checks the disk before pushing |
@@ -1457,6 +1466,7 @@ in parentheses (and the file it links) is where to look.
 - [ ] How does `/start-ticket` decide which ticket is next? (§12.1)
 - [ ] Why can rebuilding an image under the same tag make `/verify` pass on old code? How does a `local-<sha>` tag fix it? (§12.2, §7.6)
 - [ ] Which documentation mistakes does `scripts/check-docs.sh` fail on, and which does it only warn about? Why the split? (§12.2)
+- [ ] Which CMS-26 bug would `scripts/check-env.sh` have caught, and why doesn't it check `docker-compose.yml`? (§12.2)
 - [ ] Why does the disk check come *before* the push in `/ship`, not after the merge? (§12.2, `ci-cd.md`)
 - [ ] Name one gate in this workflow that's mechanical and one that's judgement. Why isn't review mechanical? (§12.2)
 - [ ] What does `Bash(git checkout *)` allow besides switching branches? How would you narrow an allow rule? (§12.3)
