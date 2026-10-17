@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # Start a ticket
 
-Runs the "Session startup" checklist from CLAUDE.md. Stop and tell the user if any step fails. Don't push through a dirty tree or a failed pull.
+Runs the "Start" row of the CLAUDE.md Workflow table. Stop and tell the user if any step fails. Don't push through a dirty tree or a failed pull.
 
 ## 1. Sync
 
@@ -23,8 +23,8 @@ git checkout main && git pull
 
 How to reach Linear, in this order:
 
-1. The claude.ai Linear connector tools (`mcp__claude_ai_Linear__*`), if they're connected.
-2. Otherwise the GraphQL API with `$LINEAR_API_KEY`:
+1. The claude.ai Linear connector tools (`mcp__claude_ai_Linear__*`): `list_issues` (team CMS, state Todo), `get_issue`, `save_issue`. This is the normal path.
+2. Only if the connector is unavailable, the GraphQL API with `$LINEAR_API_KEY`:
    ```bash
    curl -s https://api.linear.app/graphql -H "Authorization: $LINEAR_API_KEY" -H 'Content-Type: application/json' \
      -d '{"query":"{ issues(filter:{state:{name:{eq:\"Todo\"}}, labels:{every:{name:{neq:\"deferred\"}}}}){ nodes{ identifier title sortOrder } } }"}'
@@ -52,3 +52,15 @@ Check the memory index for open reminders, such as repo visibility or pending fo
 ## 6. Next step
 
 If the ticket touches more than two files or involves an architectural decision, enter plan mode. The plan **must include the learning deliverables** from `.claude/rules/docs-learning.md`.
+
+**Suggest the skills that fit this ticket**: only the rows that match it, one line each with the reason, *before* plan mode. Never run them yourself: a grilling session takes the user's time, and whether a ticket deserves one is their call. If no row matches, say nothing. Use the full plugin names: other skills share some of these names.
+
+| If the ticket… | Suggest | When |
+| --- | --- | --- |
+| adds a bounded context or aggregate, or changes what an ADR decided | `/mattpocock-skills:grill-with-docs` (stress-tests the design and updates ADRs as it goes) or `/mattpocock-skills:domain-modeling` | before plan mode |
+| adds or changes domain behaviour (aggregates, invariants, use cases) | `/mattpocock-skills:tdd` (roadmap stage 2: tests first) | during implementation |
+| uses a concept the study guide doesn't cover yet (check its sections) | `/mattpocock-skills:teach` | before or during planning |
+
+Example: "CMS-20 adds the Communications context (ADR-0005). Consider `/mattpocock-skills:grill-with-docs` before plan mode."
+
+If something breaks in a way that isn't obvious during the ticket, suggest `/mattpocock-skills:diagnosing-bugs` at that point.
