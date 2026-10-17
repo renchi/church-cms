@@ -12,7 +12,7 @@
 #
 # Warnings (exit 0) — things only a human can judge. These and the "moved" error
 # compare this branch with main, so they're skipped when main isn't available
-# (e.g. CI's shallow clone):
+# (a shallow clone; CI's lint-typecheck checks out full history for this reason):
 #   - a line link into a changed file whose target line's text changed: is the
 #     doc's sentence still true? (both versions are printed)
 #   - a line link added on this branch: its target text is printed to confirm
@@ -52,26 +52,39 @@ line_text() { awk -v n="$1" 'NR == n { gsub(/^[ \t]+|[ \t]+$/, ""); print }'; }
 #   - the link is new on this branch                                      → warning with the target text
 # (CMS-26: a pre-existing link to Member.ts:117 silently moved to 124, and 16
 # "is line N still right?" warnings each had to be opened by hand.)
+# Line numbers where a line's trimmed text equals $1, in the file on stdin.
+# Via ENVIRON, not `awk -v`: -v turns backslashes in the text (\d, \n) into escapes.
+lines_equal_to() { T="$1" awk '{ s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s) } s == ENVIRON["T"] { print NR }'; }
+
+# How often a fixed string occurs in the text on stdin (occurrences, not lines:
+# two links on one line count twice).
+# grep exits 1 on zero matches, and with pipefail that would abort the script.
+count_of() { { grep -oF -- "$1" || true; } | wc -l; }
+
 check_moved_line() {
-  local doc=$1 lineno=$2 target=$3 file=$4 n=$5 now old matches
+  local doc=$1 lineno=$2 target=$3 file=$4 n=$5 end=$6 now old matches before after
   now=$(line_text "$n" <"$file")
   # "New" = this link appears more often in the doc now than on main (a second
   # link to the same line elsewhere is new too, and gets confirmed like one).
-  local before after
-  before=$(git show "$base:$doc" 2>/dev/null | grep -cF "($target)" || true)
-  after=$(grep -cF "($target)" "$doc" || true)
+  before=$(count_of "($target)" <<<"$base_doc")
+  after=$(count_of "($target)" <"$doc")
   if (( after > before )) || ! git cat-file -e "$base:$file" 2>/dev/null; then
     warn "$doc:$lineno → $target: new link, points at: ${now:-<blank line>}"
     return
   fi
   old=$(git show "$base:$file" | line_text "$n")
   [[ "$now" == "$old" ]] && return
-  # Short lines ("}", "") match all over a file, so only trust a distinctive one.
+  # Only call it a move when the text is distinctive (short lines like "}" match all
+  # over a file) and unique on BOTH sides: if main had two copies and one was
+  # deleted, the remaining one isn't where the link's line went.
   if (( ${#old} >= 12 )); then
-    # Via ENVIRON, not `awk -v`: -v turns backslashes in the text (\d, \n) into escapes.
-    matches=$(T="$old" awk '{ s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s) } s == ENVIRON["T"] { print NR }' "$file")
-    if [[ -n "$matches" && "$matches" != *$'\n'* ]]; then
-      err "$doc:$lineno → $target: the line it pointed at moved to L$matches (${old:0:60})"
+    matches=$(lines_equal_to "$old" <"$file")
+    if [[ -n "$matches" && "$matches" != *$'\n'* ]] \
+      && [[ "$(git show "$base:$file" | lines_equal_to "$old" | wc -l)" -eq 1 ]]; then
+      local fix="L$matches"
+      # A range moves as a whole: suggest the end too, shifted by the same amount.
+      [[ -n "$end" ]] && fix="L$matches-L$(( end + matches - n ))"
+      err "$doc:$lineno → $target: the line it pointed at moved; use #$fix (${old:0:60})"
       return
     fi
   fi
@@ -82,6 +95,9 @@ check_moved_line() {
 mapfile -t docs < <(find docs -name '*.md'; echo CLAUDE.md)
 for doc in "${docs[@]}"; do
   dir=$(dirname "$doc")
+  # This doc as it is on main, read once per doc (check_moved_line compares with it).
+  base_doc=""
+  [[ -n "$base" ]] && base_doc=$(git show "$base:$doc" 2>/dev/null || true)
   # grep -o prints each "[label](target)" on its own line, with -n its line number.
   # Inline links only; reference-style links aren't used in this repo.
   while IFS= read -r match; do
@@ -110,6 +126,7 @@ for doc in "${docs[@]}"; do
     # Line anchors look like #L52 or #L52-L60 (GitHub's format). Check the last line.
     if [[ "$anchor" =~ ^L([0-9]+)(-L([0-9]+))?$ ]]; then
       first=${BASH_REMATCH[1]}   # saved now: the label match below resets BASH_REMATCH
+      range_end=${BASH_REMATCH[3]:-}
       last=${BASH_REMATCH[3]:-$first}
       # awk counts the last line even without a trailing newline; wc -l would not.
       length=$(awk 'END { print NR }' "$resolved")
@@ -124,7 +141,7 @@ for doc in "${docs[@]}"; do
       fi
       # The file changed on this branch, so the line it points at may have moved.
       if grep -qxF "$resolved" <<<"$changed"; then
-        check_moved_line "$doc" "$lineno" "$target" "$resolved" "$first"
+        check_moved_line "$doc" "$lineno" "$target" "$resolved" "$first" "${range_end:-}"
       fi
     fi
   done < <(grep -noE '\[[^]]*\]\([^) ]+\)' "$doc" || true)

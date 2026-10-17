@@ -9,7 +9,8 @@
 # would have failed.
 #
 # What counts as a read, per apps/<app> that has a charts/<app>:
-#   - `process.env.X` and `process.env["X"]` in non-test .ts/.tsx source. A write
+#   - `process.env.X`, `process.env?.X`, `process.env["X"]` / `['X']` in .ts/.tsx/.js/.mjs/.cjs
+#     source, outside tests and test helpers (*.test.*, vitest.*, test/, tests/, __tests__/). A write
 #     (`process.env.X ??= …` or `= …`, even with the value on the next line) is not a read.
 #   - `env("X")` in apps/<app>/prisma/*.prisma (Prisma reads DATABASE_URL this way).
 #   - the same reads in a workspace package the app depends on (packages/*, e.g. @cms/events).
@@ -17,9 +18,16 @@
 # so it's an error: read `process.env.X` directly.
 #
 # What counts as set: the chart rendered with the flags Deploy passes (`helm template`),
-# then every `env:` entry (`- name: X`) and every key of a ConfigMap it renders (the
-# charts load theirs with envFrom). A name in a comment, or in a block that's off by
-# default, doesn't count, because it never reaches the Pod.
+# then the `env:` entries of the Deployment's app containers (`containers:`, not
+# `initContainers:`: a migration init container having DATABASE_URL says nothing about
+# the app), and the keys of the ConfigMaps it renders (the charts load theirs with
+# envFrom). A name in a comment, or in a block that's off by default, doesn't count.
+# The parser relies on Helm's rendered indentation (spec.template.spec keys at 6
+# spaces) and fails if it finds no app container, rather than guessing.
+#
+# Not demanded from the chart: NEXT_PUBLIC_* (inlined into the browser bundle at
+# build time, so a Dockerfile build arg, not the Pod's env) and ALLOWED below
+# (set by the platform, or by a Secret the chart doesn't render).
 #
 # docker-compose.yml is deliberately not checked: local dev may rely on a variable's
 # fallback (LOG_LEVEL, METRICS_PORT). The deploy target is what must be explicit.
@@ -28,7 +36,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ALLOWED=(NODE_ENV)   # set by Next.js / the Dockerfile for every app
+ALLOWED=(NODE_ENV)   # set by Next.js / the Dockerfile for every app. Add a key of an
+                     # externally created Secret (envFrom secretRef) here, with a comment.
 DEPLOY_FLAGS=(--set ingress.enabled=true --set metrics.serviceMonitor.enabled=true)   # as deploy.yml
 
 fail() { echo "✘ $1"; problems=$((problems + 1)); }
@@ -42,16 +51,18 @@ grep_or_die() {
   printf '%s' "$out"
 }
 
-SRC_OPTS=(-rE --include='*.ts' --include='*.tsx' --exclude='*.test.ts' --exclude='*.test.tsx'
-          --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=generated --exclude-dir=dist)
+SRC_OPTS=(-rE --include='*.ts' --include='*.tsx' --include='*.js' --include='*.mjs' --include='*.cjs'
+          --exclude='*.test.*' --exclude='vitest.*'
+          --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=generated --exclude-dir=dist
+          --exclude-dir=test --exclude-dir=tests --exclude-dir=__tests__)
 
 # Variables read in TS source under the given directories.
 ts_reads() {
   local hits
   hits=$(grep_or_die -ho "${SRC_OPTS[@]}" \
-    'process\.env(\.[A-Z_][A-Z0-9_]*|\["[A-Z_][A-Z0-9_]*"\])[[:space:]]*(\?\?=|=([^=]|$))?' "$@")
+    "process\\.env(\\??\\.[A-Z_][A-Z0-9_]*|\\[[\"'][A-Z_][A-Z0-9_]*[\"']\\])[[:space:]]*(\\?\\?=|=([^=]|\$))?" "$@")
   [[ -n "$hits" ]] || return 0
-  grep -vE '(\?\?=|=([^=]|$))$' <<<"$hits" | sed -E 's/^process\.env(\.|\[")//; s/[^A-Z0-9_].*//' || true
+  grep -vE '(\?\?=|=([^=]|$))$' <<<"$hits" | sed -E "s/^process\.env(\?\.|\.|\[[\"'])//; s/[^A-Z0-9_].*//" || true
 }
 
 # process.env used whole (destructured or aliased): reads we can't see.
@@ -65,7 +76,8 @@ package_dirs() {
   for dep in $(jq -r '(.dependencies // {}) + (.devDependencies // {}) | to_entries[]
                       | select(.value | startswith("workspace:")) | .key' "apps/$app/package.json"); do
     for dir in packages/*/; do
-      [[ "$(jq -r .name "$dir/package.json")" == "$dep" ]] && echo "${dir%/}"
+      name=$(jq -r .name "$dir/package.json")   # a jq error stops the script (set -e)
+      if [[ "$name" == "$dep" ]]; then echo "${dir%/}"; fi
     done
   done
 }
@@ -74,7 +86,10 @@ for chart in charts/*/; do
   app=$(basename "$chart")
   [[ -d "apps/$app" ]] || continue
 
-  mapfile -t dirs < <(echo "apps/$app"; package_dirs "$app")
+  # Assigned first, not `mapfile < <(…)`: a jq failure inside a process substitution
+  # would silently drop the packages from the scan.
+  pkgs=$(package_dirs "$app")
+  mapfile -t dirs <<<"apps/$app${pkgs:+$'\n'$pkgs}"
 
   unsupported=$(ts_unsupported "${dirs[@]}")
   [[ -z "$unsupported" ]] || fail "$app: process.env is destructured or aliased, so its reads can't be checked; use process.env.X:"$'\n'"$unsupported"
@@ -87,18 +102,27 @@ for chart in charts/*/; do
   vars=$(printf '%s\n%s\n' "$reads" "$prisma" | sed '/^$/d' | sort -u)
 
   rendered=$(helm template "$app" "$chart" "${DEPLOY_FLAGS[@]}")
-  # env entries, plus the data keys of every rendered ConfigMap (loaded via envFrom).
-  set_vars=$(awk '
-    /^---/                         { in_cm = 0; in_data = 0 }
-    /^kind: ConfigMap/             { in_cm = 1 }
-    in_cm && /^data:/              { in_data = 1; next }
-    in_data && /^[^ ]/             { in_data = 0 }
-    in_data && /^  [A-Z_][A-Z0-9_]*:/ { k = $1; sub(/:$/, "", k); print k }
-    /^ *- name: [A-Z_][A-Z0-9_]*$/ { print $3 }
-  ' <<<"$rendered" | sort -u)
+  # Env entries of the Deployment's app containers, plus the data keys of every
+  # rendered ConfigMap (loaded via envFrom). A line "containers" marks that an app
+  # container section was found, so a layout the parser doesn't know fails loudly.
+  parsed=$(awk '
+    /^---/                              { kind = ""; section = ""; in_data = 0 }
+    /^kind: /                           { kind = $2 }
+    kind == "ConfigMap" && /^data:/     { in_data = 1; next }
+    in_data && /^[^ ]/                  { in_data = 0 }
+    in_data && /^  [A-Z_][A-Z0-9_]*:/   { k = $1; sub(/:$/, "", k); print k }
+    kind == "Deployment" && /^      [A-Za-z]+:/ { section = $1; sub(/:$/, "", section)
+                                          if (section == "containers") print "<containers>" }
+    kind == "Deployment" && section == "containers" && /^ *- name: [A-Z_][A-Z0-9_]*$/ { print $3 }
+  ' <<<"$rendered")
+  if ! grep -qxF '<containers>' <<<"$parsed"; then
+    fail "$app: found no Deployment containers: section in the rendered $chart (has the layout changed?)"
+    continue
+  fi
+  set_vars=$(grep -vxF '<containers>' <<<"$parsed" | sort -u)
 
   while IFS= read -r var; do
-    [[ -z "$var" || " ${ALLOWED[*]} " == *" $var "* ]] && continue
+    [[ -z "$var" || " ${ALLOWED[*]} " == *" $var "* || "$var" == NEXT_PUBLIC_* ]] && continue
     if grep -qxF -- "$var" <<<"$set_vars"; then
       echo "✔ $app: $var is set by $chart"
     else

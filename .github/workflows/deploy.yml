@@ -227,10 +227,12 @@ jobs:
       - name: Prune build cache and report disk
         run: |
           # The "Total" line says how much each prune reclaimed, per daemon.
-          host=$(scripts/prune-build-cache.sh)     # the cap is defined there
+          # Each part may fail on its own (an older commit without the script, a
+          # daemon error) without skipping the others or the disk report below.
+          host=$(scripts/prune-build-cache.sh) || { host="failed"; echo "::warning::host build-cache prune failed"; }
           if minikube_env=$(minikube docker-env); then
             eval "$minikube_env"
-            mk=$(scripts/prune-build-cache.sh)
+            mk=$(scripts/prune-build-cache.sh) || { mk="failed"; echo "::warning::minikube build-cache prune failed"; }
             eval "$(minikube docker-env -u)"
           else
             mk="skipped: minikube docker-env failed"

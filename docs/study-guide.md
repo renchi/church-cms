@@ -716,6 +716,7 @@ Because the repo is public, the security rules matter:
 | A second review of the cleanup: a failing `helm history` gave an empty list, which read as "keep nothing" and would have deleted the running images; `eval "$(minikube docker-env)"` "succeeded" when minikube was down and pruned the host twice | A destructive script must **fail closed**: no answer means remove nothing. Two bash traps hid the failures: a command inside `mapfile < <(…)` can fail unnoticed, and `eval "$(cmd)"` succeeds when `cmd` fails, because it evals an empty string. Assign first (`x=$(cmd)`), then use it. The script also gained `DRY_RUN=1`, so you can see what it would remove before trusting it |
 | The first real Deploy with the cleanup removed every old image correctly, yet left the disk at 6.8 GB: ~11 GB of build cache, all from that day | "Older than 24 h" is a policy about *age*; the problem was *size*. A busy day (many `/verify` builds, two full deploys) never ages out. The cleanup now caps cache by size (`--max-used-space`), which bounds disk whatever the day looks like. Measure the first real run before calling a fix done |
 | Review of the guardrails: `check-env.sh` grepped chart *templates*, so a name in a comment or in a block that's off by default counted as "set"; it also missed Prisma's `env("DATABASE_URL")` | Check the artefact, not the source: the script now runs `helm template` with Deploy's flags and reads what would reach the Pod. And "every variable the app reads" includes reads you don't write as `process.env` (Prisma, workspace packages) |
+| A third review round: `DATABASE_URL` set only on the migration *init* container still counted as set; CI's shallow clone silently skipped the new "moved line" error | Know *which* object you're checking: the app container's `env`, not any `- name:` in the chart. And a check that only runs where history exists isn't a gate until CI has that history (`fetch-depth: 0`). Each review round found narrower cases; stop when the remaining ones are documented trade-offs, not bugs |
 
 ---
 
@@ -1284,10 +1285,12 @@ and each step has a mechanical core:
 - [`scripts/check-docs.sh`](../scripts/check-docs.sh) fails on a doc link to a missing file,
   a line link past the end of its file, or a label like `` `x.ts:29` `` whose anchor says
   `#L31`. For line links into files this branch changed, it compares the target line on
-  `main` with the branch: if that text moved to another line, that's an **error** naming
-  the new line; if the text itself changed, a warning printing both versions, because
-  only a person can tell whether the doc's sentence is still true. CI runs it in
-  [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`).
+  `main` with the branch: if that text moved to another line (and was unique on both
+  sides), that's an **error** naming the new line, or the shifted range; if the text
+  itself changed, a warning printing both versions, because only a person can tell
+  whether the doc's sentence is still true. CI runs it in
+  [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`), with full git history so
+  the comparison with `main` happens there too.
 - [`scripts/check-env.sh`](../scripts/check-env.sh) fails when an app reads an env var
   (`process.env.X`, Prisma's `env("X")`, or a read in a workspace package it uses) that
   its chart, rendered with Deploy's flags, never sets. CI runs it next to `check-docs.sh`.
