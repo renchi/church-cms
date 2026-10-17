@@ -29,6 +29,13 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+// A blank phone ("" or spaces, as an empty form field sends it) means "no phone".
+// The rule lives here, so every client of the API gets it, not just the web form.
+function normalizePhone(phone: string | null | undefined): string | null {
+  const trimmed = phone?.trim();
+  return trimmed ? trimmed : null;
+}
+
 export class Member {
   private constructor(private snap: MemberSnapshot) {}
 
@@ -75,7 +82,7 @@ export class Member {
       id: randomUUID(),
       name: params.name.trim(),
       email: params.email.toLowerCase().trim(),
-      phone: params.phone?.trim() ?? null,
+      phone: normalizePhone(params.phone),
       status: "active",
       attendanceCount: 0,
       lastAttendedAt: null,
@@ -97,7 +104,7 @@ export class Member {
       this.snap.name = params.name.trim();
     }
     if (params.phone !== undefined) {
-      this.snap.phone = params.phone?.trim() ?? null;
+      this.snap.phone = normalizePhone(params.phone);
     }
     this.snap.updatedAt = new Date();
     return { type: "MemberUpdated", memberId: this.id, occurredAt: this.snap.updatedAt };

@@ -43,7 +43,11 @@ has now been exercised end to end. That is the scope of this guide.
 | 8   | Build Events service                          | ✅ done | repeat the DDD pattern              |
 | 9   | Wire NATS between Members ↔ Events            | ✅ done | async events / eventual consistency |
 
-After stage 9 the workflow itself was tightened (§12.2–12.3): mechanical doc checks, a
+After stage 9: **CMS-26** finished the member registration workflow in the browser
+(§5.1–5.4: Server Actions, Post/Redirect/Get, and a broken-in-the-cluster list page found on
+the way). Next are CMS-27 (publish `MemberRegistered`) and CMS-20 (Communications).
+
+The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
 permission list.
 
@@ -359,23 +363,110 @@ quietly becomes permanent.
 
 ---
 
-## 5. The frontend (roadmap stage 4)
+## 5. The frontend (roadmap stage 4, extended in CMS-26)
 
-[`apps/web`](../apps/web) is a **Next.js 15** app using the **App Router** and **React 19**.
+[`apps/web`](../apps/web) is a **Next.js 15** app using the **App Router** and **React 19**,
+styled with **Tailwind CSS 4** (utility classes, mobile-first: the CMS targets phone
+browsers). It joins the Compose stack (stage 4) and is deployed by its own Helm chart
+(stage 5). CMS-26 added the first page that **changes** data: registering a member.
 
-- [app/members/page.tsx](../apps/web/app/members/page.tsx) is a **Server Component** — it
-  runs on the server, `fetch`es the member list from `members-service` at request time
-  (`cache: "no-store"` for always-fresh data), validates the response shape, and renders a
-  table. Because it runs server-side, it can talk to `http://members-service:3001`
-  (the internal Compose DNS name); the browser never makes that call.
-- **Tailwind CSS 4** for styling — utility classes, mobile-first (the CMS targets
-  mobile-browser access; a PWA manifest is planned per CLAUDE.md).
-- It joins the same Compose stack (stage 4); in dev the override file runs `next dev` with
-  hot-reload via a bind-mount.
+### 5.1 The concept: how a form reaches a backend
 
-Concepts worth knowing: **Server vs. Client Components** (this page is a Server Component,
-so no JS ships for it), and **`NEXT_PUBLIC_` env vars** (only those are inlined into
-browser bundles — the Dockerfile comment explains why our server-only page doesn't need one).
+Coming from the backend side, the browser is just another HTTP client, one that renders
+the response as a page and builds requests from HTML.
+
+- **A form submit is an HTTP POST.** `<form method="post">` makes the browser send the
+  fields in the request body, keyed by each input's `name` (no `name`, not sent).
+- **Code runs in one of two places.** A **Server Component** (the default in the App
+  Router) runs on the web Pod and ships no JavaScript. A **Client Component**
+  (`"use client"`) is also downloaded to the browser, so it can react to clicks and show
+  changing state. Only server code can reach cluster-internal addresses like
+  `http://members-service-members-service:3001`. The browser can't resolve cluster DNS.
+- **A Server Action** (`"use server"`) is a function that runs on the server and is
+  called by a form: `<form action={fn}>`. The browser still sends a POST, to Next.js;
+  Next.js runs the function. It's a public endpoint, so it trusts no input.
+- **Post/Redirect/Get.** After a POST succeeds, answer with a redirect (`303`). The
+  browser loads the target with a GET, so Refresh repeats a harmless GET instead of
+  re-sending the POST. On *failure*, don't redirect: send the form back with the error
+  and the typed values, which a redirect would lose.
+- **`useActionState`** (React 19) connects a form to its action: it gives you the
+  action's last return value (the error and the typed values) and an `isPending` flag
+  while the POST is in flight.
+- **`NEXT_PUBLIC_` env vars** are copied into the browser's JavaScript at build time.
+  Anything without the prefix stays on the server, which is what you want for an
+  internal URL.
+
+### 5.2 How we did it here
+
+```
+Browser ──POST /members/new (form fields)──▶ Traefik ──▶ web Pod: registerMemberAction
+                                                          │ JSON
+                                                          ▼
+                                             members-service POST /members
+                                             201 {id} · 409 · 400
+Browser ◀── 303 /members?registered=<id>  or  the form + error banner
+```
+
+- [`lib/membersApi.ts:73`](../apps/web/lib/membersApi.ts#L73): `registerMember()`, the
+  only code that sends members-service a registration. It turns the form data into JSON
+  and maps the answer to a result: `201 { id }` → ok, a domain `400`/`409` → the
+  service's own message, Fastify's schema `400` → a plain "Some fields are missing or
+  invalid" ([line 108](../apps/web/lib/membersApi.ts#L108)), anything else, including a
+  body that isn't JSON → "Couldn't reach the members service"
+  ([line 115](../apps/web/lib/membersApi.ts#L115)). It never throws: a throw would replace
+  the form with Next's error page.
+- [`app/members/new/actions.ts:1`](../apps/web/app/members/new/actions.ts#L1): the
+  Server Action. It sends the values exactly as typed: trimming and "a blank phone means
+  no phone" are `Member` rules ([`Member.ts:34`](../apps/members-service/src/domain/Member.ts#L34)).
+  On failure it returns `{ error, values }`
+  ([line 36](../apps/web/app/members/new/actions.ts#L36)); on success it calls
+  `redirect()` with the new id ([line 45](../apps/web/app/members/new/actions.ts#L45)),
+  outside any try/catch because `redirect()` works by throwing.
+- [`app/members/new/RegisterForm.tsx:16`](../apps/web/app/members/new/RegisterForm.tsx#L16):
+  the one Client Component: `useActionState`, the error banner, `defaultValue` from the
+  returned values, and a button disabled while pending
+  ([line 75](../apps/web/app/members/new/RegisterForm.tsx#L75)).
+- [`app/members/page.tsx:21`](../apps/web/app/members/page.tsx#L21): `?registered=<id>`
+  is looked up with `GET /members/:id`, and the banner shows the name members-service
+  has. An unknown id, a repeated parameter (an array) or a failed lookup shows no banner.
+  If the list can't load, the visitor sees a generic message; the details, including the
+  internal URL, go to the server log ([line 40](../apps/web/app/members/page.tsx#L40)).
+- [`charts/web/values.yaml:22`](../charts/web/values.yaml#L22): `config.membersApiUrl`
+  becomes the Pod's `MEMBERS_API_URL`. Compose sets `http://members-service:3001` instead.
+- Tests: [`lib/membersApi.test.ts`](../apps/web/lib/membersApi.test.ts) stubs `fetch`
+  for each status; [`actions.test.ts`](../apps/web/app/members/new/actions.test.ts)
+  mocks `redirect()`. Both are plain Vitest in a Node environment.
+
+### 5.3 Why this way
+
+| Choice | Instead of | Why |
+| --- | --- | --- |
+| Server Action | A route handler + client `fetch`, or the browser calling `/api/members` through the Ingress | The service URL stays inside the cluster, there's less plumbing, and the form even works with JavaScript off |
+| Validation only in the `Member` aggregate; the form has HTML hints (`required`, `type="email"`) | A client-side schema (zod) | Copying the rules into the UI is the duplication DDD warns about (§3.2). The hints only save a round trip |
+| One error banner with the service's message | Errors under each field | The service returns messages, not field names or codes. Mapping on message text would be brittle. Structured error codes are the upgrade path, deferred until a form needs them |
+| Redirect with `?registered=<id>`, and look the name up | Putting the name in the URL, or a cookie "flash" message | Stateless. A name in the URL would let anyone craft a link whose green banner says anything ("content spoofing"); an id only ever shows a real member's name. Costs one extra `GET` |
+| Unit tests on the action and the client | Component tests (jsdom) or Playwright | The logic is in those two functions; the form is markup. The real browser check is the `/verify` click-through |
+
+Deliberately not done: auth on the action (Identity is deferred) and edit/archive pages.
+CMS-26 was carved out of the deferred CMS-23 for just this flow.
+
+### 5.4 What setting it up taught (real problems we hit)
+
+| Problem | Lesson |
+| --- | --- |
+| On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:22`](../charts/web/values.yaml#L22)) |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:374`](../scripts/cluster-up.sh#L374)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
+| `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
+| A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
+| Fastify's own `400`s say `{ error: "Bad Request", message: "body/email must NOT have fewer than 1 characters" }`; domain errors say `{ error: "Invalid email format" }` | Two error shapes from one service. The first version showed Fastify's `message`, which is written for developers. Code review: schema errors (`code: "FST_ERR_VALIDATION"`) now get a plain message; domain messages are shown as-is |
+| Code review: the action trimmed the name and dropped a blank phone before sending | Both quietly duplicated `Member` rules, and one hid a rule: a name of `"   "` became `""`, failed Fastify's `minLength` and never reached "Name is required". And "blank phone means no phone" only held for the web form: any other client could store `""`. Fix: the action sends values as typed, and `Member` maps a blank phone to `null` (test first, [`Member.ts:34`](../apps/members-service/src/domain/Member.ts#L34)). A rule belongs where every caller gets it |
+| Code review: the error box showed `http://members-service-members-service:3001` to every visitor | The internal address we kept out of the browser bundle still reached the browser as page text. Now the visitor gets "Could not load members. Try again in a moment.", and the details go to `kubectl logs deploy/web-web` |
+| Code review: a parse error on an odd `201` body would throw out of the Server Action | Anything thrown there replaces the form with Next's error page. The client reads every body with `.catch()` and checks the `201` has an `id` |
+| The smoke test failed now and then with `/` → `000` or `502` right after a web deploy | Not this feature: web runs one replica, and after `helm --wait` the old Pod stops while Traefik still routes to it. Visitors would hit it too. The fix (a `preStop` sleep or two replicas) is a separate follow-up |
+| The runbook first said DevTools would show "a POST answered 303 with `Location`, then a GET" | That's only true with JavaScript off. With it on, Next.js answers the action's `fetch` with `303` plus `x-action-redirect`, and streams the new page in the same response (read in `next/dist/server/app-render/action-handler.js`). Check a framework's real behaviour before writing "expected output" |
+| In the break-it exercise, `helm upgrade --reuse-values` refused to restore `MEMBERS_API_URL` after a `kubectl set env` | Helm 4 applies manifests with **server-side apply**: each field has an owner, and `kubectl set env` became the owner of that value. Helm reports the conflict instead of overwriting it; `--force-conflicts` takes ownership back ([`k8s-local-dev.md`](k8s-local-dev.md#exercise-register-a-member-through-the-ui)) |
+| Submitting the form with `curl` worked, with no JavaScript | Next.js renders hidden `$ACTION_…` fields into the form, so a plain multipart POST reaches the Server Action. That's what "progressive enhancement" means, and it makes the action testable from a shell |
 
 ---
 
@@ -1044,7 +1135,7 @@ is still the one loaded, otherwise `ConflictError`. HTTP answers `409`; the cons
 rolls back and `nak`s, and the redelivery works on fresh data.
 
 Members' side is the same shape, with `Member.recordAttendance()`
-([`Member.ts:117`](../apps/members-service/src/domain/Member.ts#L117)): it counts the
+([`Member.ts:124`](../apps/members-service/src/domain/Member.ts#L124)): it counts the
 attendance and only moves `lastAttendedAt` *forward*, because messages can arrive out of order.
 
 **Startup and shutdown.** Messaging starts *after* the HTTP server, in the background
@@ -1264,6 +1355,19 @@ in parentheses (and the file it links) is where to look.
 - [ ] What do the three `depends_on` conditions each wait for? (§2.4)
 - [ ] Why run migrations as a separate job instead of in the app? (§2.4)
 
+**Frontend: forms and Server Actions**
+
+- [ ] What does the browser actually send when the registration form is submitted, and what decides the keys? (§5.1)
+- [ ] Why can't the form call `http://members-service-members-service:3001` from the browser? (§5.1)
+- [ ] Why redirect after a successful registration, but not after a duplicate email? (§5.1)
+- [ ] Why does `redirect()` have to stay outside any try/catch in a Server Action? (§5.2)
+- [ ] Why does the form show the service's message instead of validating the email itself? (§5.3)
+- [ ] How did the members list stay broken on minikube without the smoke test noticing, and what changed? (§5.4)
+- [ ] All unit tests passed, yet the redirect said `registered=undefined`. What was wrong with the tests? (§5.4)
+- [ ] After `kubectl set env`, why does a plain `helm upgrade` refuse to put the chart's value back? (§5.4)
+- [ ] Why does the redirect carry the member's id, not their name? (§5.3)
+- [ ] Why does the Server Action send the name untrimmed? (§5.4)
+
 **DDD**
 
 - [ ] Why is `Member`'s constructor private? (§3.2)
@@ -1354,7 +1458,9 @@ in parentheses (and the file it links) is where to look.
 
 ## 14. Where to go next
 
-All nine roadmap stages are done. From here, ADR-0007 suggests adding the deferred
+All nine roadmap stages are done, and the member registration workflow is now usable from
+the browser (§5). The committed queue is **CMS-27** (publish `MemberRegistered` over NATS),
+then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
 contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
 Each one is now mostly a matter of applying patterns already learned. The most
 interesting next contexts are the ones that add a new kind of message flow:

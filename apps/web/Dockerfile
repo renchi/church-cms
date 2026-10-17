@@ -70,16 +70,14 @@ COPY apps/web ./apps/web
 # "next build" compiles the React/TypeScript source into an optimised
 # production bundle.  Output lands in apps/web/.next/.
 #
-# Note on NEXT_PUBLIC_ variables:
+# Note on env vars and build time:
 #   Variables prefixed NEXT_PUBLIC_ are inlined into client-side JS bundles
-#   at build time.  If NEXT_PUBLIC_MEMBERS_API_URL is not set here, client
-#   bundles will see undefined for it — but that is fine for our app today,
-#   because the members page is a Server Component (it runs on the server,
-#   not in the browser) and reads the env var at request time, not build time.
-#   If you ever add a client component that calls the API directly, you will
-#   need to pass this value as a build ARG:
-#     ARG NEXT_PUBLIC_MEMBERS_API_URL
-#     ENV NEXT_PUBLIC_MEMBERS_API_URL=$NEXT_PUBLIC_MEMBERS_API_URL
+#   at build time, so they would need a build ARG here. We deliberately have
+#   none: MEMBERS_API_URL is a cluster-internal address that only server code
+#   reads (the members pages and the registration Server Action, via
+#   lib/membersApi.ts), and it is read at request time from the Pod's env
+#   (charts/web values.yaml → config.membersApiUrl). No build ARG, and one image
+#   works in every environment.
 RUN pnpm --filter web build
 
 # =============================================================================
