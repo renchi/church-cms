@@ -247,6 +247,10 @@ for i in "${!IMAGES[@]}"; do
   scripts/prune-deploy-images.sh "${releases[$i]}" "${IMAGES[$i]}" 1 >/dev/null \
     || warn "couldn't clean up old ${IMAGES[$i]} images (disk may fill; see docs/ci-cd.md)"
 done
+# Build cache inside minikube grows with every build here. Cap it by size (the
+# same 3 GB as Deploy's cleanup job): the newest layers stay, so rebuilds stay fast.
+docker builder prune -af --max-used-space 3GB >/dev/null \
+  || warn "couldn't cap minikube's build cache (docker builder prune failed)"
 
 # --- 3. Tunnel and /etc/hosts ------------------------------------------------
 # Both need root. We only use sudo when it's actually needed, say why first, and

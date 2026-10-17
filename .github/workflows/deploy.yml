@@ -189,7 +189,10 @@ jobs:
           if minikube_env=$(minikube docker-env); then
             eval "$minikube_env"
             prune "$IMAGE"                     # minikube: where the Pods pull it
-            prune "$local_repo"                # minikube: local-* builds left by /verify
+            # local-* builds left by /verify: keep 1. Once this CI deploy is the
+            # newest revision, no local build is kept: a rollback of the CI
+            # release goes to a ghcr image, and a local build is just rebuilt.
+            prune "$local_repo" 1
             eval "$(minikube docker-env -u)"
           else
             echo "::warning::minikube docker-env failed: minikube's images were not cleaned"
@@ -205,10 +208,12 @@ jobs:
             echo "- Duration: $(( $(date +%s) - STARTED_AT ))s"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Once per deploy, after every service: clear build cache older than a day, on
-  # the host (Deploy's builds) and inside minikube (scripts/cluster-up.sh builds
-  # there). Recent layers stay, so the next build is still fast. Then record the
-  # free disk in the run summary, where /ship reads it.
+  # Once per deploy, after every service: cap the build cache on the host
+  # (Deploy's builds) and inside minikube (scripts/cluster-up.sh builds there).
+  # A size cap, not an age limit: one busy day of /verify runs and deploys left
+  # ~11 GB of same-day cache, which "older than 24h" never touched (CMS-26).
+  # --max-used-space keeps the most recently used layers up to the cap, so the
+  # next build still hits the cache. Then record the free disk in the run summary.
   cleanup:
     needs: [changes, deploy]
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.services != '[]' }}
@@ -218,10 +223,11 @@ jobs:
       - name: Prune build cache and report disk
         run: |
           # The "Total" line says how much each prune reclaimed, per daemon.
-          host=$(docker builder prune -af --filter until=24h | tail -1)
+          cap=3GB   # per daemon: roughly one full set of the three services' layers
+          host=$(docker builder prune -af --max-used-space "$cap" | tail -1)
           if minikube_env=$(minikube docker-env); then
             eval "$minikube_env"
-            mk=$(docker builder prune -af --filter until=24h | tail -1)
+            mk=$(docker builder prune -af --max-used-space "$cap" | tail -1)
             eval "$(minikube docker-env -u)"
           else
             mk="skipped: minikube docker-env failed"

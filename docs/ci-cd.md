@@ -124,9 +124,9 @@ Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA
 
 Unique tags also mean unique images, about 1.3 GB per service per deploy, stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. After a successful upgrade, each deploy job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places.
 
-Which tags it keeps comes from **`helm history`**, not from image dates: the images used by the release's newest two successful revisions (what's running, and what `helm rollback` would go back to), plus `main`. Failed revisions don't count. Image build times can't answer "what was deployed when": a rebuild that hits the cache keeps the old creation time. It only ever removes *deploy tags* (a commit SHA, or `local-…` from `cluster-up.sh`), so a hand-made `:debug` tag survives. And it **fails closed**: if Helm or Docker doesn't answer, it removes nothing and exits non-zero. Inside minikube it also clears the `local-*` builds `/verify` left behind. A removed ghcr image is never lost: it's still in the registry, and a rollback pulls it again.
+Which tags it keeps comes from **`helm history`**, not from image dates: the images used by the release's newest two successful revisions (what's running, and what `helm rollback` would go back to), plus `main`. Failed revisions don't count. Image build times can't answer "what was deployed when": a rebuild that hits the cache keeps the old creation time. It only ever removes *deploy tags* (a commit SHA, or `local-…` from `cluster-up.sh`), so a hand-made `:debug` tag survives. And it **fails closed**: if Helm or Docker doesn't answer, it removes nothing and exits non-zero. Inside minikube it also clears the `local-*` builds `/verify` left behind (keep 1, so after a CI deploy none stay: a rollback of the CI release goes to a ghcr image). A removed ghcr image is never lost: it's still in the registry, and a rollback pulls it again.
 
-The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then clears build cache older than 24 h, once for the whole deploy, and writes what it reclaimed and the free disk to the run summary:
+The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then caps the build cache at 3 GB per daemon (`docker builder prune --max-used-space`, which keeps the most recently used layers), once for the whole deploy, and writes what it reclaimed and the free disk to the run summary. The cap counts only cache that can be freed: `docker system df`'s "Build Cache" size also includes layers that images use, which no prune can free, so it can read above 3 GB. Compare its RECLAIMABLE column with the cap. A *size* cap, because an age limit doesn't bound anything: on one busy day of `/verify` runs and deploys, ~11 GB of same-day cache took the disk to 6.8 GB under the earlier "older than 24 h" rule.
 
 ```
 # deploy (web) › Remove superseded images
@@ -134,10 +134,10 @@ The step has `continue-on-error`, so a cleanup problem shows as a warning instea
 # ghcr.io/renchi/church-cms/web: kept <this sha> <previous sha> (newest 2 revision(s) of 'web'), removed 1
 # (then the same inside minikube, for ghcr.io/… and for church-cms-web's local-* builds)
 # cleanup › Prune build cache and report disk
-# Build cache: host Total: 1.2GB · minikube Total: 0B · free disk 16G      ← keep ≥ 10G
+# Build cache: host Total: 1.2GB · minikube Total: 2.4GB · free disk 16G      ← keep ≥ 10G
 ```
 
-`scripts/cluster-up.sh` uses the same script for its `local-*` builds, keeping only the one it just deployed. To see what a run would remove without removing anything, prefix it with `DRY_RUN=1`.
+`scripts/cluster-up.sh` uses the same script for its `local-*` builds, keeping only the one it just deployed, and caps minikube's build cache the same way. To see what a run would remove without removing anything, prefix it with `DRY_RUN=1`.
 
 ### Shipping a ticket with `/ship`
 
