@@ -238,3 +238,32 @@ both files still exist and are long enough. The script can't tell whether a link
 That's the split this whole workflow uses: mechanical checks for what a machine can
 decide, review for the rest. Undo with `git checkout -- apps/events-service/src/domain/Attendance.ts`.
 
+## Exercise: the image cleanup
+
+What Deploy's **Remove superseded images** step does, on images you can afford to lose.
+Run it in **bash** (in zsh, `$I:fakeold1` is read as a `:f` modifier). The fake tags are
+extra names for the running image, so nothing real is deleted.
+
+```bash
+bash
+I=ghcr.io/renchi/church-cms/web
+T=$(kubectl get deploy web-web -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*://')
+docker tag "$I:$T" "$I:fakeold1"; sleep 1; docker tag "$I:$T" "$I:fakeold2"
+scripts/prune-deploy-images.sh "$I" "$T"
+# ghcr.io/renchi/church-cms/web: keeping <running sha> and fakeold2 (rollback target)
+#   removed ghcr.io/renchi/church-cms/web:fakeold1
+docker images "$I" --format '{{.Tag}}' | sort
+# <running sha>
+# fakeold2           ← kept: the newest older tag is what `helm rollback` would need
+# main               ← kept: the moving tag
+scripts/prune-deploy-images.sh "$I" "$T"
+# ghcr.io/renchi/church-cms/web: nothing to remove (keeping <running sha> and fakeold2)
+docker image rm "$I:fakeold2"; exit
+```
+
+Expected: the second run removes nothing. The script only ever looks at one repository's
+tags, which is why it's safe next to minikube's untagged `kicbase` image, where
+`docker image prune -a` is not. Then ask yourself: if a deploy *failed*, why is it right
+that this step doesn't run? (Answer: Helm rolled back to the previous image, and that's
+exactly the one a cleanup would be tempted to remove.)
+

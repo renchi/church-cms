@@ -1430,6 +1430,8 @@ in parentheses (and the file it links) is where to look.
 - [ ] What makes a red test actually block the merge? (§8.1)
 - [ ] Why does Deploy wait for CI on `main` instead of running on the push? (§8.2)
 - [ ] Why tag images with the commit SHA instead of `latest`? (§8.2)
+- [ ] SHA tags made every image unique. What did that cost, and which two images does Deploy keep per service? (§8.2, §8.4)
+- [ ] Why is `docker image prune -a` dangerous on this machine? (§8.4)
 - [ ] Why can't GitHub's cloud runners deploy to minikube, and how is the self-hosted runner kept safe? (§8.3)
 
 **Observability**
