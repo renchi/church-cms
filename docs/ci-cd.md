@@ -122,14 +122,20 @@ Only services whose files changed are rebuilt:
 
 Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA tag makes it obvious which commit is running and makes every deploy a real change that Kubernetes rolls out.
 
-Unique tags also mean unique images, about 1.3 GB per service per deploy, stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. The job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places after a successful upgrade. It keeps the current tag, the previous one (the rollback target) and `main`, and clears build cache older than 24 h. Its last line is `df -h /`, so every deploy log shows the free disk:
+Unique tags also mean unique images, about 1.3 GB per service per deploy, stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. After a successful upgrade, each deploy job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places.
+
+Which tags it keeps comes from **`helm history`**, not from image dates: the newest two tags the release actually deployed (what's running, and what `helm rollback` would go back to), plus `main`. Failed revisions don't count. Image build times can't answer "what was deployed when": a rebuild that hits the cache keeps the old creation time. The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then clears build cache older than 24 h, once for the whole deploy, and writes the free disk to the run summary:
 
 ```
-# ghcr.io/renchi/church-cms/web: keeping <this sha> and <previous sha> (rollback target)
+# deploy (web) › Remove superseded images
 #   removed ghcr.io/renchi/church-cms/web:<an older sha>      ← one line per removed tag, if any
+# ghcr.io/renchi/church-cms/web: kept <this sha> <previous sha> (from helm history of 'web'), removed 1
 # (the same again for minikube's Docker)
-# /dev/sda2        62G   44G   16G  73% /                       ← should stay ≥ 10G
+# cleanup › Prune build cache and report disk
+# Free disk after deploy: 16G                                   ← should stay ≥ 10G
 ```
+
+`scripts/cluster-up.sh` uses the same script for its `local-*` builds, keeping only the one it just deployed.
 
 ### Shipping a ticket with `/ship`
 
@@ -186,7 +192,7 @@ What CMS-18 needed for events-service, in order:
 | Symptom | Likely cause / fix |
 |---|---|
 | Deploy job stuck in "Queued" | Runner offline: `sudo ~/actions-runner/svc.sh status`, then `start` |
-| A Deploy job fails before any step runs, or `no space left on device` | Disk full. `df -h /`, then `docker system df` on the host and after `eval "$(minikube docker-env)"`. Old `<sha>` images: `scripts/prune-deploy-images.sh <image> <running-tag>` (the `/ship` skill, step 2, has the loop). Build cache: `docker builder prune -af`. Never `docker image prune -a` on the host: it deletes the untagged `kicbase` image minikube runs on |
+| A Deploy job fails before any step runs, or `no space left on device` | Disk full. `df -h /`, then `docker system df` on the host and after `eval "$(minikube docker-env)"`. Old deploy images: `scripts/prune-deploy-images.sh <release> <image>`, once on the host and once after `eval "$(minikube docker-env)"` (the `/ship` skill, step 2, has the loop). Build cache: `docker builder prune -af`. Never `docker image prune -a` on the host: it deletes the untagged `kicbase` image minikube runs on |
 | `docker: permission denied` in runner | Runner user not in `docker` group: `sudo usermod -aG docker $USER`, then restart the service |
 | `kubernetes cluster unreachable` | minikube stopped: `minikube start` |
 | `helm: command not found` | Runner PATH is stale; see the note in setup step 1 |
@@ -240,30 +246,33 @@ decide, review for the rest. Undo with `git checkout -- apps/events-service/src/
 
 ## Exercise: the image cleanup
 
-What Deploy's **Remove superseded images** step does, on images you can afford to lose.
-Run it in **bash** (in zsh, `$I:fakeold1` is read as a `:f` modifier). The fake tags are
-extra names for the running image, so nothing real is deleted.
+What Deploy's **Remove superseded images** step decides, on tags you can afford to lose.
+Run it in **bash** (in zsh, `$I:old` is read as a `:o` modifier). The fake tags are
+extra names for an image that stays, so nothing real is deleted.
 
 ```bash
 bash
 I=ghcr.io/renchi/church-cms/web
-T=$(kubectl get deploy web-web -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*://')
-docker tag "$I:$T" "$I:fakeold1"; sleep 1; docker tag "$I:$T" "$I:fakeold2"
-scripts/prune-deploy-images.sh "$I" "$T"
-# ghcr.io/renchi/church-cms/web: keeping <running sha> and fakeold2 (rollback target)
-#   removed ghcr.io/renchi/church-cms/web:fakeold1
-docker images "$I" --format '{{.Tag}}' | sort
-# <running sha>
-# fakeold2           ← kept: the newest older tag is what `helm rollback` would need
-# main               ← kept: the moving tag
-scripts/prune-deploy-images.sh "$I" "$T"
-# ghcr.io/renchi/church-cms/web: nothing to remove (keeping <running sha> and fakeold2)
-docker image rm "$I:fakeold2"; exit
+helm history web --max 5          # the STATUS column: deployed, superseded, failed
+helm get values web -o json | jq -c '.image'
+# {"pullPolicy":"IfNotPresent","repository":"ghcr.io/renchi/church-cms/web","tag":"<sha>"}
+#   ← after /verify this says church-cms-web / local-…; the next step still works
+
+T=$(docker images "$I" --format '{{.Tag}}' | grep -v main | head -1)   # any real tag to copy
+docker tag "$I:$T" "$I:fake-newest"; docker tag "$I:$T" "$I:fake-oldest"
+scripts/prune-deploy-images.sh web "$I"
+#   removed ghcr.io/renchi/church-cms/web:fake-newest
+#   removed ghcr.io/renchi/church-cms/web:fake-oldest
+# ghcr.io/renchi/church-cms/web: kept <sha> … (from helm history of 'web'), removed 2
+exit
 ```
 
-Expected: the second run removes nothing. The script only ever looks at one repository's
-tags, which is why it's safe next to minikube's untagged `kicbase` image, where
-`docker image prune -a` is not. Then ask yourself: if a deploy *failed*, why is it right
-that this step doesn't run? (Answer: Helm rolled back to the previous image, and that's
-exactly the one a cleanup would be tempted to remove.)
+Expected: both fake tags go, whatever their names or the order you created them in,
+because neither was ever deployed by Helm. The kept tags are the ones `helm history`
+lists as deployed or superseded for that repository. A cleanup that guessed "previous"
+from image dates would have had to pick between two images with the *same* creation time
+(they're one image), and the answer would come down to how the tag names sort.
 
+Then think it through: Deploy F fails and Helm rolls back to E. Deploy G succeeds. Which
+two tags does the next cleanup keep? (G and E. F's revision is `failed`, so it doesn't
+count, and its image is removed.)

@@ -22,14 +22,13 @@ Runs the PR → CI → Merge → Deploy → Done rows of the CLAUDE.md Workflow 
 df -h /     # Avail should be ≥ 10G. A Deploy that rebuilds all three images needs ~8 GB
 ```
 
-If less than ~10 GB is free, tell the user before pushing and offer the cleanup. Two things fill the disk: build cache, and superseded `<image>:<sha>` deploy images (about 1.3 GB per service per deploy, on the host and inside minikube). `scripts/prune-deploy-images.sh` removes the second kind, keeping the current and previous tag. Deploy runs it after every upgrade, so leftovers come from older deploys or local builds.
+If less than ~10 GB is free, tell the user before pushing and offer the cleanup. Two things fill the disk: build cache, and old deploy images (about 1.3 GB per service per deploy, on the host and inside minikube). `scripts/prune-deploy-images.sh <release> <image>` removes the second kind, keeping the tags Helm deployed most recently (read from `helm history`, so it's right even after `/verify` deployed `local-*` builds). Deploy runs it after every upgrade, so leftovers come from older deploys or interrupted runs.
 
 ```bash
 docker builder prune -af
-for s in members-service events-service web; do
-  scripts/prune-deploy-images.sh "ghcr.io/renchi/church-cms/$s" "$(kubectl get deploy "$s-$s" -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*://')"
-done
-eval "$(minikube docker-env)" && docker builder prune -af   # then the same loop, inside minikube
+for s in members-service events-service web; do scripts/prune-deploy-images.sh "$s" "ghcr.io/renchi/church-cms/$s"; done
+eval "$(minikube docker-env)" && docker builder prune -af
+for s in members-service events-service web; do scripts/prune-deploy-images.sh "$s" "ghcr.io/renchi/church-cms/$s"; done
 eval "$(minikube docker-env -u)"
 ```
 
@@ -74,7 +73,7 @@ gh run list --workflow=Deploy --commit "$sha" --json databaseId,status   # repea
 gh run watch <run-id> --exit-status
 ```
 
-If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed, how long it took, and `df -h /` afterwards: the "Remove superseded images" step prints it. Below ~10 GB, say so before the next ticket starts.
+If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed, how long it took, and the free disk afterwards: the `cleanup` job writes it to the run summary (`gh run view <run-id>`), or run `df -h /`. Below ~10 GB, say so before the next ticket starts.
 
 ## 7. Close the loop
 

@@ -237,12 +237,15 @@ helm_quiet upgrade --install web ./charts/web \
   --set ingress.enabled=true \
   --wait --timeout 4m
 
-# Old local-* tags would pile up and fill the disk. Only now, after --wait has
+# Old local-* builds would pile up and fill the disk. Only now, after --wait has
 # replaced every Pod, is no Pod using them; removing them earlier could pull an
 # image out from under a Pod that then restarts (pullPolicy=Never can't fetch it).
-for img in "${IMAGES[@]}"; do
-  docker images "$img" --format '{{.Repository}}:{{.Tag}}' | grep ':local-' \
-    | grep -vxF "$img:$IMAGE_TAG" | xargs -r docker rmi >/dev/null 2>&1 || true
+# Same script as Deploy's cleanup, keeping 1: only the build Helm just deployed.
+# (Locally a rollback is a rebuild, so there's no rollback image worth 1 GB.)
+releases=(members-service events-service web)   # same order as IMAGES
+for i in "${!IMAGES[@]}"; do
+  scripts/prune-deploy-images.sh "${releases[$i]}" "${IMAGES[$i]}" 1 >/dev/null \
+    || warn "couldn't clean up old ${IMAGES[$i]} images (disk may fill; see docs/ci-cd.md)"
 done
 
 # --- 3. Tunnel and /etc/hosts ------------------------------------------------

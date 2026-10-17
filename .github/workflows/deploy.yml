@@ -170,20 +170,20 @@ jobs:
 
       # Every deploy leaves a ~1.3 GB image per service on the host (built here)
       # and inside minikube (pulled from ghcr.io). Nothing removed them, and one
-      # deploy took the runner's disk to 99% (CMS-26). Keep this tag and the
-      # previous one (what a rollback would need); remove the rest. Runs only
-      # after a successful upgrade, so a failed deploy keeps everything.
+      # deploy took the runner's disk to 99% (CMS-26). Keep the tags Helm deployed
+      # most recently (now + the rollback target, read from `helm history`) and
+      # remove the rest. Runs only after a successful upgrade.
+      #
+      # continue-on-error: the new Pods are already healthy at this point, so a
+      # cleanup problem must not turn the deploy red. It shows as a warning instead.
       - name: Remove superseded images
+        continue-on-error: true
         run: |
-          # Build cache older than a day goes too; recent layers stay, so a
-          # follow-up deploy still rebuilds fast.
-          scripts/prune-deploy-images.sh "$IMAGE" "$TAG"
-          docker builder prune -af --filter until=24h >/dev/null
+          scripts/prune-deploy-images.sh "${{ matrix.service }}" "$IMAGE" \
+            || echo "::warning::image cleanup failed on the host for ${{ matrix.service }}"
           eval "$(minikube docker-env)"
-          scripts/prune-deploy-images.sh "$IMAGE" "$TAG"
-          docker builder prune -af --filter until=24h >/dev/null
-          eval "$(minikube docker-env -u)"
-          df -h / | tail -1
+          scripts/prune-deploy-images.sh "${{ matrix.service }}" "$IMAGE" \
+            || echo "::warning::image cleanup failed in minikube for ${{ matrix.service }}"
 
       - name: Summary
         if: always()
@@ -194,3 +194,23 @@ jobs:
             echo "- Result: ${{ job.status }}"
             echo "- Duration: $(( $(date +%s) - STARTED_AT ))s"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Once per deploy, after every service: clear build cache older than a day, on
+  # the host (Deploy's builds) and inside minikube (scripts/cluster-up.sh builds
+  # there). Recent layers stay, so the next build is still fast. Then record the
+  # free disk in the run summary, where /ship reads it.
+  cleanup:
+    needs: [changes, deploy]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.services != '[]' }}
+    runs-on: [self-hosted, linux, ARM64, minikube]
+    continue-on-error: true
+    steps:
+      - name: Prune build cache and report disk
+        run: |
+          docker builder prune -af --filter until=24h >/dev/null
+          eval "$(minikube docker-env)"
+          docker builder prune -af --filter until=24h >/dev/null
+          eval "$(minikube docker-env -u)"
+          free=$(df -h / | awk 'NR == 2 { print $4 }')
+          echo "Free disk after deploy: $free"
+          echo "### Disk: $free free on the runner (keep ≥ 10G)" >> "$GITHUB_STEP_SUMMARY"
