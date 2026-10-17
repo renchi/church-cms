@@ -179,14 +179,20 @@ IMAGES=(members-service events-service church-cms-web)
 step "k8s-local-dev §4" "Docker images inside minikube"
 eval "$(minikube docker-env)"
 if $SKIP_BUILD; then
-  # Reuse the newest local-* tag of each image (`docker images` lists newest first).
+  # Reuse what's deployed now: the tag in members-service's Deployment spec. (Not
+  # "the newest local-* image": an image rebuilt from cache keeps its old Created
+  # time, so "newest" can be an older build.) With nothing deployed yet, fall back
+  # to the newest members-service tag. All three images must have that tag.
+  IMAGE_TAG=$(kubectl get deploy members-service-members-service \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed -n 's/.*:\(local-.*\)$/\1/p')
+  [[ -n "$IMAGE_TAG" ]] \
+    || IMAGE_TAG=$(docker images members-service --format '{{.Tag}}' | grep -m1 '^local-' || true)
+  [[ -n "$IMAGE_TAG" ]] || { fail "no local-* images in minikube — run without --skip-build"; exit 1; }
   for img in "${IMAGES[@]}"; do
-    tag=$(docker images "$img" --format '{{.Tag}}' | grep -m1 '^local-' || true)
-    [[ -n "$tag" ]] || { fail "$img:local-* not found in minikube — run without --skip-build"; exit 1; }
-    created=$(docker image inspect "$img:$tag" --format '{{.Created}}')
-    warn "reusing $img:$tag (built ${created%%.*}). If the code changed since then, rebuild!"
+    created=$(docker image inspect "$img:$IMAGE_TAG" --format '{{.Created}}' 2>/dev/null) \
+      || { fail "$img:$IMAGE_TAG not found in minikube — run without --skip-build"; exit 1; }
+    warn "reusing $img:$IMAGE_TAG (built ${created%%.*}). If the code changed since then, rebuild!"
   done
-  IMAGE_TAG=$tag   # all three are always built together, so they share one tag
 else
   # A committed tree is tagged by its commit. Uncommitted edits add a short hash of
   # the diff (and of any new files), so each different working tree gets its own tag.
@@ -200,12 +206,6 @@ else
   docker build -f apps/events-service/Dockerfile -t "events-service:$IMAGE_TAG" .
   docker build -f apps/web/Dockerfile -t "church-cms-web:$IMAGE_TAG" .
   ok "built members-service, events-service and church-cms-web as :$IMAGE_TAG"
-  # Old local-* tags would pile up and fill the disk. Remove them; an image a Pod
-  # still uses can't be removed yet (docker refuses), and goes on the next run.
-  for img in "${IMAGES[@]}"; do
-    docker images "$img" --format '{{.Repository}}:{{.Tag}}' | grep ':local-' \
-      | grep -vx "$img:$IMAGE_TAG" | xargs -r docker rmi >/dev/null 2>&1 || true
-  done
 fi
 
 # --- 7–8. Apps ---------------------------------------------------------------
@@ -236,6 +236,14 @@ helm_quiet upgrade --install web ./charts/web \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
   --wait --timeout 4m
+
+# Old local-* tags would pile up and fill the disk. Only now, after --wait has
+# replaced every Pod, is no Pod using them; removing them earlier could pull an
+# image out from under a Pod that then restarts (pullPolicy=Never can't fetch it).
+for img in "${IMAGES[@]}"; do
+  docker images "$img" --format '{{.Repository}}:{{.Tag}}' | grep ':local-' \
+    | grep -vxF "$img:$IMAGE_TAG" | xargs -r docker rmi >/dev/null 2>&1 || true
+done
 
 # --- 3. Tunnel and /etc/hosts ------------------------------------------------
 # Both need root. We only use sudo when it's actually needed, say why first, and

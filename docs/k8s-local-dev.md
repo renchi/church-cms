@@ -160,6 +160,8 @@ docker images | grep -E "members-service|events-service|church-cms-web"
 
 > **Why not just `:local`?** Kubernetes replaces Pods only when the Pod *spec* changes. If you rebuild `members-service:local` and run `helm upgrade` with `image.tag=local` again, the spec is identical, so Helm reports a new revision and **the old Pods keep running the old code**. You end up testing a build that no longer exists. A tag that changes with the code (the commit SHA) changes the spec, so Helm rolls the Pods. CI's deploy uses the same idea with `ghcr.io/…:<sha>`. `scripts/cluster-up.sh` goes one step further: uncommitted edits get a `-dirty-<hash>` suffix, so every different working tree gets its own tag.
 >
+> `$TAG` only lives in the terminal where you set it. In a new terminal, run the `TAG=` line again before any `helm` command below; they stop with *run the TAG= line from §4 first* if you forget, instead of deploying an empty tag.
+>
 > If you edit code without committing, `$TAG` doesn't change. Either commit first, run `scripts/cluster-up.sh`, or pick a new tag by hand (`TAG=local-try2`).
 
 > **Note:** `eval $(minikube docker-env)` only lasts for the current terminal session. If you open a new terminal you must run it again before any `docker` commands.
@@ -247,7 +249,7 @@ All migrations have been successfully applied.
 
 ```bash
 helm upgrade --install members-service ./charts/members-service \
-  --set image.tag=$TAG \
+  --set image.tag="${TAG:?run the TAG= line from §4 first}" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true
 ```
@@ -271,7 +273,7 @@ and Ingress path (`/api/events`), so the command is the same:
 ```bash
 helm upgrade --install events-service ./charts/events-service \
   --set image.repository=events-service \
-  --set image.tag=$TAG \
+  --set image.tag="${TAG:?run the TAG= line from §4 first}" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
   --set metrics.serviceMonitor.enabled=true \
@@ -330,7 +332,7 @@ The full endpoint list is in [`events-service-ddd.md`](events-service-ddd.md) §
 
 ```bash
 helm upgrade --install web ./charts/web \
-  --set image.tag=$TAG \
+  --set image.tag="${TAG:?run the TAG= line from §4 first}" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true
 ```
@@ -422,20 +424,20 @@ The **StripPrefix middleware** (`charts/members-service/templates/middleware.yam
 # Rebuild first if the code changed (§4), with a NEW $TAG, or the Pods won't restart.
 # Re-deploy members-service after chart or image change
 helm upgrade --install members-service ./charts/members-service \
-  --set image.tag=$TAG \
+  --set image.tag="${TAG:?run the TAG= line from §4 first}" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true
 
 # Re-deploy events-service after chart or image change
 helm upgrade --install events-service ./charts/events-service \
   --set image.repository=events-service \
-  --set image.tag=$TAG \
+  --set image.tag="${TAG:?run the TAG= line from §4 first}" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true
 
 # Re-deploy web after chart or image change
 helm upgrade --install web ./charts/web \
-  --set image.tag=$TAG \
+  --set image.tag="${TAG:?run the TAG= line from §4 first}" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true
 ```
@@ -588,7 +590,8 @@ it, and watch Kubernetes keep running the old build. Run it with the stack up.
 eval $(minikube docker-env)
 CUR=$(kubectl get deploy members-service-members-service -o jsonpath='{.spec.template.spec.containers[0].image}')
 docker tag "$CUR" members-service:trap
-helm upgrade members-service ./charts/members-service --reuse-values --set image.tag=trap --wait | grep REVISION
+helm upgrade members-service ./charts/members-service --reuse-values \
+  --set image.repository=members-service --set image.tag=trap --set image.pullPolicy=Never --wait | grep REVISION
 # REVISION: 16                       ← the tag changed, so the Pod spec changed: new Pods
 kubectl get pods -l app.kubernetes.io/instance=members-service
 # members-service-members-service-6c958f89c6-ng528   1/1   Running   0   39s
@@ -598,7 +601,8 @@ kubectl get pods -l app.kubernetes.io/instance=members-service
 echo "// trap exercise" >> apps/members-service/src/index.ts
 docker build -q -f apps/members-service/Dockerfile -t members-service:trap .
 git checkout -- apps/members-service/src/index.ts
-helm upgrade members-service ./charts/members-service --reuse-values --set image.tag=trap --wait | grep REVISION
+helm upgrade members-service ./charts/members-service --reuse-values \
+  --set image.repository=members-service --set image.tag=trap --set image.pullPolicy=Never --wait | grep REVISION
 # REVISION: 17                       ← Helm says it upgraded…
 kubectl get pods -l app.kubernetes.io/instance=members-service
 # members-service-members-service-6c958f89c6-ng528   …  ← …but these are the SAME two Pods
@@ -609,6 +613,8 @@ kubectl get pods -l app.kubernetes.io/instance=members-service \
   -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' | sed 's/.*sha256:/sha256:/' | cut -c1-19
 # sha256:f4e24367dbbe                ← what the Pod actually runs (the old build)
 ```
+
+`image.repository` and `pullPolicy` are set too because after a CI deploy the release points at `ghcr.io/…`, which has no `:trap` tag.
 
 Expected: the two IDs differ. Every request you send now tests code that isn't in your
 tree any more. That's exactly how a "verified" change could be wrong before

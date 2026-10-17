@@ -60,7 +60,8 @@ for doc in "${docs[@]}"; do
     # Line anchors look like #L52 or #L52-L60 (GitHub's format). Check the last line.
     if [[ "$anchor" =~ ^L([0-9]+)(-L([0-9]+))?$ ]]; then
       last=${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}
-      length=$(wc -l <"$resolved")
+      # awk counts the last line even without a trailing newline; wc -l would not.
+      length=$(awk 'END { print NR }' "$resolved")
       if ((last > length)); then
         err "$doc:$lineno → $target: $resolved has only $length lines"
       fi
@@ -71,7 +72,7 @@ for doc in "${docs[@]}"; do
           || err "$doc:$lineno → label says line $label_line but the link goes to #$anchor"
       fi
       # The file changed on this branch, so the line it points at may have moved.
-      if grep -qx "$resolved" <<<"$changed"; then
+      if grep -qxF "$resolved" <<<"$changed"; then
         warn "$doc:$lineno → $target: $resolved changed on this branch; is line ${anchor#L} still the right one?"
       fi
     fi
@@ -82,7 +83,7 @@ done
 # Every ticket updates the study guide (.claude/rules/docs-learning.md). Only a
 # warning: a chore branch can have a good reason not to.
 if grep -qE '^(apps|packages|charts|k8s|scripts)/' <<<"$changed" \
-  && ! grep -qx 'docs/study-guide.md' <<<"$changed"; then
+  && ! grep -qxF 'docs/study-guide.md' <<<"$changed"; then
   warn "code changed on this branch but docs/study-guide.md did not (every ticket updates it)"
 fi
 

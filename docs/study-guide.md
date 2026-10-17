@@ -1236,14 +1236,16 @@ allows?", not "what did I mean it for?".
 | --- | --- | --- |
 | `git checkout *` | `git checkout -- .`: discard every uncommitted change | `git checkout -b *`, `git checkout main` |
 | `gh pr *` | `gh pr merge`, `gh pr close` | `create`, `view`, `checks`, `diff`, `list` |
-| `kubectl apply *` | applying any manifest to the cluster, from anywhere | `--dry-run=…`, and `-f k8s/*` |
+| `kubectl apply *` | applying any manifest to the cluster, from anywhere | `--dry-run=server …` and `--dry-run=client …` only. Real applies go through `cluster-up.sh` |
 | `kubectl exec *` | a shell in any Pod, including the databases | only `nats` commands in `nats-box` |
 
 **Why this way.** Patterns match text, not intent. `git checkout *` was meant for switching
 branches. Narrow patterns that fit the workflow keep the prompts rare *and* meaningful: when
 Claude Code does ask, it's for something worth a look. The merge is the clearest case:
 `/ship` asks before merging, but the permission list makes sure of it even if the skill text
-were ignored. This is the same idea as §12.1's "enforce mechanically where you can", applied
+were ignored. Code review caught the first attempt: `--dry-run=*` also matches `--dry-run=none`, which
+is a *real* apply, and `-f k8s/*` matches `-f k8s/x.yaml -f /anywhere.yaml`. A wildcard
+in an allow rule allows whatever text fits it, so spell out the safe values. This is the same idea as §12.1's "enforce mechanically where you can", applied
 to the agent itself.
 
 ---

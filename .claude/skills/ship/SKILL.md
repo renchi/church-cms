@@ -12,6 +12,7 @@ Runs the PR → CI → Merge → Deploy → Done rows of the CLAUDE.md Workflow 
 ## 1. Preconditions
 
 - On a `cms-<n>/…` (or `chore/…`) branch, never `main`. The ticket number comes from the argument or the branch name.
+- **No ticket** (a `chore/…` branch and no argument): leave `CMS-<n>` out of the PR title and body, and skip the Linear step in 7. Never guess a ticket number.
 - `git status --short` is clean and every commit is in.
 - This session has a `/verify` report with no failed step, and the `/code-review` findings are fixed. If either is missing, say so and stop. Don't run them yourself here.
 
@@ -59,10 +60,11 @@ git checkout main && git pull
 
 ## 6. Deploy
 
-Deploy starts when CI finishes on `main` (`workflow_run`), so give it a minute to appear:
+Deploy starts when CI finishes on `main` (`workflow_run`), so give it a few minutes to appear. Filter by the merge commit: the latest Deploy run may be an older one, and watching that would report success for a deploy that hasn't run yet.
 
 ```bash
-gh run list --workflow=Deploy --limit 1     # the run for the merge commit
+sha=$(git rev-parse HEAD)                   # the merge commit, after the pull in step 5
+gh run list --workflow=Deploy --commit "$sha" --json databaseId,status   # repeat until it lists a run
 gh run watch <run-id> --exit-status
 ```
 
@@ -70,7 +72,7 @@ If a job fails before any step runs, check `df -h /` first (see step 2). Then re
 
 ## 7. Close the loop
 
-- Move the Linear ticket to **Done** (`save_issue` with the Done state).
+- Move the Linear ticket to **Done** (`save_issue` with the Done state). Skip this when there's no ticket.
 - Check `docs/study-guide.md`'s "What setting it up taught" table for the problems that actually came up this ticket. If one is missing, say so (that's a follow-up docs PR, not a direct edit to main).
 - Save to memory only what isn't in the repo and would save a future session time (a new operational gotcha, a decision the user made). Update an existing memory instead of adding a near-duplicate.
 - Suggest `/mattpocock-skills:retro` (a retrospective on the session), in one line. Its findings feed the study guide's "What setting it up taught" table. Don't run it yourself.

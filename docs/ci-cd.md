@@ -218,7 +218,8 @@ go red at the same step. Then clean up: `gh pr close --delete-branch`, `git chec
 ```bash
 scripts/check-docs.sh
 # ! docs/events-service-ddd.md:74 → ../apps/events-service/src/domain/Attendance.ts#L52: apps/events-service/src/domain/Attendance.ts changed on this branch; is line 52 still the right one?
-# ! docs/study-guide.md:852 → …Attendance.ts#L65: … changed on this branch; is line 65 still the right one?
+# ! docs/study-guide.md:856 → …Attendance.ts#L65: … changed on this branch; is line 65 still the right one?
+# (the doc line numbers before the → move as the docs grow; the targets after it are what matter)
 ```
 
 Every line below the blank one moved down by one, so both links are now off by one, yet
