@@ -1,0 +1,77 @@
+---
+name: ship
+description: Ship a verified, reviewed ticket branch — check disk, push, open the PR from the template, watch CI, merge only after the user says so, watch the Deploy run, mark the Linear ticket Done, and capture lessons. Use after /verify and /code-review.
+argument-hint: "[CMS-<n>]  (omit to read it from the branch name)"
+disable-model-invocation: true
+---
+
+# Ship a ticket
+
+Runs the PR → CI → Merge → Deploy → Done rows of the CLAUDE.md Workflow table. Stop and tell the user if any step fails. **Never merge without the user's explicit go-ahead in this session.**
+
+## 1. Preconditions
+
+- On a `cms-<n>/…` (or `chore/…`) branch, never `main`. The ticket number comes from the argument or the branch name.
+- `git status --short` is clean and every commit is in.
+- This session has a `/verify` report with no failed step, and the `/code-review` findings are fixed. If either is missing, say so and stop. Don't run them yourself here.
+
+## 2. Disk (the self-hosted runner builds on this machine)
+
+```bash
+df -h /     # Avail should be ≥ 10G. A Deploy that rebuilds all three images needs ~8 GB
+```
+
+If less than ~10 GB is free, tell the user before pushing and offer the prune (it only deletes build cache, not images in use):
+
+```bash
+docker builder prune -af
+eval "$(minikube docker-env)" && docker builder prune -af; eval "$(minikube docker-env -u)"
+```
+
+A change to `pnpm-lock.yaml` or another shared file redeploys **every** service. Say so when the diff has one.
+
+## 3. Push and open the PR
+
+```bash
+git push -u origin "$(git branch --show-current)"
+gh pr create --title "<type>(<scope>): <summary> (CMS-<n>)" --body-file <filled template>
+```
+
+Fill `.github/pull_request_template.md`: the ticket, a short what/why, the `/verify` table as it was reported (don't upgrade a "skipped" to a "pass"), the learning-deliverables checklist ticked only for what exists, and the deploy impact (`git diff --name-only main...HEAD` → which `apps/<svc>/` or `charts/<svc>/` changed). End the body with the attribution line from the system reminder.
+
+## 4. CI
+
+```bash
+gh pr checks --watch     # lint-typecheck, unit-tests and integration-tests are required by branch protection
+```
+
+- A real failure: fix it on the branch, push, and watch again.
+- Jobs "not acquired by Runner" / cancelled with no failing step is a GitHub outage, not a test failure: `gh run rerun <run-id> --failed`.
+
+## 5. Merge (the user decides)
+
+Show the PR URL and the green checks, and ask: "Merge PR #<n>?" Only on a clear yes:
+
+```bash
+gh pr merge <n> --merge --delete-branch     # merge commits, like every PR so far
+git checkout main && git pull
+```
+
+## 6. Deploy
+
+Deploy starts when CI finishes on `main` (`workflow_run`), so give it a minute to appear:
+
+```bash
+gh run list --workflow=Deploy --limit 1     # the run for the merge commit
+gh run watch <run-id> --exit-status
+```
+
+If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed and how long it took.
+
+## 7. Close the loop
+
+- Move the Linear ticket to **Done** (`save_issue` with the Done state).
+- Check `docs/study-guide.md`'s "What setting it up taught" table for the problems that actually came up this ticket. If one is missing, say so (that's a follow-up docs PR, not a direct edit to main).
+- Save to memory only what isn't in the repo and would save a future session time (a new operational gotcha, a decision the user made). Update an existing memory instead of adding a near-duplicate.
+- Suggest `/mattpocock-skills:retro` (a retrospective on the session), in one line. Its findings feed the study guide's "What setting it up taught" table. Don't run it yourself.
+- Point out the next ticket at the top of `Todo`, if there is one.

@@ -122,6 +122,28 @@ Only services whose files changed are rebuilt:
 
 Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA tag makes it obvious which commit is running and makes every deploy a real change that Kubernetes rolls out.
 
+### Shipping a ticket with `/ship`
+
+After `/verify` and `/code-review`, the agent's `/ship` skill ([`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md)) runs the rest of this section in order. The same steps work by hand:
+
+```bash
+df -h /                                    # 1. Avail ≥ 10G, or the Deploy build can die mid-way
+# /dev/sda2   62G   49G   11G  83% /
+git push -u origin "$(git branch --show-current)"
+gh pr create                               # 2. the body starts from .github/pull_request_template.md
+gh pr checks --watch                       # 3. waits for the three required checks
+# lint-typecheck      pass  1m10s
+# unit-tests          pass  40s
+# integration-tests   pass  1m50s
+gh pr merge <n> --merge --delete-branch    # 4. YOU decide this; the agent asks first
+gh run list --workflow=Deploy --limit 1    # 5. appears ~1 min after the merge, once CI passes on main
+gh run watch <run-id> --exit-status        #    exits non-zero if any service failed to deploy
+```
+
+Then mark the ticket Done in Linear.
+
+**What this does:** each step is a gate the next one depends on. The disk check comes *first* because a full disk fails the Deploy build after the merge, when the PR is already on `main`. The merge is the one step the agent never auto-runs: `gh pr merge` isn't in `.claude/settings.json`'s allowlist, so Claude Code asks you even if the skill forgot to (study-guide §12.3).
+
 ### Migrations and rollbacks (expand/contract)
 
 Each service's `migrate` init container (members-service and events-service) applies migrations **before** the new Pods are known to be healthy. If they then fail readiness, `helm --rollback-on-failure` rolls back the image, but **not the schema**. The old code then runs against the new schema.
@@ -165,3 +187,43 @@ What CMS-18 needed for events-service, in order:
 | CI `integration-tests` fails, others pass | Testcontainers couldn't start Postgres. Check the job log for Docker errors |
 | CI jobs **cancelled** with "The job was not acquired by Runner of type hosted" | A GitHub Actions outage (check <https://www.githubstatus.com>), not a test failure. Re-run once it recovers: `gh run rerun <id> --failed` |
 | `failed to run git: not a git repository` from `gh` | The terminal isn't inside the repo. `cd ~/church-cms`, or add `-R renchi/church-cms` |
+| CI `lint-typecheck` fails at `scripts/check-docs.sh` | A doc link points at a missing file or past the end of one. The `✘` line names the doc, its line and the target. Run `scripts/check-docs.sh` locally, fix the link and push |
+
+---
+
+## Exercises: the docs gate
+
+**1. Break a line link on purpose.** On a scratch branch, change a line anchor in
+`docs/events-service-ddd.md` so it no longer matches its label, and point another one at
+a file that doesn't exist:
+
+```bash
+git checkout -b scratch/docs-gate
+sed -i 's|RecordAttendanceUseCase.ts#L29)|RecordAttendanceUseCase.ts#L31)|' docs/events-service-ddd.md
+sed -i 's|prisma/schema.prisma#L65)|prisma/nope.prisma#L65)|' docs/events-service-ddd.md
+scripts/check-docs.sh; echo "exit=$?"
+# ✘ docs/events-service-ddd.md:84 → label says line 29 but the link goes to #L31
+# ✘ docs/events-service-ddd.md:87 → ../apps/events-service/prisma/nope.prisma#L65: apps/events-service/prisma/nope.prisma does not exist
+# 2 error(s), 0 warning(s)
+# exit=1
+```
+
+Push it and open a draft PR (`gh pr create --draft`) to watch the `lint-typecheck` job
+go red at the same step. Then clean up: `gh pr close --delete-branch`, `git checkout main`,
+`git branch -D scratch/docs-gate`.
+
+**2. The warning a script can't decide.** Add a blank line at the top of
+`apps/events-service/src/domain/Attendance.ts` (don't commit) and run the check again:
+
+```bash
+scripts/check-docs.sh
+# ! docs/events-service-ddd.md:74 → ../apps/events-service/src/domain/Attendance.ts#L52: apps/events-service/src/domain/Attendance.ts changed on this branch; is line 52 still the right one?
+# ! docs/study-guide.md:852 → …Attendance.ts#L65: … changed on this branch; is line 65 still the right one?
+```
+
+Every line below the blank one moved down by one, so both links are now off by one, yet
+both files still exist and are long enough. The script can't tell whether a link is
+*right*, only that it *might* have moved, so it warns and leaves the decision to you.
+That's the split this whole workflow uses: mechanical checks for what a machine can
+decide, review for the rest. Undo with `git checkout -- apps/events-service/src/domain/Attendance.ts`.
+

@@ -46,6 +46,10 @@ jobs:
       - run: pnpm --filter members-service exec prisma generate
       - run: pnpm --filter events-service exec prisma generate
       - run: pnpm lint
+      # Broken doc links (missing files, line links past the end of a file) fail
+      # the build like a lint error. The learning docs are a deliverable here.
+      # CI's checkout is shallow, so the script skips its branch-diff warnings.
+      - run: scripts/check-docs.sh
       - run: pnpm -r typecheck
       - run: pnpm build
 

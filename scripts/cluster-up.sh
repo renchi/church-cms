@@ -167,19 +167,45 @@ ok "NATS ready"
 # --- 4. Images ---------------------------------------------------------------
 # Build straight into minikube's own Docker daemon, so the cluster can use the
 # images without a registry (that's why the charts get pullPolicy=Never below).
+#
+# Why the tag is "local-<commit>" and not just "local": Helm (and Kubernetes)
+# only roll out new Pods when the Pod *spec* changes. Rebuilding an image under
+# the same tag changes the image, not the spec, so the old Pods keep running the
+# old code — and anything you "verify" afterwards is testing stale code. A tag
+# that changes whenever the code changes makes the spec change too, so Helm rolls
+# the Pods. Same code → same tag → nothing restarts (still idempotent).
+# The deploy pipeline does the same thing with ghcr.io/…:<sha> (docs/ci-cd.md).
+IMAGES=(members-service events-service church-cms-web)
 step "k8s-local-dev §4" "Docker images inside minikube"
 eval "$(minikube docker-env)"
 if $SKIP_BUILD; then
-  for img in members-service:local events-service:local church-cms-web:local; do
-    created=$(docker image inspect "$img" --format '{{.Created}}' 2>/dev/null) \
-      || { fail "$img not found in minikube — run without --skip-build"; exit 1; }
-    warn "reusing $img (built ${created%%.*}). If the code changed since then, rebuild!"
+  # Reuse the newest local-* tag of each image (`docker images` lists newest first).
+  for img in "${IMAGES[@]}"; do
+    tag=$(docker images "$img" --format '{{.Tag}}' | grep -m1 '^local-' || true)
+    [[ -n "$tag" ]] || { fail "$img:local-* not found in minikube — run without --skip-build"; exit 1; }
+    created=$(docker image inspect "$img:$tag" --format '{{.Created}}')
+    warn "reusing $img:$tag (built ${created%%.*}). If the code changed since then, rebuild!"
   done
+  IMAGE_TAG=$tag   # all three are always built together, so they share one tag
 else
-  docker build -f apps/members-service/Dockerfile -t members-service:local .
-  docker build -f apps/events-service/Dockerfile -t events-service:local .
-  docker build -f apps/web/Dockerfile -t church-cms-web:local .
-  ok "built members-service:local, events-service:local and church-cms-web:local"
+  # A committed tree is tagged by its commit. Uncommitted edits add a short hash of
+  # the diff (and of any new files), so each different working tree gets its own tag.
+  IMAGE_TAG="local-$(git rev-parse --short HEAD)"
+  if [[ -n "$(git status --porcelain)" ]]; then
+    dirty=$({ git diff HEAD; git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum; } \
+      | sha256sum | cut -c1-8)
+    IMAGE_TAG="$IMAGE_TAG-dirty-$dirty"
+  fi
+  docker build -f apps/members-service/Dockerfile -t "members-service:$IMAGE_TAG" .
+  docker build -f apps/events-service/Dockerfile -t "events-service:$IMAGE_TAG" .
+  docker build -f apps/web/Dockerfile -t "church-cms-web:$IMAGE_TAG" .
+  ok "built members-service, events-service and church-cms-web as :$IMAGE_TAG"
+  # Old local-* tags would pile up and fill the disk. Remove them; an image a Pod
+  # still uses can't be removed yet (docker refuses), and goes on the next run.
+  for img in "${IMAGES[@]}"; do
+    docker images "$img" --format '{{.Repository}}:{{.Tag}}' | grep ':local-' \
+      | grep -vx "$img:$IMAGE_TAG" | xargs -r docker rmi >/dev/null 2>&1 || true
+  done
 fi
 
 # --- 7–8. Apps ---------------------------------------------------------------
@@ -187,7 +213,7 @@ fi
 step "k8s-local-dev §7" "members-service (Helm)"
 helm_quiet upgrade --install members-service ./charts/members-service \
   --set image.repository=members-service \
-  --set image.tag=local \
+  --set image.tag="$IMAGE_TAG" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
   --set metrics.serviceMonitor.enabled=true \
@@ -197,7 +223,7 @@ helm_quiet upgrade --install members-service ./charts/members-service \
 step "k8s-local-dev §7b" "events-service (Helm)"
 helm_quiet upgrade --install events-service ./charts/events-service \
   --set image.repository=events-service \
-  --set image.tag=local \
+  --set image.tag="$IMAGE_TAG" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
   --set metrics.serviceMonitor.enabled=true \
@@ -206,7 +232,7 @@ helm_quiet upgrade --install events-service ./charts/events-service \
 step "k8s-local-dev §8" "web frontend (Helm)"
 helm_quiet upgrade --install web ./charts/web \
   --set image.repository=church-cms-web \
-  --set image.tag=local \
+  --set image.tag="$IMAGE_TAG" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
   --wait --timeout 4m
@@ -265,6 +291,9 @@ ip=$(traefik_ip)
 if ! traefik_reachable; then
   network_ok=false
   fail "Traefik isn't reachable${ip:+ at $ip}; minikube tunnel is not running."
+  # Without a terminal (an agent, CI, Claude Code's "!" prefix) sudo can't ask for
+  # a password, so the script didn't even try. Say so, or it looks like a bug.
+  $USE_SUDO && ! can_sudo && warn "No terminal to type a sudo password into, so the tunnel wasn't started."
   warn "Start it in another terminal and leave it open:  sudo -E minikube tunnel"
   warn "Then run this script again (with --skip-build) to finish the checks."
 else
@@ -302,6 +331,17 @@ fi
 # --- Smoke test --------------------------------------------------------------
 step "smoke test" "Is everything actually working?"
 smoke_ok=true
+# Are the Pods running the images we just built? (The stale-image check, §4.)
+# Deployments are named <release>-<chart> by the charts (e.g. members-service-members-service).
+for deploy in members-service-members-service events-service-events-service web-web; do
+  running=$(kubectl get deploy "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null \
+    || echo "nothing (Deployment not found)")
+  if [[ "$running" == *":$IMAGE_TAG" ]]; then
+    ok "$deploy runs $running"
+  else
+    smoke_ok=false; fail "$deploy runs $running, expected tag $IMAGE_TAG"
+  fi
+done
 if $network_ok; then
   for svc in members events; do
     if [[ "$(curl -s -m 5 "http://cms.local/api/$svc/health")" == '{"status":"ok"}' ]]; then

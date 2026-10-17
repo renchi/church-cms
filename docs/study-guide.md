@@ -43,6 +43,10 @@ has now been exercised end to end. That is the scope of this guide.
 | 8   | Build Events service                          | ✅ done | repeat the DDD pattern              |
 | 9   | Wire NATS between Members ↔ Events            | ✅ done | async events / eventual consistency |
 
+After stage 9 the workflow itself was tightened (§12.2–12.3): mechanical doc checks, a
+`/ship` skill, image tags that make `/verify` test the current code, and a narrower
+permission list.
+
 Knowing what is **deliberately not built yet** is itself part of the learning: the
 architecture is sequenced so you learn each layer once, well, instead of building the
 same service six times. That decision is ADR-0007 — read it.
@@ -139,7 +143,7 @@ Concepts to be able to explain, each commented in the Dockerfiles:
 
 - **Layer caching** — copy `package.json` + lockfile and run `pnpm install` _before_
   copying source, so the slow install layer is reused when only code changes
-  ([Dockerfile:317–331](../apps/members-service/Dockerfile#L317)).
+  ([Dockerfile:49–64](../apps/members-service/Dockerfile#L49-L64)).
 - **`node:20-alpine`** — Alpine is a ~5 MB base vs. ~150 MB Debian. Trade-off: it uses
   `musl` libc, so Prisma's native engine needs `openssl` installed and a musl build.
 - **`USER node`** — drop from root to an unprivileged user before running, so an app
@@ -477,10 +481,10 @@ Pod never becomes Ready, so a broken migration stops the rollout.
   Secrets, Sealed Secrets).
 - ~~**A ConfigMap change doesn't restart the Pods.**~~ Fixed in stage 9: a
   `checksum/config` annotation on the Pod template (§11.2), so new config means new Pods.
-- **A rebuilt `:local` image doesn't restart the Pods either.** `scripts/cluster-up.sh`
-  rebuilds `members-service:local`, but the tag is the same, so Helm sees no change and
-  the old code keeps running. CI is unaffected, since it deploys a new `:<sha>` tag every
-  time. Workaround: `kubectl rollout restart deploy/<name>` after a local rebuild.
+- ~~**A rebuilt `:local` image doesn't restart the Pods either.**~~ Fixed after stage 9:
+  `scripts/cluster-up.sh` now tags local builds `local-<sha>` (plus `-dirty-<hash>` for
+  uncommitted edits), so new code means a new Pod spec and Helm rolls the Pods. It's the
+  same idea CI uses with `:<sha>`. Why this mattered for the agent workflow: §12.2.
 
 ### 7.7 Automating the runbook: an idempotent bootstrap script
 
@@ -1115,7 +1119,7 @@ in the roadmap table and git history). The workflow:
 3. Decisions that shape architecture are written down as **ADRs**, not left in chat.
 4. Code is heavily commented **for learning**, not just for shipping.
 5. Every ticket goes through the same **quality loop**: plan → implement → verify in the
-   running app → `/code-review` (fix every finding) → PR → CI green → merge. On CMS-16,
+   running app → `/code-review` (fix every finding) → `/ship` (PR → CI green → merge). On CMS-16,
    the review caught two real bugs: deploy didn't wait for CI, and typecheck ignored the
    Prisma types.
 
@@ -1132,7 +1136,7 @@ make it see them. Each one has a different trigger and a different cost:
 | --- | --- | --- | --- |
 | **CLAUDE.md** | repo root | Every session, always in context | What *every* task needs: purpose, commands, workflow, indexes. Keep it short, because every line costs attention |
 | **Rules** | `.claude/rules/*.md` | Only when the agent touches a matching path (`paths:` frontmatter) | Area conventions: `ddd.md` for service code, `k8s-helm.md` for charts, `testing.md`, `docs-learning.md` |
-| **Skills** | `.claude/skills/<name>/SKILL.md` | When you type `/name` (or the agent decides it's relevant) | Repeatable procedures: `/start-ticket`, `/verify`, `/new-service` |
+| **Skills** | `.claude/skills/<name>/SKILL.md` | When you type `/name` (or the agent decides it's relevant) | Repeatable procedures: `/start-ticket`, `/verify`, `/ship`, `/new-service` |
 | **Hooks** | `.claude/settings.json` → `.claude/hooks/` | Automatically on events (e.g. after every Edit) | Things that must *always* happen, enforced by the harness rather than the model. `lint-file.sh` lints each edited `.ts` file |
 | **Memory** | `~/.claude/projects/.../memory/` | Index loaded each session | Facts about you and the project that aren't in the repo: preferences, reminders |
 
@@ -1153,6 +1157,94 @@ Two design points are worth remembering:
 **The work queue:** Linear `Todo` in board order holds the next tickets, and the
 `deferred` label marks tickets out of scope under ADR-0007. `/start-ticket` uses both, so
 "what's next" is the same answer for you and for the agent.
+
+### 12.2 Closing the loop: verify, review, ship
+
+**The concept.** An agent writes code fast, so the bottleneck moves to *checking* it. A
+workflow is only as good as its gates: the points where work has to prove itself before it
+moves on. A gate that depends on someone remembering to look carefully will sometimes be
+skipped. A gate that a script or the harness runs every time won't. So, wherever a check can
+be decided by a machine, make it mechanical, and save human (and model) attention for what
+can't be.
+
+Here the loop is `/start-ticket` → plan → implement → `/verify` → `/code-review` → `/ship`,
+and each step has a mechanical core:
+
+| Gate | Mechanical part | Still judgement |
+| --- | --- | --- |
+| Edit | `lint-file.sh` hook: ESLint on every edited `.ts` file | |
+| `/verify` | tests, typecheck, `helm lint`; Pods must run **this build's image tag**; `scripts/check-docs.sh` | does the feature do what the ticket asked? |
+| `/code-review` | | bugs, design, missing edge cases |
+| CI | the three required checks, plus `check-docs.sh` inside `lint-typecheck` | |
+| `/ship` | disk check, PR from the template, `gh pr checks --watch`, `gh run watch` | **merge: always the user** |
+
+**How we did it here.**
+
+- [`scripts/check-docs.sh`](../scripts/check-docs.sh) fails on a doc link to a missing file,
+  a line link past the end of its file, or a label like `` `x.ts:29` `` whose anchor says
+  `#L31`. It *warns* about line links into files this branch changed, because only a person
+  can tell whether line 52 is still the right line. CI runs it in
+  [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`).
+- [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) §4 tags images by content, and its
+  smoke test checks that every Deployment runs that tag.
+- [`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md) runs the PR → CI →
+  merge → Deploy → Done steps, and
+  [`.github/pull_request_template.md`](../.github/pull_request_template.md) gives every PR the
+  same shape (ticket, verify table, learning checklist, deploy impact). The steps by hand are
+  in [`ci-cd.md`](ci-cd.md) ("Shipping a ticket with `/ship`").
+
+**Why this way.** The git history showed the pattern: almost every large ticket had a
+follow-up "address code review" commit, and CMS-18 also had "fill learning-doc gaps found in
+review" and "fix code links whose line numbers moved". Review is the most expensive gate, so
+anything it catches that a script could have caught is wasted attention. The trade-off:
+every check adds a little friction, so only add the ones that have actually failed before.
+That's why `check-docs.sh` checks links and not, say, prose style. Deliberately not done: a
+subagent that reviews the learning docs before `/code-review`. Add it if doc gaps keep
+reaching review after this.
+
+**Suggested, not automatic: the design skills.** Some skills only pay off on certain tickets.
+`grill-with-docs` and `domain-modeling` (from the `mattpocock-skills` plugin) stress-test a
+new context's design against the ADRs, and `tdd` drives domain behaviour test-first.
+`/start-ticket` suggests the ones that match the ticket, in one line with the reason, before
+plan mode, and `/ship` suggests a `retro` after the merge. The agent doesn't run them itself,
+because a grilling session costs your time, and a reminder that appears on every ticket
+soon gets ignored. The trigger is in the skill that already knows the ticket, not in a hook
+that fires on everything.
+
+**What setting it up taught:**
+
+| Problem | Lesson |
+| --- | --- |
+| `/verify` step 4 rebuilt `members-service:local` and ran `helm upgrade` with the same tag. The Pod spec didn't change, so the old Pods kept running, and "exercise the feature" could test code from before the change | A verification gate that can pass on stale code is worse than none, because it gives false confidence. Make the artifact's identity part of the check: tag by commit, then assert the running image has that tag |
+| The first run of `check-docs.sh` failed on `main`: study-guide §2.2 linked to `Dockerfile#L317`, in a 179-line file. Several reviews had read past it | Reviewers check what changed, not what rotted. Only a check that looks at *everything*, every time, finds rot |
+| Line links can't be checked for *correctness*, only for existence | Split it: errors for what a script can decide, warnings that name the exact link for what it can't |
+| The new "is the Pod on this tag?" smoke check killed the script silently: it asked for `deploy/members-service`, but the charts name it `members-service-members-service` (`<release>-<chart>`), and `set -e` exited on the failed `kubectl` | Test a new check against the real cluster, not the name you expect. A check that can't find its target must report "not found", not take the script down with it |
+| Running `scripts/cluster-up.sh --skip-build` with Claude Code's `!` prefix still didn't start the tunnel, and printed no reason | `!` runs the command with no terminal, so sudo can't ask for a password and the script quietly stays check-only. Steps that need a human (a password, a browser login) must run in the human's own terminal, and the script now says so when it can't ask |
+| Two full rebuilds while testing this took the disk from 11 GB to 4.9 GB free (92%), mostly build cache | Every rebuild leaves cache behind. The script now deletes superseded `local-*` tags. Build cache still needs a `docker builder prune -af` (host and minikube), which is why `/ship` checks the disk before pushing |
+
+### 12.3 Least privilege for agents
+
+**The concept.** `.claude/settings.json`'s `permissions.allow` list says which commands the
+agent may run without asking you. Every entry is a trade: fewer prompts, but less of a
+chance to stop a mistake. The question for each one is "what's the worst this pattern
+allows?", not "what did I mean it for?".
+
+**How we did it here.** The list was narrowed in
+[`.claude/settings.json`](../.claude/settings.json):
+
+| Was | Also allowed | Now |
+| --- | --- | --- |
+| `git checkout *` | `git checkout -- .`: discard every uncommitted change | `git checkout -b *`, `git checkout main` |
+| `gh pr *` | `gh pr merge`, `gh pr close` | `create`, `view`, `checks`, `diff`, `list` |
+| `kubectl apply *` | applying any manifest to the cluster, from anywhere | `--dry-run=…`, and `-f k8s/*` |
+| `kubectl exec *` | a shell in any Pod, including the databases | only `nats` commands in `nats-box` |
+
+**Why this way.** Patterns match text, not intent. `git checkout *` was meant for switching
+branches. Narrow patterns that fit the workflow keep the prompts rare *and* meaningful: when
+Claude Code does ask, it's for something worth a look. The merge is the clearest case:
+`/ship` asks before merging, but the permission list makes sure of it even if the skill text
+were ignored. This is the same idea as §12.1's "enforce mechanically where you can", applied
+to the agent itself.
 
 ---
 
@@ -1247,6 +1339,13 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why is the cross-service import ban an ESLint rule, not just a sentence in CLAUDE.md? (§12.1)
 - [ ] How does a hook get feedback to the agent, and why did the old lint hook achieve nothing? (§12.1)
 - [ ] How does `/start-ticket` decide which ticket is next? (§12.1)
+- [ ] Why can rebuilding an image under the same tag make `/verify` pass on old code? How does a `local-<sha>` tag fix it? (§12.2, §7.6)
+- [ ] Which documentation mistakes does `scripts/check-docs.sh` fail on, and which does it only warn about? Why the split? (§12.2)
+- [ ] Why does the disk check come *before* the push in `/ship`, not after the merge? (§12.2, `ci-cd.md`)
+- [ ] Name one gate in this workflow that's mechanical and one that's judgement. Why isn't review mechanical? (§12.2)
+- [ ] What does `Bash(git checkout *)` allow besides switching branches? How would you narrow an allow rule? (§12.3)
+- [ ] Why is "the skill says ask before merging" not enough on its own? (§12.3)
+- [ ] Why does `/start-ticket` *suggest* `grill-with-docs` only for some tickets instead of running it on every one? (§12.2)
 
 ---
 

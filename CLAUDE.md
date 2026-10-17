@@ -25,6 +25,7 @@ pnpm --filter members-service test       # unit + integration
 scripts/cluster-up.sh                    # bring up / update the whole minikube stack, then smoke-test it
 scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postgres data)
 scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, only check tunnel + /etc/hosts
+scripts/check-docs.sh                    # broken doc links, stale line links, missing study-guide update (also runs in CI)
 ```
 
 ## Workflow
@@ -34,11 +35,9 @@ scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, onl
 | Start     | `/start-ticket [CMS-n]` | Every session. Syncs main, reads the ticket and its ADRs, creates the `cms-{n}/{slug}` branch, and moves the ticket to In Progress |
 | Plan      | Plan mode               | Tasks touching more than 2 files or making an architectural decision. The plan includes the learning deliverables                  |
 | Implement | Normal editing          | After the plan is approved. A hook lints each edited `.ts` file                                                                    |
-| Verify    | `/verify`               | After implementing. Proves the feature works in the running app and that the docs exist                                            |
+| Verify    | `/verify`               | After implementing. Proves the feature works in the running app (Pods on this build's image tag) and that the docs pass `scripts/check-docs.sh` |
 | Review    | `/code-review`          | Before opening a PR. Fix all findings                                                                                              |
-| PR        | `gh pr create`          | Reference the ticket number in the body                                                                                            |
-| CI        | `gh pr checks --watch`  | All checks must be green before merge (branch protection)                                                                          |
-| Ship      | Merge                   | The Deploy workflow ships changed services to minikube (`docs/ci-cd.md`). Mark the ticket Done                                     |
+| Ship      | `/ship`                 | After review. Checks disk, opens the PR from the template, watches CI, merges **only on the user's go-ahead**, watches Deploy (`docs/ci-cd.md`), marks the ticket Done |
 
 Never work directly on main. Scaffold new services with `/new-service`, and only for services marked Active below.
 
