@@ -22,12 +22,28 @@ Runs the PR → CI → Merge → Deploy → Done rows of the CLAUDE.md Workflow 
 df -h /     # Avail should be ≥ 10G. A Deploy that rebuilds all three images needs ~8 GB
 ```
 
-If less than ~10 GB is free, tell the user before pushing and offer the prune (it only deletes build cache, not images in use):
+If less than ~10 GB is free, tell the user before pushing and offer the cleanup. Two things fill the disk: build cache, and old deploy images (about 1.3 GB per service per deploy, on the host and inside minikube). `scripts/prune-deploy-images.sh <release> <image>` removes the second kind, keeping the tags Helm deployed most recently (read from `helm history`, so it's right even after `/verify` deployed `local-*` builds). Deploy runs it after every upgrade, so leftovers come from older deploys or interrupted runs.
 
 ```bash
+DRY_RUN=1 scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web   # optional: see what would go first
 docker builder prune -af
-eval "$(minikube docker-env)" && docker builder prune -af; eval "$(minikube docker-env -u)"
+for s in members-service events-service web; do scripts/prune-deploy-images.sh "$s" "ghcr.io/renchi/church-cms/$s"; done
+if env=$(minikube docker-env); then        # not `eval "$(…)"`: a failure there would hit the host twice
+  eval "$env"
+  docker builder prune -af
+  for s in members-service events-service web; do scripts/prune-deploy-images.sh "$s" "ghcr.io/renchi/church-cms/$s"; done
+  for p in members-service:members-service events-service:events-service web:church-cms-web; do
+    scripts/prune-deploy-images.sh "${p%%:*}" "${p#*:}"     # local-* builds from /verify
+  done
+  eval "$(minikube docker-env -u)"
+else
+  echo "minikube unreachable: its images were NOT cleaned"   # tell the user; don't report the disk as fixed
+fi
 ```
+
+The script fails closed: if Helm or Docker doesn't answer it removes nothing and exits non-zero, so treat any non-zero exit as "not cleaned".
+
+Never use `docker image prune -a` on the host: minikube runs on an untagged `kicbase` image, which it deletes.
 
 A change to `pnpm-lock.yaml` or another shared file redeploys **every** service. Say so when the diff has one.
 
@@ -68,7 +84,7 @@ gh run list --workflow=Deploy --commit "$sha" --json databaseId,status   # repea
 gh run watch <run-id> --exit-status
 ```
 
-If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed and how long it took.
+If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed, how long it took, and the free disk afterwards: the `cleanup` job writes it to the run summary (`gh run view <run-id>`), or run `df -h /`. Below ~10 GB, say so before the next ticket starts.
 
 ## 7. Close the loop
 

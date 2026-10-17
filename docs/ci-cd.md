@@ -122,6 +122,23 @@ Only services whose files changed are rebuilt:
 
 Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA tag makes it obvious which commit is running and makes every deploy a real change that Kubernetes rolls out.
 
+Unique tags also mean unique images, about 1.3 GB per service per deploy, stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. After a successful upgrade, each deploy job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places.
+
+Which tags it keeps comes from **`helm history`**, not from image dates: the images used by the release's newest two successful revisions (what's running, and what `helm rollback` would go back to), plus `main`. Failed revisions don't count. Image build times can't answer "what was deployed when": a rebuild that hits the cache keeps the old creation time. It only ever removes *deploy tags* (a commit SHA, or `local-…` from `cluster-up.sh`), so a hand-made `:debug` tag survives. And it **fails closed**: if Helm or Docker doesn't answer, it removes nothing and exits non-zero. Inside minikube it also clears the `local-*` builds `/verify` left behind. A removed ghcr image is never lost: it's still in the registry, and a rollback pulls it again.
+
+The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then clears build cache older than 24 h, once for the whole deploy, and writes what it reclaimed and the free disk to the run summary:
+
+```
+# deploy (web) › Remove superseded images
+#   removed ghcr.io/renchi/church-cms/web:<an older sha>      ← one line per removed tag, if any
+# ghcr.io/renchi/church-cms/web: kept <this sha> <previous sha> (newest 2 revision(s) of 'web'), removed 1
+# (then the same inside minikube, for ghcr.io/… and for church-cms-web's local-* builds)
+# cleanup › Prune build cache and report disk
+# Build cache: host Total: 1.2GB · minikube Total: 0B · free disk 16G      ← keep ≥ 10G
+```
+
+`scripts/cluster-up.sh` uses the same script for its `local-*` builds, keeping only the one it just deployed. To see what a run would remove without removing anything, prefix it with `DRY_RUN=1`.
+
 ### Shipping a ticket with `/ship`
 
 After `/verify` and `/code-review`, the agent's `/ship` skill ([`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md)) runs the rest of this section in order. The same steps work by hand:
@@ -177,6 +194,7 @@ What CMS-18 needed for events-service, in order:
 | Symptom | Likely cause / fix |
 |---|---|
 | Deploy job stuck in "Queued" | Runner offline: `sudo ~/actions-runner/svc.sh status`, then `start` |
+| A Deploy job fails before any step runs, or `no space left on device` | Disk full. `df -h /`, then `docker system df` on the host and after `eval "$(minikube docker-env)"`. Old deploy images: `scripts/prune-deploy-images.sh <release> <image>`, once on the host and once after `eval "$(minikube docker-env)"` (the `/ship` skill, step 2, has the loop). Build cache: `docker builder prune -af`. Never `docker image prune -a` on the host: it deletes the untagged `kicbase` image minikube runs on |
 | `docker: permission denied` in runner | Runner user not in `docker` group: `sudo usermod -aG docker $USER`, then restart the service |
 | `kubernetes cluster unreachable` | minikube stopped: `minikube start` |
 | `helm: command not found` | Runner PATH is stale; see the note in setup step 1 |
@@ -228,3 +246,41 @@ both files still exist and are long enough. The script can't tell whether a link
 That's the split this whole workflow uses: mechanical checks for what a machine can
 decide, review for the rest. Undo with `git checkout -- apps/events-service/src/domain/Attendance.ts`.
 
+## Exercise: the image cleanup
+
+Predict what Deploy's **Remove superseded images** step would remove, then check. Every
+command here is read-only: `DRY_RUN=1` makes the script print "would remove" and stop.
+
+```bash
+helm history web --max 3            # REVISION, STATUS (deployed / superseded / failed), DESCRIPTION
+for r in $(helm history web --max 3 -o json | jq -r '.[].revision'); do
+  echo "$r $(helm get values web --revision "$r" --all -o json | jq -c '{r: .image.repository, t: .image.tag}')"
+done
+# 35 {"r":"ghcr.io/renchi/church-cms/web","t":"<sha>"}      ← a CI deploy
+# 36 {"r":"church-cms-web","t":"local-…"}                  ← a cluster-up.sh (/verify) build
+# 37 {"r":"church-cms-web","t":"local-…"}                  ← re-run, same build: same tag
+```
+
+Write down which images the newest two revisions use. Then:
+
+```bash
+DRY_RUN=1 scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web
+eval "$(minikube docker-env)"
+DRY_RUN=1 scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web
+DRY_RUN=1 scripts/prune-deploy-images.sh web church-cms-web
+eval "$(minikube docker-env -u)"
+#   would remove …:<tag>          ← only tags outside the newest two revisions
+# …: kept <tags> (newest 2 revision(s) of 'web'), would remove N
+DRY_RUN=1 scripts/prune-deploy-images.sh nope ghcr.io/renchi/church-cms/web; echo "exit=$?"
+# Error: release: not found
+# exit=1                          ← fails closed: no history, nothing removed
+```
+
+Expected: the "kept" list is exactly the images you wrote down, per repository. After two
+`/verify` runs in a row, both newest revisions are `local-*` builds, so even the ghcr image
+of the last CI deploy shows as "would remove". That's fine: no Pod runs it, and the
+registry still has it.
+
+Then think it through: Deploy F fails and Helm rolls back to E. Deploy G succeeds. Which
+images does the next cleanup keep? (G's and E's. F's revision is `failed`, so it doesn't
+count, and F's image goes.)

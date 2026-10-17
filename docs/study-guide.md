@@ -455,7 +455,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:22`](../charts/web/values.yaml#L22)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:374`](../scripts/cluster-up.sh#L374)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:377`](../scripts/cluster-up.sh#L377)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -678,6 +678,10 @@ can each pass alone and still break when combined, and this catches that.
 2. `deploy` (one job per service) runs `docker build`, then `docker push` to
    `ghcr.io/renchi/church-cms/<svc>:<commit-sha>`, then
    `helm upgrade --install --wait --rollback-on-failure`.
+3. After a successful upgrade, `scripts/prune-deploy-images.sh` removes that service's
+   old images on the host and inside minikube. It keeps the two tags `helm history` says
+   were deployed most recently (now, and what a `helm rollback` would need); failed
+   revisions don't count. A final `cleanup` job clears old build cache once per deploy.
 
 Tagging by **commit SHA** (not `latest`) means every deploy is a real change that
 Kubernetes rolls out, and `kubectl get deploy -o jsonpath='{..image}'` tells you exactly
@@ -706,6 +710,9 @@ Because the repo is public, the security rules matter:
 | Pods `ImagePullBackOff` / `unauthorized` | Private registry images need credentials, so we made the packages public |
 | Helm 4 warning: `--atomic` deprecated | Watch tool deprecations in logs; renamed to `--rollback-on-failure` |
 | The ticket said "kubeconfig secret" | Tickets can be wrong about *how*. Keep the *goal* and record the deviation (PR + Linear comment) |
+| After the CMS-26 deploy the runner's disk was at **99%** (0.9 GB free), and the documented `docker builder prune` had freed **0 B** a few hours before | Two things fill a CI machine: build cache *and* the images themselves. Every deploy added a ~1.3 GB `<sha>` image per service, twice (built on the host, pulled into minikube), and nothing removed them. Deploy now prunes them itself, keeping the rollback target. Lesson: when you make artefacts unique per commit (good for traceability), you also own deleting them. Never reach for `docker image prune -a` here: minikube's own container runs on an untagged image |
+| Code review of that cleanup: the first version picked "the previous image" by creation date | Dates don't say what was *deployed*: a cache-hit rebuild keeps an old date, and an image from a failed, rolled-back deploy is newer than the real rollback target. The record of what ran is `helm history`, so the script reads that. Ask "which system already knows this?" before inferring it |
+| A second review of the cleanup: a failing `helm history` gave an empty list, which read as "keep nothing" and would have deleted the running images; `eval "$(minikube docker-env)"` "succeeded" when minikube was down and pruned the host twice | A destructive script must **fail closed**: no answer means remove nothing. Two bash traps hid the failures: a command inside `mapfile < <(…)` can fail unnoticed, and `eval "$(cmd)"` succeeds when `cmd` fails, because it evals an empty string. Assign first (`x=$(cmd)`), then use it. The script also gained `DRY_RUN=1`, so you can see what it would remove before trusting it |
 
 ---
 
@@ -1426,6 +1433,8 @@ in parentheses (and the file it links) is where to look.
 - [ ] What makes a red test actually block the merge? (§8.1)
 - [ ] Why does Deploy wait for CI on `main` instead of running on the push? (§8.2)
 - [ ] Why tag images with the commit SHA instead of `latest`? (§8.2)
+- [ ] SHA tags made every image unique. What did that cost, and which two images does Deploy keep per service? (§8.2, §8.4)
+- [ ] Why is `docker image prune -a` dangerous on this machine? (§8.4)
 - [ ] Why can't GitHub's cloud runners deploy to minikube, and how is the self-hosted runner kept safe? (§8.3)
 
 **Observability**
