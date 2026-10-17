@@ -278,7 +278,7 @@ That's why `DATABASE_URL` differs by context:
 
 - **Inside the stack** (the compose file / raw `docker run`): `@members-db:5432`
 - **Running the service directly on your machine** (`pnpm --filter members-service dev`,
-  using [`apps/members-service/.env`](../apps/members-service/.env)): `@localhost:5432`,
+  using `apps/members-service/.env`, copied from [`.env.example`](../apps/members-service/.env.example)): `@localhost:5432`,
   because then the service is a host process and the published port `5432:5432`
   bridges it to the container.
 

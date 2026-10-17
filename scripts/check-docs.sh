@@ -56,6 +56,12 @@ for doc in "${docs[@]}"; do
       err "$doc:$lineno → $target: $resolved does not exist"
       continue
     fi
+    # A gitignored file (.env, build output) exists only on this machine: on GitHub
+    # and in CI's fresh checkout the link is broken. New, untracked files are fine.
+    if git check-ignore -q "$resolved"; then
+      err "$doc:$lineno → $target: $resolved is gitignored, so the link only works on this machine"
+      continue
+    fi
 
     # Line anchors look like #L52 or #L52-L60 (GitHub's format). Check the last line.
     if [[ "$anchor" =~ ^L([0-9]+)(-L([0-9]+))?$ ]]; then
