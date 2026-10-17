@@ -179,11 +179,21 @@ jobs:
       - name: Remove superseded images
         continue-on-error: true
         run: |
-          scripts/prune-deploy-images.sh "${{ matrix.service }}" "$IMAGE" \
-            || echo "::warning::image cleanup failed on the host for ${{ matrix.service }}"
-          eval "$(minikube docker-env)"
-          scripts/prune-deploy-images.sh "${{ matrix.service }}" "$IMAGE" \
-            || echo "::warning::image cleanup failed in minikube for ${{ matrix.service }}"
+          # Local repository names used by scripts/cluster-up.sh (web's differs).
+          local_repo="${{ matrix.service }}"; [[ "$local_repo" == web ]] && local_repo=church-cms-web
+          prune() { scripts/prune-deploy-images.sh "${{ matrix.service }}" "$@" \
+                      || echo "::warning::image cleanup failed ($*) for ${{ matrix.service }}"; }
+          prune "$IMAGE"                       # host: where Deploy builds
+          # Check docker-env itself: `eval "$(…)"` of a failed command evals "" and
+          # succeeds, and the "minikube" prune would silently hit the host again.
+          if minikube_env=$(minikube docker-env); then
+            eval "$minikube_env"
+            prune "$IMAGE"                     # minikube: where the Pods pull it
+            prune "$local_repo"                # minikube: local-* builds left by /verify
+            eval "$(minikube docker-env -u)"
+          else
+            echo "::warning::minikube docker-env failed: minikube's images were not cleaned"
+          fi
 
       - name: Summary
         if: always()
@@ -207,10 +217,19 @@ jobs:
     steps:
       - name: Prune build cache and report disk
         run: |
-          docker builder prune -af --filter until=24h >/dev/null
-          eval "$(minikube docker-env)"
-          docker builder prune -af --filter until=24h >/dev/null
-          eval "$(minikube docker-env -u)"
+          # The "Total" line says how much each prune reclaimed, per daemon.
+          host=$(docker builder prune -af --filter until=24h | tail -1)
+          if minikube_env=$(minikube docker-env); then
+            eval "$minikube_env"
+            mk=$(docker builder prune -af --filter until=24h | tail -1)
+            eval "$(minikube docker-env -u)"
+          else
+            mk="skipped: minikube docker-env failed"
+            echo "::warning::$mk"
+          fi
           free=$(df -h / | awk 'NR == 2 { print $4 }')
-          echo "Free disk after deploy: $free"
-          echo "### Disk: $free free on the runner (keep ≥ 10G)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Build cache: host $host · minikube $mk · free disk $free"
+          {
+            echo "### Disk after deploy: $free free (keep ≥ 10G)"
+            echo "- Build cache reclaimed: host \`$host\`, minikube \`$mk\`"
+          } >> "$GITHUB_STEP_SUMMARY"

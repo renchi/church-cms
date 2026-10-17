@@ -25,12 +25,23 @@ df -h /     # Avail should be ≥ 10G. A Deploy that rebuilds all three images n
 If less than ~10 GB is free, tell the user before pushing and offer the cleanup. Two things fill the disk: build cache, and old deploy images (about 1.3 GB per service per deploy, on the host and inside minikube). `scripts/prune-deploy-images.sh <release> <image>` removes the second kind, keeping the tags Helm deployed most recently (read from `helm history`, so it's right even after `/verify` deployed `local-*` builds). Deploy runs it after every upgrade, so leftovers come from older deploys or interrupted runs.
 
 ```bash
+DRY_RUN=1 scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web   # optional: see what would go first
 docker builder prune -af
 for s in members-service events-service web; do scripts/prune-deploy-images.sh "$s" "ghcr.io/renchi/church-cms/$s"; done
-eval "$(minikube docker-env)" && docker builder prune -af
-for s in members-service events-service web; do scripts/prune-deploy-images.sh "$s" "ghcr.io/renchi/church-cms/$s"; done
-eval "$(minikube docker-env -u)"
+if env=$(minikube docker-env); then        # not `eval "$(…)"`: a failure there would hit the host twice
+  eval "$env"
+  docker builder prune -af
+  for s in members-service events-service web; do scripts/prune-deploy-images.sh "$s" "ghcr.io/renchi/church-cms/$s"; done
+  for p in members-service:members-service events-service:events-service web:church-cms-web; do
+    scripts/prune-deploy-images.sh "${p%%:*}" "${p#*:}"     # local-* builds from /verify
+  done
+  eval "$(minikube docker-env -u)"
+else
+  echo "minikube unreachable: its images were NOT cleaned"   # tell the user; don't report the disk as fixed
+fi
 ```
+
+The script fails closed: if Helm or Docker doesn't answer it removes nothing and exits non-zero, so treat any non-zero exit as "not cleaned".
 
 Never use `docker image prune -a` on the host: minikube runs on an untagged `kicbase` image, which it deletes.
 

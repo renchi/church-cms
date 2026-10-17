@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Remove a service's old images from the current Docker daemon, keeping the ones
-# Helm has actually deployed most recently.
+# Remove a service's old deploy images from the current Docker daemon, keeping the
+# ones its newest Helm revisions run.
 #
 #   scripts/prune-deploy-images.sh <release> <image> [keep]
+#   DRY_RUN=1 scripts/prune-deploy-images.sh …    # print what would be removed, remove nothing
 #   e.g. scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web       # Deploy: keep 2
 #        scripts/prune-deploy-images.sh web church-cms-web 1                     # cluster-up.sh
 #
@@ -10,54 +11,71 @@
 # minikube), and nothing removed the old ones. After CMS-26 the 62 GB disk was at 99%.
 # `docker builder prune` doesn't help with this: it only clears build cache.
 #
-# Which tags are kept: the newest <keep> distinct tags of <image> that appear in the
-# release's Helm history with status "deployed" or "superseded" (default 2: what's
-# running now, and what `helm rollback` would go back to). Failed revisions don't
-# count, so a deploy that failed and was rolled back can't push the real rollback
-# target out. Image build times aren't used: a cache-hit rebuild keeps an old
-# CreatedAt, so they don't say which tag was deployed when. The "main" tag (Deploy's
-# moving tag) is always kept.
+# What's kept: the images used by the release's newest <keep> successful revisions
+# ("deployed" or "superseded" in `helm history`; default 2 = what runs now, and what
+# `helm rollback` goes back to), plus "main". Failed revisions don't count, so a
+# failed, rolled-back deploy can't push the real rollback target out. Image build
+# dates aren't used: a cache-hit rebuild keeps an old date.
 #
-# Safe by construction: it only removes tags of the one repository it's given, and
-# only when the daemon answered. Never swap this for `docker image prune -a`: the
+# What can be removed: only deploy tags, a 40-character commit SHA (Deploy) or
+# "local-…" (cluster-up.sh), of the one repository given. A hand-made tag like
+# ":debug" is never touched. Never swap this for `docker image prune -a`: the
 # minikube container itself runs on an *untagged* kicbase image, which that deletes.
+#
+# Local images are a cache of the registry: a removed ghcr tag can always be pulled
+# again (pullPolicy IfNotPresent), so "keep the newest revisions" is about disk, not
+# about losing anything. Only local-* builds exist nowhere else; they're rebuilt.
+#
+# Fails closed: if Helm or Docker doesn't answer, or no revision of the release
+# can be read, it removes nothing and exits non-zero.
 set -euo pipefail
 
-release="${1:?usage: $0 <release> <image> [keep]}"
-image="${2:?usage: $0 <release> <image> [keep]}"
+usage="usage: $0 <release> <image> [keep≥1]"
+release="${1:?$usage}"
+image="${2:?$usage}"
 keep_count="${3:-2}"
+[[ "$keep_count" =~ ^[1-9][0-9]*$ ]] || { echo "$usage (got keep='$keep_count')" >&2; exit 2; }
 
-# Newest first. --max bounds the work: older revisions can't be among the kept ones.
-mapfile -t revisions < <(
-  helm history "$release" --max 20 -o json \
-    | jq -r '.[] | select(.status == "deployed" or .status == "superseded") | .revision' \
-    | sort -rn
-)
+# Plain assignments, not `mapfile < <(...)`: a failing command inside a process
+# substitution is ignored, and an empty answer would mean "keep nothing".
+history=$(helm history "$release" --max 20 -o json)
+revisions=$(jq -r --argjson n "$keep_count" \
+  '[.[] | select(.status == "deployed" or .status == "superseded") | .revision]
+   | sort | reverse | .[:$n] | .[]' <<<"$history")
+[[ -n "$revisions" ]] || { echo "$release: no successful revision in helm history; removing nothing" >&2; exit 1; }
 
 keep=(main)
-for rev in "${revisions[@]}"; do
-  (( ${#keep[@]} > keep_count )) && break
-  values=$(helm get values "$release" --revision "$rev" -o json)
+while IFS= read -r rev; do
+  # --all: the computed values, so a revision that relied on the chart's default
+  # repository (e.g. `helm upgrade --set image.tag=…`) still counts.
+  values=$(helm get values "$release" --revision "$rev" --all -o json)
   [[ "$(jq -r '.image.repository // ""' <<<"$values")" == "$image" ]] || continue
   tag=$(jq -r '.image.tag // ""' <<<"$values")
-  [[ -n "$tag" && " ${keep[*]} " != *" $tag "* ]] && keep+=("$tag")
-done
+  [[ " ${keep[*]} " == *" $tag "* ]] || keep+=("$tag")   # two revisions can share a tag
+done <<<"$revisions"
 
-# A plain assignment (not `mapfile < <(...)`), so a daemon that doesn't answer fails
-# the script instead of looking like "nothing to remove".
 listing=$(docker images "$image" --format '{{.Tag}}')
 
-removed=0
+removed=0 failed=0
 while IFS= read -r tag; do
-  [[ -z "$tag" || "$tag" == "<none>" || " ${keep[*]} " == *" $tag "* ]] && continue
-  # A tag still used by a container (a Pod that hasn't rolled yet) can't be removed;
-  # that's fine, it goes on the next run.
-  if docker image rm "$image:$tag" >/dev/null 2>&1; then
+  [[ "$tag" =~ ^([0-9a-f]{40}|local-.+)$ ]] || continue     # deploy tags only
+  [[ " ${keep[*]} " == *" $tag "* ]] && continue
+  if [[ -n "${DRY_RUN:-}" ]]; then
+    echo "  would remove $image:$tag"
+    removed=$((removed + 1))
+  elif out=$(docker image rm "$image:$tag" 2>&1); then
     echo "  removed $image:$tag"
     removed=$((removed + 1))
+  elif [[ "$out" == *"is being used"* || "$out" == *"must be forced"* ]]; then
+    # A container still uses it (a Pod that hasn't rolled yet): it goes on a later run.
+    echo "  kept $image:$tag (in use by a container)"
   else
-    echo "  kept $image:$tag (still in use)"
+    echo "  could not remove $image:$tag: $out" >&2
+    failed=$((failed + 1))
   fi
 done <<<"$listing"
 
-echo "$image: kept ${keep[*]:1} (from helm history of '$release'), removed $removed"
+kept=("${keep[@]:1}")
+verb=removed; [[ -n "${DRY_RUN:-}" ]] && verb="would remove"
+echo "$image: kept ${kept[*]:-nothing of this repository} (newest $keep_count revision(s) of '$release'), $verb $removed"
+(( failed == 0 )) || exit 1

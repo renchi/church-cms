@@ -124,18 +124,20 @@ Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA
 
 Unique tags also mean unique images, about 1.3 GB per service per deploy, stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. After a successful upgrade, each deploy job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places.
 
-Which tags it keeps comes from **`helm history`**, not from image dates: the newest two tags the release actually deployed (what's running, and what `helm rollback` would go back to), plus `main`. Failed revisions don't count. Image build times can't answer "what was deployed when": a rebuild that hits the cache keeps the old creation time. The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then clears build cache older than 24 h, once for the whole deploy, and writes the free disk to the run summary:
+Which tags it keeps comes from **`helm history`**, not from image dates: the images used by the release's newest two successful revisions (what's running, and what `helm rollback` would go back to), plus `main`. Failed revisions don't count. Image build times can't answer "what was deployed when": a rebuild that hits the cache keeps the old creation time. It only ever removes *deploy tags* (a commit SHA, or `local-…` from `cluster-up.sh`), so a hand-made `:debug` tag survives. And it **fails closed**: if Helm or Docker doesn't answer, it removes nothing and exits non-zero. Inside minikube it also clears the `local-*` builds `/verify` left behind. A removed ghcr image is never lost: it's still in the registry, and a rollback pulls it again.
+
+The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then clears build cache older than 24 h, once for the whole deploy, and writes what it reclaimed and the free disk to the run summary:
 
 ```
 # deploy (web) › Remove superseded images
 #   removed ghcr.io/renchi/church-cms/web:<an older sha>      ← one line per removed tag, if any
-# ghcr.io/renchi/church-cms/web: kept <this sha> <previous sha> (from helm history of 'web'), removed 1
-# (the same again for minikube's Docker)
+# ghcr.io/renchi/church-cms/web: kept <this sha> <previous sha> (newest 2 revision(s) of 'web'), removed 1
+# (then the same inside minikube, for ghcr.io/… and for church-cms-web's local-* builds)
 # cleanup › Prune build cache and report disk
-# Free disk after deploy: 16G                                   ← should stay ≥ 10G
+# Build cache: host Total: 1.2GB · minikube Total: 0B · free disk 16G      ← keep ≥ 10G
 ```
 
-`scripts/cluster-up.sh` uses the same script for its `local-*` builds, keeping only the one it just deployed.
+`scripts/cluster-up.sh` uses the same script for its `local-*` builds, keeping only the one it just deployed. To see what a run would remove without removing anything, prefix it with `DRY_RUN=1`.
 
 ### Shipping a ticket with `/ship`
 
@@ -246,33 +248,39 @@ decide, review for the rest. Undo with `git checkout -- apps/events-service/src/
 
 ## Exercise: the image cleanup
 
-What Deploy's **Remove superseded images** step decides, on tags you can afford to lose.
-Run it in **bash** (in zsh, `$I:old` is read as a `:o` modifier). The fake tags are
-extra names for an image that stays, so nothing real is deleted.
+Predict what Deploy's **Remove superseded images** step would remove, then check. Every
+command here is read-only: `DRY_RUN=1` makes the script print "would remove" and stop.
 
 ```bash
-bash
-I=ghcr.io/renchi/church-cms/web
-helm history web --max 5          # the STATUS column: deployed, superseded, failed
-helm get values web -o json | jq -c '.image'
-# {"pullPolicy":"IfNotPresent","repository":"ghcr.io/renchi/church-cms/web","tag":"<sha>"}
-#   ← after /verify this says church-cms-web / local-…; the next step still works
-
-T=$(docker images "$I" --format '{{.Tag}}' | grep -v main | head -1)   # any real tag to copy
-docker tag "$I:$T" "$I:fake-newest"; docker tag "$I:$T" "$I:fake-oldest"
-scripts/prune-deploy-images.sh web "$I"
-#   removed ghcr.io/renchi/church-cms/web:fake-newest
-#   removed ghcr.io/renchi/church-cms/web:fake-oldest
-# ghcr.io/renchi/church-cms/web: kept <sha> … (from helm history of 'web'), removed 2
-exit
+helm history web --max 3            # REVISION, STATUS (deployed / superseded / failed), DESCRIPTION
+for r in $(helm history web --max 3 -o json | jq -r '.[].revision'); do
+  echo "$r $(helm get values web --revision "$r" --all -o json | jq -c '{r: .image.repository, t: .image.tag}')"
+done
+# 35 {"r":"ghcr.io/renchi/church-cms/web","t":"<sha>"}      ← a CI deploy
+# 36 {"r":"church-cms-web","t":"local-…"}                  ← a cluster-up.sh (/verify) build
+# 37 {"r":"church-cms-web","t":"local-…"}                  ← re-run, same build: same tag
 ```
 
-Expected: both fake tags go, whatever their names or the order you created them in,
-because neither was ever deployed by Helm. The kept tags are the ones `helm history`
-lists as deployed or superseded for that repository. A cleanup that guessed "previous"
-from image dates would have had to pick between two images with the *same* creation time
-(they're one image), and the answer would come down to how the tag names sort.
+Write down which images the newest two revisions use. Then:
+
+```bash
+DRY_RUN=1 scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web
+eval "$(minikube docker-env)"
+DRY_RUN=1 scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web
+DRY_RUN=1 scripts/prune-deploy-images.sh web church-cms-web
+eval "$(minikube docker-env -u)"
+#   would remove …:<tag>          ← only tags outside the newest two revisions
+# …: kept <tags> (newest 2 revision(s) of 'web'), would remove N
+DRY_RUN=1 scripts/prune-deploy-images.sh nope ghcr.io/renchi/church-cms/web; echo "exit=$?"
+# Error: release: not found
+# exit=1                          ← fails closed: no history, nothing removed
+```
+
+Expected: the "kept" list is exactly the images you wrote down, per repository. After two
+`/verify` runs in a row, both newest revisions are `local-*` builds, so even the ghcr image
+of the last CI deploy shows as "would remove". That's fine: no Pod runs it, and the
+registry still has it.
 
 Then think it through: Deploy F fails and Helm rolls back to E. Deploy G succeeds. Which
-two tags does the next cleanup keep? (G and E. F's revision is `failed`, so it doesn't
-count, and its image is removed.)
+images does the next cleanup keep? (G's and E's. F's revision is `failed`, so it doesn't
+count, and F's image goes.)
