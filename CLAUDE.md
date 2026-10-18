@@ -27,6 +27,7 @@ scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postg
 scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, only check tunnel + /etc/hosts
 scripts/check-docs.sh                    # broken doc links, moved line links, missing study-guide update (also runs in CI)
 scripts/check-env.sh                     # every env var an app reads is set by its Helm chart (also runs in CI)
+scripts/watch-deploy.sh [sha]            # watch the Deploy run for main's newest commit (or <sha>), in your own terminal
 ```
 
 ## Workflow
@@ -38,7 +39,7 @@ scripts/check-env.sh                     # every env var an app reads is set by 
 | Implement | Normal editing          | After the plan is approved. A hook lints each edited `.ts` file                                                                    |
 | Verify    | `/verify`               | After implementing. Proves the feature works in the running app (Pods on this build's image tag) and that the docs pass `scripts/check-docs.sh` |
 | Review    | `/code-review`          | Before opening a PR. Fix all findings                                                                                              |
-| Ship      | `/ship`                 | After review. Checks disk, opens the PR from the template, watches CI, merges **only on the user's go-ahead**, watches Deploy (`docs/ci-cd.md`), marks the ticket Done |
+| Ship      | `/ship`                 | After review. Checks disk, opens the PR from the template, watches CI, merges **only on the user's go-ahead**, hands you `scripts/watch-deploy.sh` for Deploy (you watch it, it doesn't block), marks the ticket Done |
 
 Never work directly on main. Scaffold new services with `/new-service`, and only for services marked Active below.
 

@@ -108,7 +108,7 @@ All the places to watch the pipeline and cluster (URLs, dashboards, commands) ar
 | I want to… | Do |
 |---|---|
 | See CI on my PR | `gh pr checks --watch` |
-| Watch a deploy | `gh run watch` (or the **Actions** tab) |
+| Watch a deploy | `scripts/watch-deploy.sh` (or the **Actions** tab). `/ship` hands you this after the merge instead of waiting on Deploy itself |
 | Redeploy everything without a code change | `gh workflow run deploy.yml` |
 | See what image is running | `kubectl get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{..image}{"\n"}{end}'` |
 | See migration output | `kubectl logs <members-pod> -c migrate` (same for an events-service Pod) |
@@ -235,7 +235,9 @@ To bring it back by hand (for `kubectl`, Grafana, `/verify`): `minikube start`, 
 
 | Symptom | Likely cause / fix |
 |---|---|
-| Deploy job stuck in "Queued" | Runner offline: `sudo ~/actions-runner/svc.sh status`, then `start` |
+| Deploy job stuck in "Queued" | Runner offline: `sudo ~/actions-runner/svc.sh status`, then `start`. If the service stops again by itself, read why: `journalctl -u 'actions.runner.*' -n 20` (next two rows) |
+| Runner log: "The runner registration has been deleted from the server" | Often **not** true. Read the detail in `~/actions-runner/_diag/Runner_*.log` (newest): `The token expired on … Current server time is …` means this machine's clock is wrong, so every login token it signs is already expired. `timedatectl` → `System clock synchronized: no`, `NTP service: inactive`. Fix: `sudo timedatectl set-ntp true`, then restart the runner service. Only if the log has no clock error, re-register: `./config.sh remove --token $(gh api -X POST 'repos/{owner}/{repo}/actions/runners/remove-token' -q .token)`, then `./config.sh` again (setup step 4) |
+| A Deploy job cancelled: "The runner has received a shutdown signal" | The runner service was stopped or restarted mid-job, not a code problem. When the run has finished: `gh run rerun <run-id> --failed` |
 | A Deploy job fails before any step runs, or `no space left on device` | Disk full. `df -h /`, then `docker system df` on the host and after `eval "$(minikube docker-env)"`. Old deploy images: `scripts/prune-deploy-images.sh <release> <image>`, once on the host and once after `eval "$(minikube docker-env)"` (the `/ship` skill, step 2, has the loop). Build cache: `docker builder prune -af`. Never `docker image prune -a` on the host: it deletes the untagged `kicbase` image minikube runs on |
 | `docker: permission denied` in runner | Runner user not in `docker` group: `sudo usermod -aG docker $USER`, then restart the service |
 | `kubernetes cluster unreachable` | minikube stopped (after a reboot, usually): `minikube start`. Deploy does this itself since CMS-33; see [After a reboot](#after-a-reboot) |
