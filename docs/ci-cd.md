@@ -205,7 +205,14 @@ minikube ssh -- df -h /var               # 5. minikube's /var IS the host disk
 # /dev/sda2   62G   52G  7.3G  88% /var  ← same device: deleting inside minikube frees host disk
 ```
 
-Subtract 2 and 3 from 1. What's left lives in folders only root can read (`/var/lib/docker`, `/var/lib/containerd`): `sudo du -sh /var/lib/docker/* /var/lib/containerd/*` shows it.
+Subtract 2 and 3 from 1. What's left lives in folders only root can read. To measure them (`sh -c` so that *root* expands the `*`: your own shell can't list those folders, and zsh stops with `no matches found`):
+
+```bash
+sudo sh -c 'du -xsh /var/lib/docker /var/lib/containerd /var/log /var/cache' | sort -h
+# 472M /var/log · 513M /var/cache · 5.0G /var/lib/containerd · 12G /var/lib/docker
+```
+
+Docker 29 uses the **containerd image store** (`docker info` → `io.containerd.snapshotter.v1`), so the host's images and build cache live in `/var/lib/containerd`, not `/var/lib/docker`. `/var/lib/docker` is mostly the `minikube` volume. On 2026-10-18 these folders plus the readable ones (and `/var/lib/snapd`, 2.7 G) added up to `df`'s total exactly: nothing was missing. The earlier "gap" was the difference between what `docker system df` *reports* (shared layers counted twice, compressed vs. unpacked) and what its folders *use*.
 
 Then ask *which layer* is big and *how many copies* exist:
 
@@ -350,7 +357,7 @@ count, and F's image goes.)
 
 Do the accounting from [Where the runner's disk goes](#where-the-runners-disk-goes) and write the numbers down before reading on.
 
-1. `df -h /` used, minus the readable folders, minus `docker system df` (host) and the `minikube` volume. How much is left unexplained? (Expected: a few GB, in root-only `/var/lib/containerd` and `/var/lib/docker`.)
+1. `df -h /` used, minus the readable folders, minus `docker system df` (host) and the `minikube` volume. How much is left unexplained? (Expected: a few GB, in root-only `/var/lib/containerd` and `/var/lib/docker`.) Then measure those with `sudo sh -c 'du -xsh …'`: does everything now add up to `df`? (Expected: yes, within a few hundred MB.)
 2. Pick the members-service image inside minikube and find its biggest layer:
    ```bash
    eval "$(minikube docker-env)"
