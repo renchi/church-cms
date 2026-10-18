@@ -51,11 +51,14 @@ WORKDIR /repo
 # changed (not package.json), Docker skips straight past the install.
 # If we copied everything first, any source file change would bust this cache.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
-COPY apps/members-service/package.json ./apps/members-service/package.json
-# pnpm validates the lockfile against every workspace package (apps/*).
-# Copy the other apps' manifests so pnpm can resolve the full workspace graph.
-COPY apps/web/package.json             ./apps/web/package.json
+# pnpm validates the lockfile against every workspace package (apps/*), so every
+# app's manifest is copied, not just this one. SAME lines in the SAME order in all
+# three Dockerfiles (members-service, events-service, web), from FROM down to
+# "pnpm install": identical steps make an identical install layer, which the three
+# builds then share as ONE cache entry (~930 MB) instead of three (CMS-33).
 COPY apps/events-service/package.json  ./apps/events-service/package.json
+COPY apps/members-service/package.json ./apps/members-service/package.json
+COPY apps/web/package.json             ./apps/web/package.json
 # The shared @cms/events package (ADR-0010) is copied WHOLE, source included,
 # before the install: pnpm runs its "prepare" script (tsc) during install, which
 # builds packages/events/dist. It's small and rarely changes, so this costs
@@ -83,10 +86,35 @@ RUN pnpm --filter members-service exec prisma generate
 RUN pnpm --filter members-service build
 
 # =============================================================================
-# Stage 2 — runner: a clean image that only contains what the app needs to run
+# Stage 2 — deploy: pick out only the packages the service needs at runtime
 # =============================================================================
 
-# A second FROM starts a brand-new filesystem — the builder's layers are gone.
+# The builder's /repo/node_modules holds EVERY package of the whole monorepo:
+# web's Next.js, vitest, Testcontainers, ESLint, TypeScript... ~840 MB. Copying it
+# into the runner (as this file did until CMS-33) made each image ~1.3 GB.
+#
+# "pnpm deploy" builds a standalone folder for ONE workspace package:
+#   --filter members-service   which package
+#   --prod                     only its "dependencies", none of its "devDependencies"
+#   /prod/members-service      where to write it: the app folder, with node_modules
+# What goes into that folder besides node_modules is the package's "files" list
+# (apps/members-service/package.json): dist, generated and prisma. So /prod/members-service is
+# the complete app, and the runner copies it in one step.
+# Workspace dependencies (@cms/events) are copied in as real folders instead of
+# symlinks into /repo/packages, so the result works from any path. Its
+# "files": ["dist"] (packages/events/package.json) limits that copy to the compiled
+# code: without it, src/, tsconfig.json and the vitest config come along too.
+#
+# A separate stage (not more RUN lines in "builder") because docker-compose's dev
+# setup stops at "target: builder" and needs the full install there.
+FROM builder AS deploy
+RUN pnpm --filter members-service deploy --prod /prod/members-service
+
+# =============================================================================
+# Stage 3 — runner: a clean image that only contains what the app needs to run
+# =============================================================================
+
+# A new FROM starts a brand-new filesystem — the earlier stages' layers are gone.
 # We again use node:20-alpine so the base is consistent.
 FROM node:20-alpine AS runner
 
@@ -94,38 +122,31 @@ FROM node:20-alpine AS runner
 # tini: a tiny "init" process (PID 1 manager). Explained more below at ENTRYPOINT.
 RUN apk add --no-cache openssl tini
 
-# Keep the SAME absolute path as the builder. pnpm doesn't copy packages into
-# each app folder; it stores them once in /repo/node_modules and the service
-# folder has symlinks pointing there. Preserving the path means symlinks resolve.
-WORKDIR /repo/apps/members-service
+# The deploy stage's output doesn't depend on the monorepo layout, so the app
+# lives in a plain /app folder.
+WORKDIR /app
 
 # ENV sets an environment variable that persists into the running container.
 # NODE_ENV=production tells Node.js and most libraries to disable debug output,
 # enable performance optimisations, and skip dev-only checks.
 ENV NODE_ENV=production
 
-# COPY --from=builder pulls files from the "builder" stage, not the host machine.
+# COPY --from=<stage> pulls files from an earlier stage, not the host machine.
 # --chown=node:node sets file ownership to the "node" user (ships with the base
 # image) so our app can read its own files when we switch to that user below.
 #
-# We copy four things:
-#   /repo/node_modules       — the real package store: all installed packages live
-#                              here, including the Prisma client + engine binary
-#   ./node_modules           — the service's own folder: symlinks that point into
-#                              the store above (this is how pnpm workspaces work)
-#   ./dist                   — our compiled JavaScript (output of "tsc")
-#   ./prisma                 — the schema, kept so "prisma migrate deploy" can run later
-COPY --from=builder --chown=node:node /repo/node_modules                 /repo/node_modules
-COPY --from=builder --chown=node:node /repo/apps/members-service/node_modules ./node_modules
-# @cms/events: the service's node_modules/@cms/events is a symlink to
-# /repo/packages/events (a pnpm workspace link), so the package's built dist,
-# package.json and its own node_modules must exist at that same path.
-COPY --from=builder --chown=node:node /repo/packages/events               /repo/packages/events
-COPY --from=builder --chown=node:node /repo/apps/members-service/dist         ./dist
-COPY --from=builder --chown=node:node /repo/apps/members-service/prisma       ./prisma
-# The Prisma client, generated into this service's own folder instead of the
-# shared node_modules (see the `output` comment in prisma/schema.prisma).
-COPY --from=builder --chown=node:node /repo/apps/members-service/generated    ./generated
+# One COPY: the deploy stage's folder is the whole app. What's in it:
+#   ./node_modules — the runtime packages only, including the Prisma CLI that the
+#                    migration init container runs (which is why "prisma" is a
+#                    dependency, not a devDependency)
+#   ./package.json
+#   ./dist         — our compiled JavaScript (output of "tsc")
+#   ./prisma       — the schema and migrations, for "prisma migrate deploy"
+#   ./generated    — the Prisma client, generated into this service's own folder
+#                    instead of node_modules (see the `output` comment in
+#                    prisma/schema.prisma). It finds @prisma/client's runtime in
+#                    ./node_modules, one folder up.
+COPY --from=deploy --chown=node:node /prod/members-service ./
 
 # Switch to the unprivileged "node" user for all instructions from here on.
 # Best practice: if an attacker exploits a bug in our app, they get a limited

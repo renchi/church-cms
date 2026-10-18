@@ -4,7 +4,7 @@
 # both exist in the same directory.  You never need to pass -f flags; just run:
 #   docker compose up --build
 #
-# This file replaces the production "next build + next start" setup with a
+# This file replaces the production "next build + standalone server" setup with a
 # dev server that watches source files and reloads on every change.
 #
 # How the merge works:
@@ -27,8 +27,8 @@ services:
       target: builder
 
     # Override the CMD from the Dockerfile.
-    # In production (docker-compose.yml): next start -p 3000
-    # In development (this file):         next dev   -p 3000
+    # In production (docker-compose.yml): node apps/web/server.js (standalone output)
+    # In development (this file):         next dev -p 3000
     #
     # "next dev" watches your source files and:
     #   • recompiles changed pages on the fly (no full rebuild)

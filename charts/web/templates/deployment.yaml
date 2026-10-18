@@ -23,8 +23,9 @@ spec:
           env:
             - name: NODE_ENV
               value: {{ .Values.config.nodeEnv | quote }}
-            - name: PORT
-              value: {{ .Values.config.port | quote }}
+            # No PORT or HOSTNAME here: the standalone server's listen address
+            # (0.0.0.0:3000) is set once, by the image's ENV (apps/web/Dockerfile),
+            # and matches the containerPort, probes and Service targetPort (3000).
             # Without this the app falls back to localhost:3001 and /members shows
             # "Could not load members" (the bug fixed in CMS-26).
             - name: MEMBERS_API_URL

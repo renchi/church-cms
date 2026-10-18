@@ -126,6 +126,20 @@ ping -c 1 cms.local
 
 > **Note:** The tunnel must be running whenever you want to use `http://cms.local`. If you stop and restart minikube, simply restart the tunnel too.
 
+> **"another tunnel is already running", but none is.** minikube records each tunnel's
+> PID in `~/.minikube/tunnels.json` and refuses to start a second one while that PID is
+> alive. After a reboot the dead tunnel's PID can be handed to an unrelated process, so
+> the stale record looks alive. Check, then move the record aside and start again:
+>
+> ```bash
+> tail -3 /tmp/minikube-tunnel.log   # cluster-up.sh's tunnel log
+> # X Exiting due to SVC_TUNNEL_START: ... another tunnel is already running ... Pid: 28594
+> ps -p 28594 -o cmd                 # not "minikube tunnel"? the record is stale
+> ip route | grep 10.96              # no route = no tunnel is really running
+> mv ~/.minikube/tunnels.json ~/.minikube/tunnels.json.stale
+> scripts/cluster-up.sh --skip-build # starts the tunnel again (asks for sudo)
+> ```
+
 ---
 
 ## 4. Build Docker images inside minikube
