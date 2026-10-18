@@ -7,8 +7,9 @@
 #   e.g. scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web       # Deploy: keep 2
 #        scripts/prune-deploy-images.sh web church-cms-web 1                     # cluster-up.sh
 #
-# Why: every deploy adds a ~1.3 GB "<image>:<tag>" (built on the host, pulled into
-# minikube), and nothing removed the old ones. After CMS-26 the 62 GB disk was at 99%.
+# Why: every deploy adds an "<image>:<tag>" (~1.3 GB before CMS-33, ~0.3 GB since),
+# built on the host and pulled into minikube, and nothing removed the old ones.
+# After CMS-26 the 62 GB disk was at 99%.
 # `docker builder prune` doesn't help with this: it only clears build cache.
 #
 # What's kept: the images used by the release's newest <keep> successful revisions

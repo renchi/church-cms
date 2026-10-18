@@ -45,7 +45,10 @@ has now been exercised end to end. That is the scope of this guide.
 
 After stage 9: **CMS-26** finished the member registration workflow in the browser
 (§5.1–5.4: Server Actions, Post/Redirect/Get, and a broken-in-the-cluster list page found on
-the way). Next are CMS-27 (publish `MemberRegistered`) and CMS-20 (Communications).
+the way). **CMS-33** then went back to Docker (goal 1): the app images shrank from ~1.3 GB
+to ~0.3 GB once they stopped carrying the whole monorepo's `node_modules`, and the runner's
+disk stopped filling up (§2.5). Next are CMS-28 (Loki), CMS-27 (publish `MemberRegistered`)
+and CMS-20 (Communications).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -139,15 +142,17 @@ FROM node:20-alpine AS builder    # stage 1: install deps, compile TS, generate 
 FROM node:20-alpine AS runner     # stage 2: fresh filesystem, copy ONLY the built output
 ```
 
-The runner stage starts empty and copies just `dist/`, `node_modules`, and (for the API)
-the Prisma schema from the builder. **Build tools and dev dependencies never reach the
-shipped image** — smaller image, smaller attack surface.
+The runner stage starts empty and copies just `dist/`, the runtime packages, and (for the
+API) the Prisma schema from the earlier stages. **Build tools and dev dependencies never
+reach the shipped image** — smaller image, smaller attack surface. (That promise was only
+half kept until CMS-33: the runner copied the builder's *whole* `node_modules`, dev tools
+included. §2.5 is the story.)
 
 Concepts to be able to explain, each commented in the Dockerfiles:
 
 - **Layer caching** — copy `package.json` + lockfile and run `pnpm install` _before_
   copying source, so the slow install layer is reused when only code changes
-  ([Dockerfile:49–64](../apps/members-service/Dockerfile#L49-L64)).
+  ([Dockerfile:49–67](../apps/members-service/Dockerfile#L49-L67)).
 - **`node:20-alpine`** — Alpine is a ~5 MB base vs. ~150 MB Debian. Trade-off: it uses
   `musl` libc, so Prisma's native engine needs `openssl` installed and a musl build.
 - **`USER node`** — drop from root to an unprivileged user before running, so an app
@@ -163,10 +168,12 @@ Concepts to be able to explain, each commented in the Dockerfiles:
 ### 2.3 Why builds run from the monorepo root
 
 Both Dockerfiles must be built with `context: .` (the repo root), because the build needs
-the root `pnpm-lock.yaml` and `pnpm-workspace.yaml` to resolve the workspace. The runner
-keeps the **same absolute path** (`/repo/apps/...`) as the builder so pnpm's symlinks
-still resolve. This is a real, non-obvious consequence of using a monorepo — read the
-COPY-block comments to see it spelled out.
+the root `pnpm-lock.yaml` and `pnpm-workspace.yaml` to resolve the workspace. Inside the
+builder, an app's `node_modules` is only symlinks into `/repo/node_modules`, so copying it
+out on its own copies broken links. Until CMS-33 the runner solved that by copying the whole
+store and keeping the **same absolute path** (`/repo/apps/...`). Now a `pnpm deploy` stage
+(services) or Next's standalone output (web) produces a self-contained folder first, and the
+runner lives in a plain `/app` (§2.5). A real, non-obvious consequence of using a monorepo.
 
 ### 2.4 Docker Compose — the whole stack with one command
 
@@ -198,7 +205,7 @@ Concepts demonstrated, each commented inline:
 - **YAML anchors** (`x-members-base: &members-base` / `<<: *members-base`) — define the
   shared build/env block once, merge it into both the migrate job and the service.
 - **Override files** — [`docker-compose.override.yml`](../docker-compose.override.yml) is
-  merged automatically and swaps the web service from production `next start` to
+  merged automatically and swaps the web service from the production standalone server to
   hot-reloading `next dev` with a source bind-mount. So plain `docker compose up` gives a
   dev experience; `docker compose -f docker-compose.yml up` gives the production-shaped one.
 - **`.dockerignore`** — keeps `node_modules`, `.next`, `.env`, and tests out of the build
@@ -208,6 +215,89 @@ Concepts demonstrated, each commented inline:
 > commands** that Compose runs for you (`docker network create`, `docker volume create`,
 > `docker run ...`). Doing it by hand once is the fastest way to understand what Compose
 > abstracts.
+
+### 2.5 What's inside an image, and where it lives on disk (CMS-33)
+
+**The concept.** An image is a stack of **layers**: each `RUN`, `COPY` or `ADD` adds one,
+holding only the files that instruction changed. Layers are content-addressed, so two
+images built from the same base share those bytes on disk. "The image is 1.3 GB" therefore
+says little on its own. The questions that matter are *which layer* is big, and *how many
+copies* of it the machine keeps.
+
+Three pieces of vocabulary made the CMS-33 investigation possible:
+
+- **A pnpm workspace's `node_modules`.** pnpm installs every package of every workspace
+  app once, into the root `node_modules` (a hidden `.pnpm` store), and each app's own
+  `node_modules` is just **symlinks** into it. Copying the root store copies *everything*:
+  web's Next.js, vitest, Testcontainers, ESLint, TypeScript, for every app.
+- **`pnpm deploy --prod`** builds a standalone folder for *one* workspace package: its
+  `package.json` plus a real `node_modules` with only its `dependencies` (no dev ones).
+  Workspace packages (`@cms/events`) are copied in as real folders (trimmed to their
+  `files` list, when they declare one) instead of symlinks. **Next.js standalone output** does the same job for a Next app in a
+  different way: `next build` *traces* which files the server actually imports, and copies
+  only those next to a generated `server.js`.
+- **Two image stores.** Docker's classic store (`overlay2`, used inside minikube) keeps
+  each layer unpacked. The newer **containerd image store** (used on this host, `docker
+  info` shows `io.containerd.snapshotter.v1`) keeps the compressed download (*content*)
+  *and* the unpacked files (*snapshots*). `docker image ls --tree` shows both columns.
+  And **build cache** is not a separate pile of bytes: a cache record whose layer an image
+  also uses is "Shared" in `docker buildx du`, and deleting it frees nothing.
+
+**How we did it here.**
+
+- The investigation, read-only first: `docker history` showed the biggest layer of
+  every app image was `COPY /repo/node_modules`, **836 MB of a 1.29 GB image**. `docker
+  buildx du` showed 6.34 of the host's 6.38 GB of build cache was Shared with those images.
+  Inside minikube there were three copies of each app image's worth: the ghcr image the
+  Pods pull, the `local-*` rollback build, and its build cache. That was roughly 12 GB for
+  three small services.
+- Services: a new `deploy` stage runs
+  [`pnpm --filter members-service deploy --prod`](../apps/members-service/Dockerfile#L111).
+  The service's `"files"` list (`dist`, `generated`, `prisma`) makes that folder the whole
+  app, so the runner [copies it in one step](../apps/members-service/Dockerfile#L149).
+  [`prisma`](../apps/members-service/package.json#L32) moved to `dependencies` (the
+  migration init container runs its CLI from this image). `@cms/events` also declares
+  [`"files": ["dist"]`](../packages/events/package.json#L15), so the copy holds only its
+  compiled code, not `src/`, `tsconfig.json` and test config.
+- Web: [`output: 'standalone'`](../apps/web/next.config.mjs#L10) with
+  [`outputFileTracingRoot`](../apps/web/next.config.mjs#L16) set to the monorepo root (the
+  real package files live there). The runner copies
+  [`.next/standalone` and `.next/static`](../apps/web/Dockerfile#L147-L148) and runs
+  `node apps/web/server.js`, with [`HOSTNAME=0.0.0.0`](../apps/web/Dockerfile#L129)
+  because Docker and Kubernetes set `HOSTNAME` to the container's name.
+- Results: members 1.29 GB → **365 MB**, web 1.31 GB → **301 MB** on the host
+  (containerd store); inside minikube (`overlay2`) 893/924 MB → **243/212 MB**. Free disk
+  went from 7.3 GB to 17 GB once the old images were gone.
+- One shared install layer: the three Dockerfiles are now identical, line for line, from
+  `FROM` down to `pnpm install` (web even installs `openssl` it doesn't need, in the builder
+  only). Identical steps give an identical layer, so the three builds share **one** ~930 MB
+  cache entry instead of three. The build-cache cap ([`CAP=1GB`](../scripts/prune-build-cache.sh#L31))
+  keeps exactly that entry, and the script [loops](../scripts/prune-build-cache.sh#L34) until
+  a pass frees nothing.
+- Deploy [starts minikube](../.github/workflows/deploy.yml#L133) if a reboot stopped it.
+
+**Why this way.** Both tools are the documented, standard answer for their stack, so the
+Dockerfiles stay readable: the change *removed* the `/repo` symlink-path workarounds rather
+than adding cleverness. That matters more here than the last 50 MB (the project prefers
+clarity over optimisation). The builder stage stays untouched, because
+`docker-compose.override.yml` builds `target: builder` for hot-reload dev. Deliberately not
+done: building Deploy's images *inside* minikube (it would remove the host copy, but changes
+how CI builds and pushes).
+
+**What setting it up taught.**
+
+| Problem | Lesson |
+| --- | --- |
+| After every Deploy the disk was at ~6.8 GB free, even though the image cleanup removed old images one for one | Count *copies*, not images. Each 1.1 GB of unique layers lived on the host, inside minikube as the ghcr image, and inside minikube again as the `local-*` rollback build. The fix that helps every copy at once is making the layer smaller |
+| The 3 GB build-cache cap reclaimed **0 B** on both daemons | `--max-used-space` can only remove cache no image uses. The host's cache was 99% "Shared" with its images (the same bytes counted twice by `docker system df`), and minikube's reclaimable part was under 3 GB. A cap on the wrong quantity never fires |
+| ~10 GB of disk use that Docker didn't report, and no sudo to look | Account from the outside in: `df` total, minus readable folders (`du`), minus what Docker reports. The gap shrank to ~5 GB once `/swap.img` (3.9 GB) was counted. Rule out the boring explanations before the clever ones |
+| Suspected the `minikube` volume (16 GB) never shrinks | Disproved in one command: inside minikube, `df -h /var` shows the host's `/dev/sda2`. The volume is a plain folder, so deleting inside it frees host disk right away |
+| I added `"files": ["dist"]` to `@cms/events` believing `pnpm deploy` would otherwise follow `.gitignore` and drop `dist/`, and wrote that into the docs | A test in a builder container disproved it: pnpm 9's `deploy` copied `dist/` with or without `files`, even with a `.gitignore` present. `files` only trims `src/` and config, which is still worth having. Test the reason, not just the result, before writing it down as fact |
+| One `docker builder prune` pass freed 2.6 GB; a second freed 3.2 GB more | Cache records form chains (a layer record holds its parent). One pass only removes the records nothing else holds. The script now loops until a pass frees 0 B |
+| `/verify`'s rollout hung on `ErrImageNeverPull`: the new images had been deleted 3 s after they were built | The Docker event log (`docker events --filter type=image`) showed a delete *by ID*. The kubelet's image GC is off in minikube (`imageGCHighThresholdPercent: 100`), and Pods were rolling out at that moment that nobody here had started: **another agent session** ran `cluster-up.sh` on the same cluster, and its "keep only what I deployed" cleanup removed our fresh tags. Shared mutable infrastructure needs one owner at a time |
+| Code review: the 1 GB cap held one ~930 MB install layer, but the three Dockerfiles made three different ones (web had no `apk add openssl`, and the manifest COPY order differed), so every Deploy would evict two and the next build re-run `pnpm install` | A cache key is the whole chain of steps before a layer. Making the three builders identical up to `pnpm install` turned three cache entries into one, which the cap can hold. The review also found that the reboot step would have *created* an empty default cluster if none existed: "start it if it's down" must not mean "make one up" |
+| The machine rebooted; minikube stayed stopped while the Actions runner came back | Things that start "by hand" don't survive a reboot. Deploy now starts minikube itself, at the one place that needs it |
+| After that reboot `cluster-up.sh` couldn't start the tunnel: "another tunnel is already running", though none was | minikube's `~/.minikube/tunnels.json` remembered the old tunnel's PID, and after the reboot that PID belonged to an unrelated process, so the record looked alive. A PID only means something while its process lives; after a reboot, believe the route table (`ip route`) over a recorded PID ([`k8s-local-dev.md`](k8s-local-dev.md) §3) |
 
 ---
 
@@ -431,7 +521,7 @@ Browser ◀── 303 /members?registered=<id>  or  the form + error banner
   has. An unknown id, a repeated parameter (an array) or a failed lookup shows no banner.
   If the list can't load, the visitor sees a generic message; the details, including the
   internal URL, go to the server log ([line 40](../apps/web/app/members/page.tsx#L40)).
-- [`charts/web/values.yaml:22`](../charts/web/values.yaml#L22): `config.membersApiUrl`
+- [`charts/web/values.yaml:21`](../charts/web/values.yaml#L21): `config.membersApiUrl`
   becomes the Pod's `MEMBERS_API_URL`. Compose sets `http://members-service:3001` instead.
 - Tests: [`lib/membersApi.test.ts`](../apps/web/lib/membersApi.test.ts) stubs `fetch`
   for each status; [`actions.test.ts`](../apps/web/app/members/new/actions.test.ts)
@@ -454,7 +544,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 
 | Problem | Lesson |
 | --- | --- |
-| On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:22`](../charts/web/values.yaml#L22)) |
+| On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:21`](../charts/web/values.yaml#L21)) |
 | `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:381`](../scripts/cluster-up.sh#L381)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
@@ -1377,6 +1467,12 @@ in parentheses (and the file it links) is where to look.
 - [ ] How does `members-service` find the database — and why not `localhost`? (§2.4)
 - [ ] What do the three `depends_on` conditions each wait for? (§2.4)
 - [ ] Why run migrations as a separate job instead of in the app? (§2.4)
+- [ ] Why did copying `/repo/node_modules` into the runner ship web's Next.js inside members-service? (§2.5)
+- [ ] What does `pnpm deploy --prod` produce, and what does `@cms/events`'s `"files": ["dist"]` change about it? (§2.5)
+- [ ] Why is `prisma` a runtime `dependency` of the services here, when it's usually a dev one? (§2.5)
+- [ ] What does Next's standalone output trace, and why does the web image set `HOSTNAME=0.0.0.0`? (§2.5)
+- [ ] Why can `docker builder prune` free 0 B while `docker system df` shows gigabytes of build cache? (§2.5)
+- [ ] How would you find out where 50 GB of disk went without root access? (§2.5)
 
 **Frontend: forms and Server Actions**
 
@@ -1512,6 +1608,13 @@ Observability has natural next steps that wait for a real need (ADR-0009):
   which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
 - **Log aggregation**: Loki, so logs from all Pods are searchable in Grafana instead of
   one `kubectl logs` at a time.
+
+Images and the runner's disk (§2.5) have cheap next steps, each waiting for a reason:
+
+- **Build Deploy's images inside minikube** and push from there: the host copy of every
+  image disappears. Worth it if the disk gets tight again.
+- **One owner for the cluster**: two agent sessions running `cluster-up.sh` at once
+  deleted each other's images. A lock file in `cluster-up.sh` (`flock`) would serialise them.
 
 To rebuild everything from scratch at any time: `scripts/cluster-up.sh --fresh` (§7.7).
 

@@ -120,6 +120,26 @@ jobs:
       - name: Record start time
         run: echo "STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
+      # After the machine reboots, the runner comes back (it's a systemd service)
+      # but minikube doesn't: its container has restart policy "no". Start it here
+      # rather than fail at "helm upgrade". See docs/ci-cd.md, "After a reboot".
+      #
+      # Only an EXISTING cluster: plain `minikube start` with no cluster would create
+      # a new, empty one with minikube's default size, and no Postgres, NATS, Traefik
+      # or monitoring CRDs. Creating the cluster is scripts/cluster-up.sh's job (it
+      # passes the memory, CPUs and runtime). `minikube status` exits 0 when running
+      # and 85 when the profile doesn't exist; anything else means it exists but is
+      # stopped.
+      - name: Make sure minikube is running
+        run: |
+          rc=0; minikube status >/dev/null 2>&1 || rc=$?
+          case $rc in
+            0)  echo "minikube is running" ;;
+            85) echo "::error::No minikube cluster on this runner. Create it once with scripts/cluster-up.sh (docs/ci-cd.md, setup step 4)"
+                exit 1 ;;
+            *)  minikube start ;;   # reuses the existing cluster's settings and data
+          esac
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.DEPLOY_SHA }}
@@ -168,7 +188,8 @@ jobs:
             --set metrics.serviceMonitor.enabled=true \
             --wait --rollback-on-failure --timeout 4m
 
-      # Every deploy leaves a ~1.3 GB image per service on the host (built here)
+      # Every deploy leaves an image per service (~1.3 GB before CMS-33, ~0.3 GB
+      # since) on the host (built here)
       # and inside minikube (pulled from ghcr.io). Nothing removed them, and one
       # deploy took the runner's disk to 99% (CMS-26). Keep the tags Helm deployed
       # most recently (now + the rollback target, read from `helm history`) and

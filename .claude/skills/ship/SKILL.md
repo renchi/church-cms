@@ -22,7 +22,7 @@ Runs the PR → CI → Merge → Deploy → Done rows of the CLAUDE.md Workflow 
 df -h /     # Avail should be ≥ 10G. A Deploy that rebuilds all three images needs ~8 GB
 ```
 
-If less than ~10 GB is free, tell the user before pushing and offer the cleanup. Two things fill the disk: build cache, and old deploy images (about 1.3 GB per service per deploy, on the host and inside minikube). `scripts/prune-deploy-images.sh <release> <image>` removes the second kind, keeping the tags Helm deployed most recently (read from `helm history`, so it's right even after `/verify` deployed `local-*` builds). Deploy runs it after every upgrade, so leftovers come from older deploys or interrupted runs.
+If less than ~10 GB is free, tell the user before pushing and offer the cleanup. Two things fill the disk: build cache, and old deploy images (about 0.3 GB per service per deploy since CMS-33, 1.3 GB before; on the host and inside minikube). `scripts/prune-deploy-images.sh <release> <image>` removes the second kind, keeping the tags Helm deployed most recently (read from `helm history`, so it's right even after `/verify` deployed `local-*` builds). Deploy runs it after every upgrade, so leftovers come from older deploys or interrupted runs.
 
 ```bash
 DRY_RUN=1 scripts/prune-deploy-images.sh web ghcr.io/renchi/church-cms/web   # optional: see what would go first

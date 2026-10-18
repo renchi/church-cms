@@ -24,6 +24,12 @@
 # --from=builder when copying files.
 FROM node:20-alpine AS builder
 
+# The web app doesn't need openssl (that's for the services' Prisma engine). It's
+# here only so this builder matches the services' builders step for step up to
+# "pnpm install", and the three share one cached install layer (see the manifest
+# COPY lines below). It costs ~3 MB in the builder, and never reaches the runner.
+RUN apk add --no-cache openssl
+
 # pnpm ships inside Node via "corepack" (a tool for managing package managers).
 # We pin pnpm 9 to match this repo's lockfile (lockfileVersion 9.0).
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
@@ -44,13 +50,14 @@ WORKDIR /repo
 # change), and copy source files afterwards.  Typical result: install is skipped
 # on 95 % of rebuilds — only code compilation re-runs.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
-# pnpm-workspace.yaml declares "apps/*" as workspace packages.  pnpm validates
-# the lockfile against EVERY package in the workspace — not just the one being
-# built.  We must copy all sibling package.json files so pnpm can resolve the
-# full workspace graph, even though we won't build those packages here.
-COPY apps/web/package.json            ./apps/web/package.json
-COPY apps/members-service/package.json ./apps/members-service/package.json
+# pnpm validates the lockfile against every workspace package (apps/*), so every
+# app's manifest is copied, not just this one. SAME lines in the SAME order in all
+# three Dockerfiles (members-service, events-service, web), from FROM down to
+# "pnpm install": identical steps make an identical install layer, which the three
+# builds then share as ONE cache entry (~930 MB) instead of three (CMS-33).
 COPY apps/events-service/package.json  ./apps/events-service/package.json
+COPY apps/members-service/package.json ./apps/members-service/package.json
+COPY apps/web/package.json             ./apps/web/package.json
 
 # --frozen-lockfile fails the build if pnpm-lock.yaml is out of date.
 # This guarantees the container always uses exactly the versions that were
@@ -105,31 +112,40 @@ FROM node:20-alpine AS runner
 # (works with bare "docker run").  The compose approach works for our local
 # dev stack and avoids a network call to the Alpine package registry.
 
-# Keep the same absolute path as the builder.  pnpm stores packages once in
-# /repo/node_modules and creates symlinks in the app folder pointing there.
-# If we changed the path, the symlinks would break.
-WORKDIR /repo/apps/web
+# The standalone folder (below) mirrors the monorepo layout, so the app ends up
+# in /app/apps/web.
+WORKDIR /app
 
 # NODE_ENV=production tells Next.js and React to enable optimisations and
 # disable dev-only warnings and source-map generation.
 ENV NODE_ENV=production
+# The standalone server listens on $HOSTNAME:$PORT. When an image doesn't set
+# HOSTNAME, the container runtime (Docker, or the one under Kubernetes) fills it
+# in with the container's hostname (in K8s, the Pod name), and the server would
+# listen only on that name's address: the HEALTHCHECK's "localhost" below would
+# be refused. An ENV in the image takes precedence over that default.
+# 0.0.0.0 = every interface. These two lines are the one place the listen address
+# is set: charts/web's containerPort, probes and Service targetPort all say 3000.
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
 
 # COPY --from=builder pulls files from the "builder" stage, not the host.
 # --chown=node:node sets ownership to the "node" user (explained below) so
 # the app can read its own files after we drop privileges.
 #
-# Four things are needed at runtime:
-#   /repo/node_modules        — the real package store; all installed packages
-#                               live here (including Next.js itself).
-#   ./node_modules            — the app's own folder: pnpm workspace symlinks
-#                               that point into the store above.
-#   ./.next                   — the compiled bundle: server components, client
-#                               chunks, route manifests, and pre-rendered HTML.
-#   ./package.json            — "next start" reads the project config from here.
-COPY --from=builder --chown=node:node /repo/node_modules          /repo/node_modules
-COPY --from=builder --chown=node:node /repo/apps/web/node_modules ./node_modules
-COPY --from=builder --chown=node:node /repo/apps/web/.next        ./.next
-COPY --from=builder --chown=node:node /repo/apps/web/package.json ./package.json
+# Until CMS-33 this copied the builder's whole /repo/node_modules (every package
+# of the monorepo, dev tools included: ~840 MB) and ran "next start". Now
+# next.config.mjs sets output: 'standalone', and "next build" writes:
+#   .next/standalone/  — server.js plus ONLY the files it imports, found by
+#                        tracing (a trimmed node_modules, still with Next.js and
+#                        React). It mirrors the monorepo: apps/web/server.js.
+#   .next/static/      — the browser's JS/CSS chunks. Standalone leaves these
+#                        out (a CDN usually serves them), so we copy them next to
+#                        the server, where it serves them itself.
+# The app has no public/ folder yet; when it gets one, copy it to
+# ./apps/web/public the same way.
+COPY --from=builder --chown=node:node /repo/apps/web/.next/standalone ./
+COPY --from=builder --chown=node:node /repo/apps/web/.next/static     ./apps/web/.next/static
 
 # Switch to the unprivileged "node" user that ships with the base image.
 # If an attacker exploits a bug in the app, they get a limited user instead
@@ -149,10 +165,12 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
   CMD node -e "require('http').get('http://localhost:3000',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"
 
 # CMD is the default command run when the container starts.
-# "next start -p 3000" launches the production Next.js server.
-# docker-compose.override.yml overrides this to "next dev" for hot-reload.
+# server.js is the production Next.js server that standalone output generates
+# (it replaces "next start", whose CLI isn't in the trimmed node_modules).
+# docker-compose.override.yml builds the "builder" stage instead and runs
+# "next dev" there for hot-reload.
 #
 # No ENTRYPOINT here: tini is provided by Docker Compose ("init: true" in
 # docker-compose.yml) rather than installed in the image.  Docker injects
 # it as PID 1 transparently — our CMD becomes tini's child process.
-CMD ["node_modules/.bin/next", "start", "-p", "3000"]
+CMD ["node", "apps/web/server.js"]

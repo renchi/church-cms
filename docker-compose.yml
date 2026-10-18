@@ -14,7 +14,7 @@
 # events-migrate → events-service): one Postgres per service, ADR-0008.
 #
 # ── Production-shaped vs. dev hot-reload ─────────────────────────────────────
-# This file is production-shaped: the web service runs "next build + next start"
+# This file is production-shaped: the web service runs "next build" output (the standalone server)
 # in a slim runner image.  But docker-compose.override.yml IS committed alongside
 # it, and Docker Compose automatically merges any docker-compose.override.yml in
 # the same directory — so the DEFAULT "docker compose up" runs the dev override

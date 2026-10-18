@@ -97,7 +97,7 @@ The first push of each service creates its package: `ghcr.io/renchi/church-cms/m
 
 ### 4. Start minikube
 
-The runner deploys into whatever `kubectl` points at, so minikube must be running (`minikube start`). The runner service starts by itself at boot, but **minikube does not**: after a reboot, run `minikube start` again. Postgres, Traefik and the monitoring stack must be installed too: run `scripts/cluster-up.sh` once (see [k8s-local-dev.md](k8s-local-dev.md)).
+The runner deploys into whatever `kubectl` points at, so minikube must be running (`minikube start`). The runner service starts by itself at boot, but **minikube does not** (its container's restart policy is `no`). Each Deploy job therefore starts with **Make sure minikube is running** (`minikube status || minikube start`), which brings the existing cluster back with its data. See [After a reboot](#after-a-reboot). Postgres, Traefik and the monitoring stack must be installed too: run `scripts/cluster-up.sh` once (see [k8s-local-dev.md](k8s-local-dev.md)).
 
 ---
 
@@ -122,11 +122,11 @@ Only services whose files changed are rebuilt:
 
 Every image is tagged with the **commit SHA**, plus a moving `main` tag. The SHA tag makes it obvious which commit is running and makes every deploy a real change that Kubernetes rolls out.
 
-Unique tags also mean unique images, about 1.3 GB per service per deploy, stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. After a successful upgrade, each deploy job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places.
+Unique tags also mean unique images, about 0.3 GB per service per deploy (1.3 GB before CMS-33 slimmed them; see [Where the runner's disk goes](#where-the-runners-disk-goes)), stored twice: on the host, where the runner builds, and inside minikube, which pulls from ghcr.io. After a successful upgrade, each deploy job's **Remove superseded images** step runs [`scripts/prune-deploy-images.sh`](../scripts/prune-deploy-images.sh) in both places.
 
 Which tags it keeps comes from **`helm history`**, not from image dates: the images used by the release's newest two successful revisions (what's running, and what `helm rollback` would go back to), plus `main`. Failed revisions don't count. Image build times can't answer "what was deployed when": a rebuild that hits the cache keeps the old creation time. It only ever removes *deploy tags* (a commit SHA, or `local-…` from `cluster-up.sh`), so a hand-made `:debug` tag survives. And it **fails closed**: if Helm or Docker doesn't answer, it removes nothing and exits non-zero. Inside minikube it also clears the `local-*` builds `/verify` left behind, by the same rule: a `/verify` build that was the revision just before this deploy stays (it's what `helm rollback` goes back to, and with `pullPolicy=Never` it can't be pulled), and goes one deploy later. A removed ghcr image is never lost: it's still in the registry, and a rollback pulls it again.
 
-The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then caps the build cache at 3 GB per daemon with [`scripts/prune-build-cache.sh`](../scripts/prune-build-cache.sh) (`docker builder prune --max-used-space`, which keeps the most recently used layers; the cap is defined only there), once for the whole deploy, and writes what it reclaimed and the free disk to the run summary. The cap counts only cache that can be freed: `docker system df`'s "Build Cache" size also includes layers that images use, which no prune can free, so it can read above 3 GB. Compare its RECLAIMABLE column with the cap. A *size* cap, because an age limit doesn't bound anything: on one busy day of `/verify` runs and deploys, ~11 GB of same-day cache took the disk to 6.8 GB under the earlier "older than 24 h" rule.
+The step has `continue-on-error`, so a cleanup problem shows as a warning instead of failing a deploy whose Pods are already healthy. A final **cleanup** job then caps the build cache at 1 GB per daemon with [`scripts/prune-build-cache.sh`](../scripts/prune-build-cache.sh) (`docker builder prune --max-used-space`, which keeps the most recently used layers; the cap is defined only there), once for the whole deploy, and writes what it reclaimed and the free disk to the run summary. It prunes in passes until one frees nothing, because a cache record holds its parent and one pass only removes the outermost records. The cap counts only cache that can be freed: `docker system df`'s "Build Cache" size also includes layers that images use, which no prune can free, so it can read above 1 GB. Compare its RECLAIMABLE column with the cap. (Until CMS-33 the cap was 3 GB and never fired: the images used almost all the cache, so almost nothing was reclaimable.) A *size* cap, because an age limit doesn't bound anything: on one busy day of `/verify` runs and deploys, ~11 GB of same-day cache took the disk to 6.8 GB under the earlier "older than 24 h" rule.
 
 ```
 # deploy (web) › Remove superseded images
@@ -134,7 +134,8 @@ The step has `continue-on-error`, so a cleanup problem shows as a warning instea
 # ghcr.io/renchi/church-cms/web: kept <this sha> <previous sha> (newest 2 revision(s) of 'web'), removed 1
 # (then the same inside minikube, for ghcr.io/… and for church-cms-web's local-* builds)
 # cleanup › Prune build cache and report disk
-# Build cache: host Total: 1.2GB · minikube Total: 2.4GB · free disk 16G      ← keep ≥ 10G
+# Build cache: host Total: 0.9GB + 0B · minikube Total: 1.4GB + 0.3GB + 0B · free disk 17G      ← keep ≥ 10G
+#              (one amount per prune pass; the last pass freeing 0B is what ends the loop)
 ```
 
 `scripts/cluster-up.sh` uses the same script for its `local-*` builds, keeping only the one it just deployed, and caps minikube's build cache the same way. To see what a run would remove without removing anything, prefix it with `DRY_RUN=1`.
@@ -189,6 +190,47 @@ What CMS-18 needed for events-service, in order:
 
 ---
 
+## Where the runner's disk goes
+
+The runner shares a 62 GB disk with minikube, swap, the OS and your editor. Keep ≥ 10 GB free. When it drops, find out *where* before deleting anything. The method from CMS-33 needs no root:
+
+```bash
+df -h /                                  # 1. the total
+# /dev/sda2   62G   52G  7.3G  88% /
+du -xsh /usr /var /home /boot /swap.img 2>/dev/null   # 2. what you can read
+# 5.8G /usr · 4.5G /var · 8.3G /home · 307M /boot · 3.9G /swap.img   ← swap counts too
+docker system df                         # 3. what the host's Docker reports
+eval "$(minikube docker-env)"; docker system df; eval "$(minikube docker-env -u)"   # 4. minikube's
+minikube ssh -- df -h /var               # 5. minikube's /var IS the host disk
+# /dev/sda2   62G   52G  7.3G  88% /var  ← same device: deleting inside minikube frees host disk
+```
+
+Subtract 2 and 3 from 1. What's left lives in folders only root can read (`/var/lib/docker`, `/var/lib/containerd`): `sudo du -sh /var/lib/docker/* /var/lib/containerd/*` shows it.
+
+Then ask *which layer* is big and *how many copies* exist:
+
+```bash
+docker history <image> --format '{{.Size}}\t{{.CreatedBy}}' | sort -h | tail -3   # the biggest layers
+docker image ls --tree          # DISK USAGE (unpacked) vs CONTENT SIZE (compressed), containerd store
+docker buildx du | tail -4      # Shared = cache bytes an image also uses: pruning them frees 0 B
+```
+
+What CMS-33 found, as a reference point: each app image was 1.3 GB, 836 MB of it a single `COPY /repo/node_modules` layer, and it existed three times (host build, minikube's ghcr copy, minikube's `local-*` rollback build). After slimming, the images are ~0.3 GB and the disk sat at 17 GB free. The full story is in [study-guide §2.5](study-guide.md#25-whats-inside-an-image-and-where-it-lives-on-disk-cms-33).
+
+### After a reboot
+
+The runner is a systemd service and comes back by itself. minikube doesn't: `docker inspect minikube --format '{{.HostConfig.RestartPolicy.Name}}'` prints `no`. Nothing breaks until the next Deploy, which starts it in its first step:
+
+```
+# deploy (web) › Make sure minikube is running
+# * Restarting existing docker container for "minikube" ...
+# * Done! kubectl is now configured to use "minikube" cluster ...
+```
+
+To bring it back by hand (for `kubectl`, Grafana, `/verify`): `minikube start`, or `scripts/cluster-up.sh --no-sudo`, which also re-checks the tunnel and `/etc/hosts`. `minikube tunnel` is not restarted by either: run it again in its own terminal if `cms.local` doesn't answer.
+
+---
+
 ## Debugging
 
 | Symptom | Likely cause / fix |
@@ -196,7 +238,8 @@ What CMS-18 needed for events-service, in order:
 | Deploy job stuck in "Queued" | Runner offline: `sudo ~/actions-runner/svc.sh status`, then `start` |
 | A Deploy job fails before any step runs, or `no space left on device` | Disk full. `df -h /`, then `docker system df` on the host and after `eval "$(minikube docker-env)"`. Old deploy images: `scripts/prune-deploy-images.sh <release> <image>`, once on the host and once after `eval "$(minikube docker-env)"` (the `/ship` skill, step 2, has the loop). Build cache: `docker builder prune -af`. Never `docker image prune -a` on the host: it deletes the untagged `kicbase` image minikube runs on |
 | `docker: permission denied` in runner | Runner user not in `docker` group: `sudo usermod -aG docker $USER`, then restart the service |
-| `kubernetes cluster unreachable` | minikube stopped: `minikube start` |
+| `kubernetes cluster unreachable` | minikube stopped (after a reboot, usually): `minikube start`. Deploy does this itself since CMS-33; see [After a reboot](#after-a-reboot) |
+| `/verify` or `cluster-up.sh` hangs, a new Pod shows `Init:ErrImageNeverPull` right after a successful build | Something deleted the fresh `local-*` image. `docker events --since 30m --filter type=image` (after `eval "$(minikube docker-env)"`) shows who: a delete seconds after the build means another `cluster-up.sh` (another terminal or agent session) ran its cleanup at the same time. Run one at a time, then re-run |
 | `helm: command not found` | Runner PATH is stale; see the note in setup step 1 |
 | Pods `ImagePullBackOff` | GHCR package still private (setup step 3; happens once per new service), or the push failed |
 | New service's deploy times out, `migrate` init container keeps restarting | Its Postgres isn't in the cluster: `kubectl get deploy <svc>-postgres`. Run `scripts/cluster-up.sh` ("Adding a new service" above) |
@@ -300,3 +343,20 @@ registry still has it.
 Then think it through: Deploy F fails and Helm rolls back to E. Deploy G succeeds. Which
 images does the next cleanup keep? (G's and E's. F's revision is `failed`, so it doesn't
 count, and F's image goes.)
+
+## Exercise: account for the disk
+
+Do the accounting from [Where the runner's disk goes](#where-the-runners-disk-goes) and write the numbers down before reading on.
+
+1. `df -h /` used, minus the readable folders, minus `docker system df` (host) and the `minikube` volume. How much is left unexplained? (Expected: a few GB, in root-only `/var/lib/containerd` and `/var/lib/docker`.)
+2. Pick the members-service image inside minikube and find its biggest layer:
+   ```bash
+   eval "$(minikube docker-env)"
+   docker history "$(kubectl get deploy members-service-members-service -o jsonpath='{..image}')" \
+     --format '{{.Size}}\t{{.CreatedBy}}' | sort -h | tail -3
+   eval "$(minikube docker-env -u)"
+   # ~130MB  RUN addgroup … node        ← the node:20-alpine base
+   # ~125MB  COPY … /prod/members-service ./   ← the app folder from pnpm deploy
+   ```
+   Expected: no layer near 800 MB. If you see `COPY /repo/node_modules`, that image predates CMS-33.
+3. Predict, then check: does `docker builder prune -af --max-used-space 1GB` free anything right after a Deploy? Run `docker buildx du | tail -4` first. (Expected: it frees about Reclaimable − 1 GB, possibly over two passes, and never touches what's Shared with an image.)
