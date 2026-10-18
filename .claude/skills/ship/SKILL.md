@@ -1,13 +1,13 @@
 ---
 name: ship
-description: Ship a verified, reviewed ticket branch — check disk, push, open the PR from the template, watch CI, merge only after the user says so, watch the Deploy run, mark the Linear ticket Done, and capture lessons. Use after /verify and /code-review.
+description: Ship a verified, reviewed ticket branch — check disk, push, open the PR from the template, watch CI, merge only after the user says so, hand the Deploy watch to the user (scripts/watch-deploy.sh), mark the Linear ticket Done, and capture lessons. Use after /verify and /code-review.
 argument-hint: "[CMS-<n>]  (omit to read it from the branch name)"
 disable-model-invocation: true
 ---
 
 # Ship a ticket
 
-Runs the PR → CI → Merge → Deploy → Done rows of the CLAUDE.md Workflow table. Stop and tell the user if any step fails. **Never merge without the user's explicit go-ahead in this session.**
+Runs the PR → CI → Merge → Done rows of the CLAUDE.md Workflow table, and hands Deploy to the user. Stop and tell the user if any step fails. **Never merge without the user's explicit go-ahead in this session.**
 
 ## 1. Preconditions
 
@@ -74,17 +74,17 @@ gh pr merge <n> --merge --delete-branch     # merge commits, like every PR so fa
 git checkout main && git pull
 ```
 
-## 6. Deploy
+## 6. Deploy (the user watches it; don't wait)
 
-Deploy starts when CI finishes on `main` (`workflow_run`), so give it a few minutes to appear. Filter by the merge commit: the latest Deploy run may be an older one, and watching that would report success for a deploy that hasn't run yet.
+Deploy starts by itself when CI passes on `main` (`workflow_run`), so there's nothing to trigger. A cold build of every image takes long enough to block the session, so the user watches it in another terminal and reports problems. **Don't watch or poll the run yourself**, and don't hold step 7 for it.
+
+Tell the user which services will redeploy (step 2's note on shared files applies) and give them the command, with the merge commit:
 
 ```bash
-sha=$(git rev-parse HEAD)                   # the merge commit, after the pull in step 5
-gh run list --workflow=Deploy --commit "$sha" --json databaseId,status   # repeat until it lists a run
-gh run watch <run-id> --exit-status
+scripts/watch-deploy.sh <merge-sha>   # waits for the run, watches it, prints job results + free disk
 ```
 
-If a job fails before any step runs, check `df -h /` first (see step 2). Then report which services were deployed, how long it took, and the free disk afterwards: the `cleanup` job writes it to the run summary (`gh run view <run-id>`), or run `df -h /`. Below ~10 GB, say so before the next ticket starts.
+If the user later reports a failure, read it with `gh run view <run-id> --log-failed` and fix it on a new branch. A job cancelled by "The runner has received a shutdown signal" is a runner restart, not the code: `gh run rerun <run-id> --failed`.
 
 ## 7. Close the loop
 
