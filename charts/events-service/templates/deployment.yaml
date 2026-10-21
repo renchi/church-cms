@@ -21,6 +21,22 @@ spec:
       labels:
         {{- include "events-service.selectorLabels" . | nindent 8 }}
     spec:
+      {{- /* The defaults repeat values.yaml on purpose. `helm upgrade --reuse-values`
+      on a release made before CMS-32 does NOT get the chart's new defaults (Helm 4),
+      so `shutdown` would be missing: a nil-pointer error, or an empty grace period. */}}
+      {{- $shutdown := .Values.shutdown | default dict }}
+      {{- $preStop := int (dig "preStopSeconds" 5 $shutdown) }}
+      {{- $grace := int (dig "terminationGracePeriodSeconds" 30 $shutdown) }}
+      {{- /* Fail the render, not the rollout: a grace period the sleep uses up leaves
+      the app no time to shut down before SIGKILL (NATS drain cut off mid-message). */}}
+      {{- if le $grace $preStop }}
+      {{- fail (printf "shutdown.terminationGracePeriodSeconds (%d) must be longer than shutdown.preStopSeconds (%d): it also has to cover the app's own shutdown" $grace $preStop) }}
+      {{- end }}
+      # How long Kubernetes waits, from the moment it starts stopping the Pod,
+      # before it SIGKILLs it. Covers the preStop sleep plus the app's own
+      # shutdown (src/index.ts: finish the current NATS message, drain the
+      # connection), so it must be longer than shutdown.preStopSeconds.
+      terminationGracePeriodSeconds: {{ $grace }}
       {{- if .Values.migrations.enabled }}
       # Init containers run to completion BEFORE the app container starts. If this
       # one fails, the Pod never becomes Ready, so a deploy with a broken migration
@@ -54,6 +70,17 @@ spec:
         - name: events-service
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if gt $preStop 0 }}
+          # Zero-downtime rollouts (CMS-32, study guide §7.8): same as charts/web.
+          # Removing the Pod from the endpoints and running this hook happen at the
+          # same time, and SIGTERM comes only after the hook. Without the sleep,
+          # Fastify starts closing while Traefik still routes to this Pod, so some
+          # requests fail even with a second replica. Built-in sleep: no binary needed.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $preStop }}
+          {{- end }}
           ports:
             - name: http
               containerPort: 3002

@@ -509,7 +509,7 @@ minikube delete
 | `zsh: no matches found: http://…?limit=1` | zsh reads `?` as a glob: quote the URL |
 | An API returns `500` with `P1001 Can't reach database server` | That service's Postgres is down: `kubectl get pods -l app=<svc>-postgres` (see Exercise 2) |
 | `/members` shows "Could not load members. Try again in a moment." | The reason is in the web log, not on the page: `kubectl logs deploy/web-web \| grep -A3 "Could not load members from"`. If the URL there is `http://localhost:3001`, the Pod has no `MEMBERS_API_URL` and is calling itself: `kubectl exec deploy/web-web -- printenv MEMBERS_API_URL` should print `http://members-service-members-service:3001` (set by `config.membersApiUrl` in `charts/web/values.yaml`) |
-| `/` returns `502` or nothing for a moment right after deploying web | The old Pod stopped while Traefik still routed to it (web has one replica). Retry after a few seconds. A known gap |
+| `/` returns `502` or `000` for a moment during a rollout | The old Pod exited while Traefik still routed to it. Check the `preStop` sleep is there: `kubectl get deploy web-web -o jsonpath='{.spec.template.spec.containers[0].lifecycle}'` should print `{"preStop":{"sleep":{"seconds":5}}}`. Empty means `shutdown.preStopSeconds` is `0` (see the rollout-gap exercise) |
 | The registration form says "Couldn't reach the members service" | Same check as above, then `kubectl get pods -l app.kubernetes.io/instance=members-service` |
 
 ---
@@ -648,6 +648,95 @@ Fix it the way the script does: `scripts/cluster-up.sh --no-sudo` builds
 then prints `✔ members-service-members-service runs members-service:local-…`. Run the script a
 second time with no code change: the tag is the same, so the Pod names don't change.
 Clean up the extra tag with `docker rmi members-service:trap`.
+
+---
+
+## Exercise: the rollout gap
+
+Why every chart has a `preStop` sleep (study-guide §7.8). You'll send traffic while
+restarting web, first without the sleep and then with it, and count the failed requests.
+Run it with the stack up.
+
+```bash
+# Background loop: request / and /members over and over (~15 a second), one line per response.
+probe() {
+  while true; do
+    for p in / /members; do
+      echo "$p $(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://cms.local$p)"
+    done
+    sleep 0.1
+  done
+}
+# Probe, restart web, keep probing while the old Pod stops, then count the non-200s.
+rollout_probe() {
+  probe > /tmp/probe.log &
+  local pid=$!
+  sleep 3
+  kubectl rollout restart deploy/web-web >/dev/null
+  kubectl rollout status deploy/web-web >/dev/null
+  sleep 15
+  kill $pid
+  echo "$(wc -l < /tmp/probe.log) requests, $(grep -vc ' 200$' /tmp/probe.log) non-200"
+  grep -v ' 200$' /tmp/probe.log
+}
+```
+
+**1. Without the sleep.** `0` makes the chart leave the hook out entirely:
+
+```bash
+helm upgrade web ./charts/web --reuse-values --set shutdown.preStopSeconds=0 --wait | grep STATUS
+# STATUS: deployed
+kubectl get deploy web-web -o jsonpath='{.spec.template.spec.containers[0].lifecycle}'; echo
+#                                    ← empty: no preStop hook
+rollout_probe; rollout_probe; rollout_probe
+# 416 requests, 3 non-200
+# / 502
+# /members 502
+# / 000                              ← no answer within 3 s
+# 376 requests, 3 non-200
+# …
+# 418 requests, 0 non-200            ← a race: some rollouts get lucky
+```
+
+Expected: at least one run has failures, all within a fraction of a second. They come
+from the **old** Pod: it got SIGTERM and exited while Traefik was still routing to it. The
+new Pod was Ready the whole time, which is why Ready isn't the same as safe to remove.
+
+**2. With the sleep:**
+
+```bash
+helm upgrade web ./charts/web --reuse-values --set shutdown.preStopSeconds=5 --wait | grep STATUS
+# STATUS: deployed
+kubectl get deploy web-web -o jsonpath='{.spec.template.spec.containers[0].lifecycle}'; echo
+# {"preStop":{"sleep":{"seconds":5}}}
+sleep 10   # see below
+rollout_probe; rollout_probe; rollout_probe
+# 474 requests, 0 non-200
+# 482 requests, 0 non-200
+# 480 requests, 0 non-200
+```
+
+Expected: 0 non-200 every time. Your request counts will differ.
+
+Why the `sleep 10`: this `helm upgrade` is itself a rollout, and the Pod it stops is the
+**old** one, created with `preStopSeconds=0`. A Pod stops according to its own spec, so that
+one has no hook and exits at once. Probe straight away and you catch it: a single `502` or
+`000` in the first run, before the restart even starts. The same happens once for real: the
+Deploy that first ships the hook replaces Pods that don't have it yet.
+
+**3. Watch the old Pod stop.** In a second terminal, run `kubectl get pods -l app=web-web -w`,
+then `kubectl rollout restart deploy/web-web` in the first. The old Pod shows `Terminating`
+for about 6 s: the 5 s sleep, then Next.js exits about a second after SIGTERM. Now try
+`kubectl get pod <old-pod> -o jsonpath='{.metadata.deletionTimestamp}'` while it's stopping:
+the time is about **30 s in the future**. It's the SIGKILL deadline (start + grace period),
+not the moment stopping began.
+
+To try the services, replace `web-web` with `members-service-members-service` in
+`rollout_probe`: `/members` calls members-service, so the loop covers it. Neither page
+calls events-service, so for that one change the URLs in `probe` to `/api/events/health`.
+
+Clean up with `rm /tmp/probe.log`. The next `scripts/cluster-up.sh` resets any values you
+changed here.
 
 ---
 
