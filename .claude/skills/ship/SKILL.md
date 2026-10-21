@@ -1,13 +1,15 @@
 ---
 name: ship
-description: Ship a verified, reviewed ticket branch — check disk, push, open the PR from the template, watch CI, merge only after the user says so, hand the Deploy watch to the user (scripts/watch-deploy.sh), mark the Linear ticket Done, and capture lessons. Use after /verify and /code-review.
+description: Ship a verified, reviewed ticket branch — check disk, push, open the PR from the template, watch CI in the background, merge only after the user says so, watch Deploy in the background, mark the Linear ticket Done, and capture lessons. Use after /verify and /code-review.
 argument-hint: "[CMS-<n>]  (omit to read it from the branch name)"
 disable-model-invocation: true
 ---
 
 # Ship a ticket
 
-Runs the PR → CI → Merge → Done rows of the CLAUDE.md Workflow table, and hands Deploy to the user. Stop and tell the user if any step fails. **Never merge without the user's explicit go-ahead in this session.**
+Runs the PR → CI → Merge → Done rows of the CLAUDE.md Workflow table, and starts the Deploy watch. Stop and tell the user if any step fails. **Never merge without the user's explicit go-ahead in this session.**
+
+**Keep the chat free.** The two long waits (CI and Deploy) run as background Bash commands (`run_in_background`) through `scripts/agent-status.sh run`, which records each one's result in the ticket's status record. Start one, tell the user in a line, and end the turn; the completion notification brings you back. Meanwhile the user can ask anything, and `/status` answers from the record (study-guide §12.4). After the merge you're on `main`, so pass `--ticket CMS-<n>` (for a branch without a ticket, its name with `/` as `-`, e.g. `chore-<slug>`). Those `--ticket` calls, and the `run deploy` one, ask the user for permission: that's deliberate (study-guide §12.4).
 
 ## 1. Preconditions
 
@@ -56,39 +58,52 @@ gh pr create --title "<type>(<scope>): <summary> (CMS-<n>)" --body-file <filled 
 
 Fill `.github/pull_request_template.md`: the ticket, a short what/why, the `/verify` table as it was reported (don't upgrade a "skipped" to a "pass"), the learning-deliverables checklist ticked only for what exists, and the deploy impact (`git diff --name-only main...HEAD` → which `apps/<svc>/` or `charts/<svc>/` changed). End the body with the attribution line from the system reminder.
 
-## 4. CI
+Then record the PR: `scripts/agent-status.sh pr <n>`.
+
+## 4. CI (in the background)
+
+Start it with `run_in_background`, then end the turn:
 
 ```bash
-gh pr checks --watch     # lint-typecheck, unit-tests and integration-tests are required by branch protection
+scripts/agent-status.sh run ci -- gh pr checks --watch   # lint-typecheck, unit-tests, integration-tests: required by branch protection
 ```
 
-- A real failure: fix it on the branch, push, and watch again.
+When the notification arrives, read the task's output for the per-check results.
+
+- A real failure: fix it on the branch, push, and start the watch again.
 - Jobs "not acquired by Runner" / cancelled with no failing step is a GitHub outage, not a test failure: `gh run rerun <run-id> --failed`.
 
 ## 5. Merge (the user decides)
+
+Record that it's waiting on the user, then notify them (PushNotification, if available: "CI green on PR #<n>: merge?"), since they may have moved on to something else:
+
+```bash
+scripts/agent-status.sh set merge waiting "CI green on PR #<n>"
+```
 
 Show the PR URL and the green checks, and ask: "Merge PR #<n>?" Only on a clear yes:
 
 ```bash
 gh pr merge <n> --merge --delete-branch     # merge commits, like every PR so far
 git checkout main && git pull
+scripts/agent-status.sh --ticket CMS-<n> set merge done "PR #<n> merged"   # on main now, so name the ticket
 ```
 
-## 6. Deploy (the user watches it; don't wait)
+## 6. Deploy (in the background; don't wait for it)
 
-Deploy starts by itself when CI passes on `main` (`workflow_run`), so there's nothing to trigger. A cold build of every image takes long enough to block the session, so the user watches it in another terminal and reports problems. **Don't watch or poll the run yourself**, and don't hold step 7 for it.
-
-Tell the user which services will redeploy (step 2's note on shared files applies) and give them the command, with the merge commit:
+Deploy starts by itself when CI passes on `main` (`workflow_run`), so there's nothing to trigger. A cold build of every image takes a while, so it never holds up step 7. Start the watch with `run_in_background`, with the merge commit:
 
 ```bash
-scripts/watch-deploy.sh <merge-sha>   # waits for the run, watches it, prints job results + free disk
+scripts/agent-status.sh --ticket CMS-<n> run deploy -- scripts/watch-deploy.sh <merge-sha>   # waits for the run, watches it, prints job results + free disk
 ```
 
-If the user later reports a failure, read it with `gh run view <run-id> --log-failed` and fix it on a new branch. A job cancelled by "The runner has received a shutdown signal" is a runner restart, not the code: `gh run rerun <run-id> --failed`.
+Tell the user which services will redeploy (step 2's note on shared files applies), and that they can also run `scripts/watch-deploy.sh <merge-sha>` in their own terminal to watch it live. Go on to step 7 without waiting. When the notification arrives, report the result in a line.
+
+On a failure, read it with `gh run view <run-id> --log-failed` and fix it on a new branch. A job cancelled by "The runner has received a shutdown signal" is a runner restart, not the code: `gh run rerun <run-id> --failed`.
 
 ## 7. Close the loop
 
-- Move the Linear ticket to **Done** (`save_issue` with the Done state). Skip this when there's no ticket.
+- Move the Linear ticket to **Done** (`save_issue` with the Done state), then `scripts/agent-status.sh --ticket CMS-<n> set done done`. Skip the Linear part when there's no ticket.
 - Check `docs/study-guide.md`'s "What setting it up taught" table for the problems that actually came up this ticket. If one is missing, say so (that's a follow-up docs PR, not a direct edit to main).
 - Save to memory only what isn't in the repo and would save a future session time (a new operational gotcha, a decision the user made). Update an existing memory instead of adding a near-duplicate.
 - Suggest `/mattpocock-skills:retro` (a retrospective on the session), in one line. Its findings feed the study guide's "What setting it up taught" table. Don't run it yourself.

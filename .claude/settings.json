@@ -53,7 +53,13 @@
       "Bash(scripts/check-docs.sh*)",
       "Bash(df -h*)",
       "Bash(gh run rerun * --failed)",
-      "mcp__claude_ai_Linear__list_issue_statuses"
+      "mcp__claude_ai_Linear__list_issue_statuses",
+      "Bash(scripts/agent-status.sh set *)",
+      "Bash(scripts/agent-status.sh pr *)",
+      "Bash(scripts/agent-status.sh show*)",
+      "Bash(scripts/agent-status.sh line*)",
+      "Bash(scripts/agent-status.sh run ci -- gh pr checks --watch)",
+      "Bash(scripts/agent-status.sh run verify -- scripts/cluster-up.sh --no-sudo)"
     ]
   },
   "hooks": {
@@ -68,5 +74,9 @@
         ]
       }
     ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "\"$(git rev-parse --show-toplevel)\"/.claude/statusline.sh"
   }
 }

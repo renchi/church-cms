@@ -27,7 +27,8 @@ scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postg
 scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, only check tunnel + /etc/hosts
 scripts/check-docs.sh                    # broken doc links, moved line links, missing study-guide update (also runs in CI)
 scripts/check-env.sh                     # every env var an app reads is set by its Helm chart (also runs in CI)
-scripts/watch-deploy.sh [sha]            # watch the Deploy run for main's newest commit (or <sha>), in your own terminal
+scripts/watch-deploy.sh [sha]            # watch the Deploy run for main's newest commit (or <sha>)
+scripts/agent-status.sh show             # the ticket's status record: each workflow stage and whether it's running/done/stale
 ```
 
 ## Workflow
@@ -39,7 +40,10 @@ scripts/watch-deploy.sh [sha]            # watch the Deploy run for main's newes
 | Implement | Normal editing          | After the plan is approved. A hook lints each edited `.ts` file                                                                    |
 | Verify    | `/verify`               | After implementing. Proves the feature works in the running app (Pods on this build's image tag) and that the docs pass `scripts/check-docs.sh` |
 | Review    | `/code-review`          | Before opening a PR. Fix all findings                                                                                              |
-| Ship      | `/ship`                 | After review. Checks disk, opens the PR from the template, watches CI, merges **only on the user's go-ahead**, hands you `scripts/watch-deploy.sh` for Deploy (you watch it, it doesn't block), marks the ticket Done |
+| Ship      | `/ship`                 | After review. Checks disk, opens the PR from the template, watches CI in the background, merges **only on the user's go-ahead**, watches Deploy in the background (never blocks on it), marks the ticket Done |
+| Status    | `/status`, or just ask  | Any time, including mid-step. Reads the status record (`scripts/agent-status.sh`), background tasks, agents, and live `gh` checks |
+
+**Keep the chat free.** Steps that wait (the cluster build, CI and Deploy watches) run in the background through `scripts/agent-status.sh run <stage> -- <cmd>`, and the turn ends; the completion notification resumes the work. When the user says "review in the background", start a forked agent that runs `/code-review`, record `scripts/agent-status.sh set review running`, and when it reports, set `review done "<n> findings"` and relay the findings. See study-guide §12.4.
 
 Never work directly on main. Scaffold new services with `/new-service`, and only for services marked Active below.
 

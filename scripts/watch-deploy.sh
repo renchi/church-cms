@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Watch the Deploy run for a commit, in your own terminal, so /ship doesn't wait on it.
+# Watch the Deploy run for a commit, so /ship doesn't wait on it.
 #
 #   scripts/watch-deploy.sh          # the Deploy run for origin/main's newest commit
 #   scripts/watch-deploy.sh <sha>    # … for a given commit
 #
 # Why: there's nothing to trigger. Deploy starts by itself when CI passes on main
 # (`workflow_run`, docs/ci-cd.md), but a cold build of all three images takes a
-# while. /ship used to block the session until it finished; now it prints this
-# command and moves on. You watch here, and tell the agent if something breaks.
+# while. /ship used to block the session until it finished. Now it starts this
+# script in the background, wrapped in `scripts/agent-status.sh run deploy -- …` so
+# the result lands in the ticket's status record, and moves on (study-guide §12.4).
+# You can also run it in your own terminal to watch the run live.
 #
 # What it does: waits for the run to appear (it only exists once CI on main has
 # finished), warns if the self-hosted runner is offline (jobs would sit in Queued),
