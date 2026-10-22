@@ -8,7 +8,7 @@ exercised, mapped to the **five learning goals** in
 2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability)_
 3. **System design** _(stage 9 done: async events between services)_
 4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
-5. **Using AI tools** — issue-driven development
+5. **Using AI tools** — issue-driven development _(agent orchestration track started: §12.4)_
 
 This guide is the **map**. The companion docs are the **detail**:
 
@@ -53,7 +53,9 @@ disk stopped filling up (§2.5). **CMS-32** closed the `502` window during every
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
-permission list.
+permission list. **CMS-34** started an agent-orchestration track (§12.4): long steps run in
+the background, a status record tracks each stage, and `/status` answers "is it done?"
+while the chat stays free.
 
 Knowing what is **deliberately not built yet** is itself part of the learning: the
 architecture is sequenced so you learn each layer once, well, instead of building the
@@ -1405,7 +1407,7 @@ make it see them. Each one has a different trigger and a different cost:
 | --- | --- | --- | --- |
 | **CLAUDE.md** | repo root | Every session, always in context | What *every* task needs: purpose, commands, workflow, indexes. Keep it short, because every line costs attention |
 | **Rules** | `.claude/rules/*.md` | Only when the agent touches a matching path (`paths:` frontmatter) | Area conventions: `ddd.md` for service code, `k8s-helm.md` for charts, `testing.md`, `docs-learning.md` |
-| **Skills** | `.claude/skills/<name>/SKILL.md` | When you type `/name` (or the agent decides it's relevant) | Repeatable procedures: `/start-ticket`, `/verify`, `/ship`, `/new-service` |
+| **Skills** | `.claude/skills/<name>/SKILL.md` | When you type `/name` (or the agent decides it's relevant) | Repeatable procedures: `/start-ticket`, `/verify`, `/ship`, `/status`, `/new-service` |
 | **Hooks** | `.claude/settings.json` → `.claude/hooks/` | Automatically on events (e.g. after every Edit) | Things that must *always* happen, enforced by the harness rather than the model. `lint-file.sh` lints each edited `.ts` file |
 | **Memory** | `~/.claude/projects/.../memory/` | Index loaded each session | Facts about you and the project that aren't in the repo: preferences, reminders |
 
@@ -1420,8 +1422,9 @@ Two design points are worth remembering:
   `pnpm lint` on the whole repo after every edit, but it printed to stdout, which the
   agent never sees. It cost time and changed nothing.
 
-`/loop` (run a prompt on a timer) was considered and left out on purpose:
-`gh pr checks --watch` and `gh run watch` already block until CI and Deploy finish.
+`/loop` (run a prompt on a timer) was considered and left out on purpose. Since
+CMS-34, the CI and Deploy watches run in the background and *notify* the agent when they
+finish (§12.4), so polling on a timer would only cost turns.
 
 **The work queue:** Linear `Todo` in board order holds the next tickets, and the
 `deferred` label marks tickets out of scope under ADR-0007. `/start-ticket` uses both, so
@@ -1445,7 +1448,7 @@ and each step has a mechanical core:
 | `/verify` | tests, typecheck, `helm lint`; Pods must run **this build's image tag**; `scripts/check-docs.sh` | does the feature do what the ticket asked? |
 | `/code-review` | | bugs, design, missing edge cases |
 | CI | the three required checks, plus `check-docs.sh` inside `lint-typecheck` | |
-| `/ship` | disk check, PR from the template, `gh pr checks --watch`, `gh run watch` | **merge: always the user** |
+| `/ship` | disk check, PR from the template, CI and Deploy watches (in the background, §12.4) | **merge: always the user** |
 
 **How we did it here.**
 
@@ -1529,6 +1532,94 @@ were ignored. Code review caught the first attempt: `--dry-run=*` also matches `
 is a *real* apply, and `-f k8s/*` matches `-f k8s/x.yaml -f /anywhere.yaml`. A wildcard
 in an allow rule allows whatever text fits it, so spell out the safe values. This is the same idea as §12.1's "enforce mechanically where you can", applied
 to the agent itself.
+
+### 12.4 Working asynchronously with an agent (CMS-34)
+
+**The concept.** A chat with an agent is a series of **turns**: you send a message, the
+agent works, the agent replies. While a turn runs, anything you type waits in a queue. So a
+step that *waits* (watching CI for five minutes, building three images) inside a turn blocks
+the whole conversation, even though the agent isn't thinking, just waiting. You can't ask
+"is the review done?" while it's waiting.
+
+The fix is the same one a web server uses for slow work: **don't wait in the foreground.**
+
+- **Start the work in the background** and end the turn. The harness runs the process and
+  sends a **notification** when it exits, which starts a new turn. That's *push*, not
+  *poll*: nobody spends a turn asking "done yet?". It's the same trade-off as §11, where
+  Events gets a message when a member is archived instead of asking Members on a timer.
+- **Write progress to a durable record**, not to the agent's memory of the conversation. A
+  record survives the turn that wrote it, and anyone can read it: the agent in a later turn,
+  `/status`, the status line, or you, with `cat`.
+- **Check whether a process is alive; don't just trust what it wrote last.** A record that
+  says `running` is only true while something is still there to change it. If the process
+  died without writing (the session ended, or it was killed with `SIGKILL`, which can't be
+  caught), the record is **stale**. Distributed systems have the same problem with
+  heartbeats and leases: "last known state" and "alive now" are two separate facts, and you
+  need both.
+
+**How we did it here.**
+
+- [`scripts/agent-status.sh`](../scripts/agent-status.sh) is the only thing that writes the
+  record, `.claude/state/<ticket>.json` (gitignored), one per ticket, with a state for each
+  stage: `start plan implement verify review ci merge deploy done`.
+  - `run <stage> -- <cmd>` ([`agent-status.sh:124`](../scripts/agent-status.sh#L124)) marks
+    the stage running with its own PID, waits for the command, and records done/failed from
+    the exit code. The *wrapper* writes the result, not the agent, so the record is right
+    even while the agent is busy with something else. A catchable signal (`TERM`, `INT`,
+    `HUP`) is trapped and recorded as `failed "interrupted"`
+    ([`agent-status.sh:136`](../scripts/agent-status.sh#L136)).
+  - Every write goes through `update()` ([`agent-status.sh:82`](../scripts/agent-status.sh#L82)):
+    a `flock`, one `jq` filter, a temp file, then `mv`. Two writers (a background `run`
+    finishing while the agent runs `set`) can't interleave, and a reader never sees half a
+    file.
+  - `show` and `line` check each `running` stage's PID with `kill -0`
+    ([`agent-status.sh:106`](../scripts/agent-status.sh#L106)) and report a dead one as
+    **stale**.
+- The long waits in the skills now go through `run`, started in the background:
+  `/ship`'s CI watch ([`ship/SKILL.md:68`](../.claude/skills/ship/SKILL.md#L68)) and Deploy
+  watch ([`ship/SKILL.md:97`](../.claude/skills/ship/SKILL.md#L97)), and `/verify`'s cluster
+  build ([`verify/SKILL.md:49`](../.claude/skills/verify/SKILL.md#L49)). The merge is still
+  a gate: when CI is green, `/ship` records `merge waiting`
+  ([`ship/SKILL.md:81`](../.claude/skills/ship/SKILL.md#L81)), notifies you, and merges only
+  on your yes. A background review is a forked agent that runs `/code-review` (CLAUDE.md
+  Workflow).
+- [`.claude/skills/status/SKILL.md`](../.claude/skills/status/SKILL.md) answers progress
+  questions. It reads the record, lists background tasks and agents, and runs a live `gh`
+  check only for stages that are running or stale. The agent may invoke it on its own,
+  unlike `/ship`, so a plain "is CI done?" triggers it.
+- [`.claude/statusline.sh`](../.claude/statusline.sh) (wired in
+  [`settings.json:73`](../.claude/settings.json#L73)) prints `agent-status.sh line` at the
+  bottom of the Claude Code terminal: `CMS-34 · verify ✓ · review ✓ · ci …`.
+- The allow list in [`.claude/settings.json`](../.claude/settings.json) names the safe
+  subcommands (`set`, `pr`, `show`, `line`) and the *exact* `run` commands the skills use,
+  not `scripts/agent-status.sh *`. `run` executes whatever follows `--`, so a wildcard would
+  turn the wrapper into a way around every other prompt (§12.3). The `--ticket` writes after
+  a merge and the Deploy watch still ask you: a wildcard in their middle could hide another
+  `run`.
+- How to use it: [`status-dashboards.md`](status-dashboards.md) ("Watching the agent"), with
+  exercises.
+
+**Why this way.** A JSON file and a bash script, not a database or a NATS subject: one
+machine, one user, and you can read the record with `cat`. That's clearer than anything
+cleverer (the project's preference). The cost is the main limitation of this part: a
+**background task belongs to the session that started it**. Close the session and the CI
+watch dies with it, and the record goes stale. `/status` notices and checks live, but
+nothing continues the work. Part 2 of the orchestration track (an Agent SDK orchestrator
+running as its own process, which moves the ticket through these same stages and resumes
+from the record) fixes exactly that. It's deliberately not built yet. Also deferred: a
+`/loop` that polls. Push notifications already cover it, so a timer would only cost turns.
+
+**What setting it up taught:**
+
+| Problem | Lesson |
+| --- | --- |
+| `show` printed a timestamp in the PID column for any stage set without a PID: `IFS=$'\t' read` merged the two tabs around the empty field, shifting every later field one column left | Whitespace characters in `IFS` (space, tab, newline) collapse when repeated, so an empty field vanishes. Split on a character that isn't whitespace: the rows now use the ASCII unit separator `0x1f`, which exists for exactly this |
+| The first try of the "kill it with SIGTERM" exercise used `kill %1`, and the record stayed `running`: in that shell, job `%1` was a different background job, so the signal never reached the wrapper | Job numbers (`%1`) depend on what else the shell has started; `$!` is exactly the last background PID. When a test "shows the trap doesn't work", first check the signal reached the right process (`ps`, `/proc/<pid>/status`) |
+| The background review's top finding: the allow rule `Bash(scripts/agent-status.sh *)` also matched `scripts/agent-status.sh run ci -- gh pr merge 24`, a merge with no prompt | **A wrapper inherits the permissions of whatever it wraps.** Allowing the wrapper with a wildcard allows every command it can run. Allow the exact wrapped commands instead, the same lesson as §12.3's `--dry-run=*` |
+| Also from review: `run tests -- sleep 123` (a stage-name typo) started the command, *then* failed validation, leaving it running with no record. Another: on a `docs/…` branch (PR #22 used one), `run` refused to start at all | Validate everything before you start anything that has side effects. And derive keys from every input you'll really get, not just the two branch shapes you thought of |
+| Also from review: the status line called `scripts/agent-status.sh` relative to the session's folder, so in `apps/web` it silently showed only the branch | A script that `cd`s somewhere must call its siblings by a path built from its own location, resolved to an absolute path *before* the `cd`. The first fix used `$(dirname "$0")` after the `cd` and still failed: `$0` was the relative `.claude/statusline.sh` |
+| Fixing the review findings shifted `agent-status.sh` by ~10 lines, and all four §12.4 links into it went stale. `check-docs.sh` still passed: its "moved line" error compares with `main`, and a new file has no `main` version | Fix the code before writing line links into it, and re-read the "new link, points at" warnings after the last edit. For a file that's new on the branch, those warnings are the only check |
+| ShellCheck flagged `stages=(… deploy done)`: `done` is a bash keyword | It parses fine inside an array, but the warning is cheap to fix and the code reads less ambiguously with `"done"` quoted. A linter that's sometimes over-cautious is still worth running on every script (`k8s-helm.md` asks for it) |
 
 ---
 
@@ -1660,6 +1751,12 @@ in parentheses (and the file it links) is where to look.
 - [ ] What does `Bash(git checkout *)` allow besides switching branches? How would you narrow an allow rule? (§12.3)
 - [ ] Why is "the skill says ask before merging" not enough on its own? (§12.3)
 - [ ] Why does `/start-ticket` *suggest* `grill-with-docs` only for some tickets instead of running it on every one? (§12.2)
+- [ ] Why can't you ask the agent a question while `/ship` watches CI in the foreground? What changes when the watch runs in the background? (§12.4)
+- [ ] In `agent-status.sh run`, who writes "done" or "failed": the agent or the wrapper? Why does that matter? (§12.4)
+- [ ] The record says `ci running`, but `show` prints `stale`. What two facts disagree, and what could have caused it? (§12.4)
+- [ ] Why does `kill <pid>` record `failed "interrupted"`, while `kill -9 <pid>` leaves a stale record? (§12.4)
+- [ ] Why does `update()` write a temp file and `mv` it, under a `flock`? What could go wrong without each? (§12.4)
+- [ ] Push vs poll: how is a background-task notification like the NATS consumer in §11? (§12.4)
 
 ---
 
@@ -1705,6 +1802,18 @@ Rollouts (§7.8) are now gap-free for a planned stop. Surviving an *unplanned* o
 next step, when a reason appears: a **second web replica** (a crashed Pod or a dead node
 then doesn't take the site down) and a **PodDisruptionBudget**, which stops `kubectl drain`
 from removing every replica at once.
+
+The agent-orchestration track (§12.4) has its next parts lined up, each written down as
+ADR-0011 before it's built:
+
+- **Custom subagents** in `.claude/agents/` (a docs writer, a DDD reviewer, a K8s
+  reviewer), each with only the tools it needs, running in the background and writing to
+  the status record.
+- **An orchestrator that outlives the session**: a TypeScript Claude Agent SDK process that
+  moves a ticket through the same stages and resumes from the record after a crash. This
+  fixes §12.4's main limitation, where a background task dies with its session.
+- **An advisory agent in CI** that comments on PRs (learning docs, ADR compliance), and
+  later the same pipeline rebuilt in CrewAI, to compare a framework with the SDK.
 
 To rebuild everything from scratch at any time: `scripts/cluster-up.sh --fresh` (§7.7).
 

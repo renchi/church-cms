@@ -43,8 +43,13 @@ Prerequisites: `minikube status` shows Running, and `minikube tunnel` is open so
 
 Deploy the branch with the bootstrap script. It builds every image under a tag derived from the code (`local-<sha>`, plus `-dirty-<hash>` for uncommitted edits), so Helm actually rolls the Pods. Don't rebuild under a fixed tag like `:local`: the spec doesn't change, the old Pods keep running, and you'd be verifying stale code.
 
+The build takes minutes, so start it in the background (`run_in_background`) and end the turn; the user can keep chatting, and `/status` shows `verify …` until it finishes (study-guide §12.4). Continue with the checks below when the notification arrives:
+
 ```bash
-scripts/cluster-up.sh --no-sudo        # ends with "✔ <svc> runs <svc>:local-<sha>…" per service, then the smoke test
+scripts/agent-status.sh run verify -- scripts/cluster-up.sh --no-sudo   # ends with "✔ <svc> runs <svc>:local-<sha>…" per service, then the smoke test
+```
+
+```bash
 kubectl get deploy <svc>-<svc> -o jsonpath='{.spec.template.spec.containers[0].image}'   # must show this run's tag
 kubectl logs deploy/<svc>-<svc> --tail=50    # no errors or stack traces
 ```
@@ -63,4 +68,6 @@ Fix every error. For each warning, open the linked line and either confirm it st
 
 ## Report
 
-End with a short table of each step, the result (pass, fail or skipped) and the evidence (a command output excerpt). Don't call the ticket verified if any step failed. Next: `/code-review`, then `/ship`.
+End with a short table of each step, the result (pass, fail or skipped) and the evidence (a command output excerpt). Don't call the ticket verified if any step failed. Record the overall result, since step 4's `run` only covers the cluster build: `scripts/agent-status.sh set verify done "<n> steps pass, <n> skipped"` (or `failed "<which step>"`).
+
+Next: `/code-review`, then `/ship`. The review can run in the background too: the user says "review in the background" (CLAUDE.md Workflow).

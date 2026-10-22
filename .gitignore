@@ -17,3 +17,6 @@ kubectl.sha256
 
 # Per-service generated Prisma clients (see apps/events-service/prisma/schema.prisma)
 apps/*/generated/
+
+# Per-ticket agent status records (scripts/agent-status.sh), local to this machine
+.claude/state/

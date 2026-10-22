@@ -45,6 +45,14 @@ git checkout -b cms-<n>/<two-to-four-word-slug>
 
 Move the ticket to **In Progress** (connector `save_issue`, or the GraphQL `issueUpdate` mutation with the In Progress `stateId`).
 
+Start the ticket's status record, which `/status` and the status line read (study-guide §12.4):
+
+```bash
+scripts/agent-status.sh set start done "branch cms-<n>/<slug>"
+```
+
+Record later stages as they happen: `set plan done` when the plan is approved, `set implement running`, then `set implement done` before `/verify`.
+
 ## 5. Surface reminders
 
 Check the memory index for open reminders, such as repo visibility or pending follow-ups, and state them. Then check that the cluster is up if the ticket touches K8s: `minikube status`.

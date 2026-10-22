@@ -162,6 +162,15 @@ Then mark the ticket Done in Linear.
 
 **What this does:** each step is a gate the next one depends on. The disk check comes *first* because a full disk fails the Deploy build after the merge, when the PR is already on `main`. The merge is the one step the agent never auto-runs: `gh pr merge` isn't in `.claude/settings.json`'s allowlist, so Claude Code asks you even if the skill forgot to (study-guide §12.3).
 
+**How the agent runs steps 3 and 5:** in the background, wrapped so the result lands in the ticket's status record (study-guide §12.4):
+
+```bash
+scripts/agent-status.sh run ci -- gh pr checks --watch
+scripts/agent-status.sh --ticket CMS-<n> run deploy -- scripts/watch-deploy.sh <merge-sha>
+```
+
+The chat stays free while they run: ask "is CI done?" any time. When CI is green, the status shows `merge ⏸ waiting for you` until you answer. How to read the status: [status-dashboards.md](status-dashboards.md#watching-the-agent).
+
 ### Migrations and rollbacks (expand/contract)
 
 Each service's `migrate` init container (members-service and events-service) applies migrations **before** the new Pods are known to be healthy. If they then fail readiness, `helm --rollback-on-failure` rolls back the image, but **not the schema**. The old code then runs against the new schema.
