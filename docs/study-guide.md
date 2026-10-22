@@ -47,8 +47,9 @@ After stage 9: **CMS-26** finished the member registration workflow in the brows
 (§5.1–5.4: Server Actions, Post/Redirect/Get, and a broken-in-the-cluster list page found on
 the way). **CMS-33** then went back to Docker (goal 1): the app images shrank from ~1.3 GB
 to ~0.3 GB once they stopped carrying the whole monorepo's `node_modules`, and the runner's
-disk stopped filling up (§2.5). Next are CMS-28 (Loki), CMS-27 (publish `MemberRegistered`)
-and CMS-20 (Communications).
+disk stopped filling up (§2.5). **CMS-32** closed the `502` window during every rollout with a
+`preStop` sleep (§7.8: how a Pod stops, and why Ready isn't safe to remove). Next are CMS-28
+(Loki), CMS-27 (publish `MemberRegistered`) and CMS-20 (Communications).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -545,7 +546,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:21`](../charts/web/values.yaml#L21)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:381`](../scripts/cluster-up.sh#L381)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:401`](../scripts/cluster-up.sh#L401)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -553,7 +554,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Code review: the action trimmed the name and dropped a blank phone before sending | Both quietly duplicated `Member` rules, and one hid a rule: a name of `"   "` became `""`, failed Fastify's `minLength` and never reached "Name is required". And "blank phone means no phone" only held for the web form: any other client could store `""`. Fix: the action sends values as typed, and `Member` maps a blank phone to `null` (test first, [`Member.ts:34`](../apps/members-service/src/domain/Member.ts#L34)). A rule belongs where every caller gets it |
 | Code review: the error box showed `http://members-service-members-service:3001` to every visitor | The internal address we kept out of the browser bundle still reached the browser as page text. Now the visitor gets "Could not load members. Try again in a moment.", and the details go to `kubectl logs deploy/web-web` |
 | Code review: a parse error on an odd `201` body would throw out of the Server Action | Anything thrown there replaces the form with Next's error page. The client reads every body with `.catch()` and checks the `201` has an `id` |
-| The smoke test failed now and then with `/` → `000` or `502` right after a web deploy | Not this feature: web runs one replica, and after `helm --wait` the old Pod stops while Traefik still routes to it. Visitors would hit it too. The fix (a `preStop` sleep or two replicas) is a separate follow-up |
+| The smoke test failed now and then with `/` → `000` or `502` right after a web deploy | Not this feature: after `helm --wait` the old web Pod stopped while Traefik still routed to it. Visitors would hit it too. Fixed in CMS-32 with a `preStop` sleep (§7.8) |
 | The runbook first said DevTools would show "a POST answered 303 with `Location`, then a GET" | That's only true with JavaScript off. With it on, Next.js answers the action's `fetch` with `303` plus `x-action-redirect`, and streams the new page in the same response (read in `next/dist/server/app-render/action-handler.js`). Check a framework's real behaviour before writing "expected output" |
 | In the break-it exercise, `helm upgrade --reuse-values` refused to restore `MEMBERS_API_URL` after a `kubectl set env` | Helm 4 applies manifests with **server-side apply**: each field has an owner, and `kubectl set env` became the owner of that value. Helm reports the conflict instead of overwriting it; `--force-conflicts` takes ownership back ([`k8s-local-dev.md`](k8s-local-dev.md#exercise-register-a-member-through-the-ui)) |
 | Submitting the form with `curl` worked, with no JavaScript | Next.js renders hidden `$ACTION_…` fields into the form, so a plain multipart POST reaches the Server Action. That's what "progressive enhancement" means, and it makes the action testable from a shell |
@@ -666,6 +667,8 @@ Pod never becomes Ready, so a broken migration stops the rollout.
   `scripts/cluster-up.sh` now tags local builds `local-<sha>` (plus `-dirty-<hash>` for
   uncommitted edits), so new code means a new Pod spec and Helm rolls the Pods. It's the
   same idea CI uses with `:<sha>`. Why this mattered for the agent workflow: §12.2.
+- ~~**Every rollout dropped requests for a moment.**~~ Fixed in CMS-32: a `preStop` sleep
+  keeps the old Pod serving until Traefik has dropped it (§7.8).
 
 ### 7.7 Automating the runbook: an idempotent bootstrap script
 
@@ -735,6 +738,79 @@ What setting it up taught:
 
 Next steps for this idea (not needed yet): `make` targets, **helmfile** (declare all Helm releases
 in one file), or **Tilt**/**Skaffold** (rebuild and redeploy on every code change).
+
+### 7.8 Zero-downtime rollouts: how a Pod stops (CMS-32)
+
+**The concept.** A rolling update starts the new Pod, waits for it to be Ready (§7.3), then
+stops the old one. That sounds safe, but for a second or so after the old Pod starts stopping,
+requests still reach it. Stopping a Pod sets off two things **in parallel**, not in order:
+
+1. **The network side.** The Pod is removed from its Service's endpoints. Every proxy that
+   routes to it (kube-proxy, and for us **Traefik**, which watches endpoints itself) has to
+   *notice* that change before it stops sending traffic. That takes a moment.
+2. **The Pod side.** The kubelet runs the container's **`preStop` hook**, if it has one, and
+   only when the hook returns does it send **SIGTERM**. The app shuts down. If it's still
+   running when the **grace period** (`terminationGracePeriodSeconds`, default 30 s, counted
+   from the start of the stop) runs out, it gets **SIGKILL**.
+
+With no hook, SIGTERM arrives at once, the app exits in about a second, and Traefik, which
+hasn't noticed yet, sends the next request to a Pod that's gone: a `502`, or no answer at
+all (`000` from curl). That was the "flaky" smoke test after web deploys (§5.4).
+
+So **Ready isn't the same as safe to remove.** Readiness tells the proxies when to *start*
+sending traffic. Nothing tells the Pod when they've *stopped*. The standard fix is a short
+`preStop` **sleep**: the old Pod keeps serving for a few seconds while the proxies catch up,
+then gets SIGTERM once no new requests are arriving.
+
+**How we did it here.** All three charts have the same two values:
+
+- [`charts/web/values.yaml:24`](../charts/web/values.yaml#L24): `shutdown.preStopSeconds: 5`
+  (Traefik catches up in about a second, so 5 s is margin) and
+  `terminationGracePeriodSeconds: 30`, which must cover the sleep *plus* the app's shutdown.
+- [`charts/web/templates/deployment.yaml:36`](../charts/web/templates/deployment.yaml#L36)
+  adds `lifecycle.preStop.sleep`, but only when the value is above 0, so `0` brings back the
+  old behaviour for the exercise in [`k8s-local-dev.md`](k8s-local-dev.md#exercise-the-rollout-gap).
+  A few lines above ([line 20](../charts/web/templates/deployment.yaml#L20)), the template
+  refuses to render if the grace period isn't longer than the sleep, and falls back to the
+  defaults when `shutdown` is missing (see the table below for why).
+  members-service and events-service use the same template
+  ([`deployment.yaml:73`](../charts/members-service/templates/deployment.yaml#L73)). After
+  the sleep, their SIGTERM handler ([`index.ts:60`](../apps/members-service/src/index.ts#L60))
+  lets the NATS consumer finish its current message and drains the connection, all inside
+  the same 30 s.
+- [`scripts/cluster-up.sh:251`](../scripts/cluster-up.sh#L251): the script deletes old
+  `local-*` images after a deploy. `helm --wait` returns when the *new* Pods are Ready, but
+  the old ones are now still sleeping, and Docker won't remove an image a container is
+  using. So the script first waits until every Pod running one of our images runs this
+  build's tag.
+
+**Why this way.**
+
+- **`sleep:` instead of `exec: [sleep, "5"]`.** Kubernetes has a built-in sleep action
+  (on by default since 1.30, our cluster runs 1.35). The `exec` form needs a `sleep`
+  program in the image. `node:20-alpine` has one, but a smaller base image (distroless,
+  say) wouldn't, and the hook would fail.
+- **A sleep, not a second web replica.** The ticket's first idea was "run 2 replicas", but
+  that only makes the gap smaller: the Pod being replaced still gets its share of requests
+  after it has exited. A second replica protects against something else (a Pod crashing or a
+  node dying), which a sleep can't help with. It's deliberately left for later (Where to go
+  next).
+- **Same fix for the services.** They already run 2 replicas, so their gap was smaller,
+  but it was the same gap.
+- **The cost:** every rollout now takes ~5 s longer per old Pod. That's the trade.
+
+What setting it up taught:
+
+| Problem | Lesson |
+| --- | --- |
+| The smoke test failed after 3 of 4 web rollouts in CMS-26, then passed when re-run | A failure that disappears on retry is a race, not bad luck. Here it was the proxy and the Pod each doing their half of the stop independently |
+| With `preStopSeconds: 0`, 3 rollouts under a curl loop gave 3, 3 and **0** failures (`502`s and a `000`, all within ~0.4 s of each other) | One clean run proves nothing about a race. Repeat it, and show the failure *before* claiming the fix (the exercise does both). With the sleep: 0 failures in 3 web rollouts |
+| `cluster-up.sh` deletes old images right after `helm --wait`, which now returns while the old Pods are still sleeping on those images | A fix that changes timing moves other things' timing too. Anything that ran "after the rollout" now has to wait for the old Pods, not just the new ones |
+| The `deletionTimestamp` on a stopping web Pod said `20:05:50`, but the Pod was gone by `20:05:26` | `deletionTimestamp` is the SIGKILL **deadline** (start + grace period), not when stopping began. The Pod really stopped after ~6 s: the 5 s sleep, then Next.js exited at once on SIGTERM |
+| The curl loop hit `/` and `/members`, so restarting events-service under it proved little | Neither page calls events-service. A test only covers what its traffic touches. Re-run looping on `/api/events/health` and `/api/events/events`: 778 requests, 0 non-200 |
+| Following the runbook exercise during `/verify`, the first run *with* the sleep still got a `/members 000`. Timestamps put it 0.02 s after `helm upgrade … preStopSeconds=5` returned, 3 s *before* the restart | The rollout that turns the hook on stops the **old** Pod, which was created without it. A Pod stops according to its own spec, not the new one. So the first Deploy of CMS-32 still has the gap, once. The exercise now waits for that Pod before probing |
+| Code review: the first cleanup wait listed the Pods that were *already stopping*, once | It could miss an old Pod the Deployment hadn't marked yet, waited on unrelated Pods (a stuck Postgres would add 60 s), and a `kubectl` error aborted the whole script. Waiting for the condition you actually need ("no Pod uses an old image") is safer than waiting on a snapshot of a proxy for it |
+| Code review: `helm upgrade --reuse-values` on a release from the old chart. Tested on a throwaway release: a nil-pointer error without `--set`, and `terminationGracePeriodSeconds:` (empty) with one | `--reuse-values` keeps the *old* release's values and doesn't add the new chart's defaults. A template that reads a new key must cope with it missing (`dig` with a default). The same review added a `fail` when the grace period isn't longer than the sleep, so a bad pair breaks `helm template`, not a rollout |
 
 ---
 
@@ -1540,6 +1616,13 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why must the monitoring stack be installed before members-service? (§7.7)
 - [ ] How do you find minikube's real memory cap, and why is `free` inside the node misleading? (§7.7)
 - [ ] Why does the script check `/etc/hosts` and the tunnel instead of fixing them? (§7.7)
+- [ ] When a Pod is stopped, which two things happen at the same time, and why does that cause `502`s? (§7.8)
+- [ ] A rollout waits for the new Pod to be Ready. Why isn't that enough to make removing the old one safe? (§7.8)
+- [ ] What does `terminationGracePeriodSeconds` count from, and what must it be longer than? (§7.8)
+- [ ] Why does a second replica shrink the gap but not close it, and what does it protect against that a sleep can't? (§7.8)
+- [ ] Why use the built-in `sleep:` action instead of `exec: [sleep, "5"]`? (§7.8)
+- [ ] A Pod's `deletionTimestamp` is 30 s in the future. What does it mean? (§7.8)
+- [ ] Why does the chart read `shutdown` with `dig` and a default, when `values.yaml` already sets it? (§7.8)
 
 **CI/CD**
 
@@ -1617,6 +1700,11 @@ Images and the runner's disk (§2.5) have cheap next steps, each waiting for a r
   image disappears. Worth it if the disk gets tight again.
 - **One owner for the cluster**: two agent sessions running `cluster-up.sh` at once
   deleted each other's images. A lock file in `cluster-up.sh` (`flock`) would serialise them.
+
+Rollouts (§7.8) are now gap-free for a planned stop. Surviving an *unplanned* one is the
+next step, when a reason appears: a **second web replica** (a crashed Pod or a dead node
+then doesn't take the site down) and a **PodDisruptionBudget**, which stops `kubectl drain`
+from removing every replica at once.
 
 To rebuild everything from scratch at any time: `scripts/cluster-up.sh --fresh` (§7.7).
 

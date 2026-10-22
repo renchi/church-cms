@@ -237,11 +237,31 @@ helm_quiet upgrade --install web ./charts/web \
   --set ingress.enabled=true \
   --wait --timeout 4m
 
-# Old local-* builds would pile up and fill the disk. Only now, after --wait has
-# replaced every Pod, is no Pod using them; removing them earlier could pull an
-# image out from under a Pod that then restarts (pullPolicy=Never can't fetch it).
+# Old local-* builds would pile up and fill the disk. They can go once no Pod
+# uses them; removing them earlier could pull an image out from under a Pod that
+# then restarts (pullPolicy=Never can't fetch it). --wait returns when the NEW
+# Pods are Ready, but the old ones are still stopping then: the preStop sleep
+# keeps them serving for a few seconds (CMS-32, study guide §7.8), and Docker
+# refuses to remove an image a container still uses. So first wait until every
+# Pod running one of our images runs THIS build's tag. Asking "which Pods run an
+# old image?" rather than "which Pods are stopping?" also catches an old Pod the
+# Deployment hasn't started stopping yet, and ignores unrelated stopping Pods
+# (Postgres, exercises). A kubectl error counts as "none left": the prune below
+# fails safe on its own, so cleanup never aborts the run.
+old_pods() {
+  local images
+  images=$(IFS='|'; echo "${IMAGES[*]}")   # members-service|events-service|church-cms-web
+  kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name} {.spec.containers[0].image}{"\n"}{end}' 2>/dev/null \
+    | grep -E " ($images):local-" | grep -v ":$IMAGE_TAG\$" || true
+}
+for _ in {1..30}; do   # up to ~60 s: 5 s preStop sleep + shutdown, with margin
+  stale=$(old_pods)
+  [[ -z "$stale" ]] && break
+  sleep 2
+done
+[[ -z "$stale" ]] || warn "old Pods still running after 60s: $(cut -d' ' -f1 <<<"$stale" | xargs)"
 # Same script as Deploy's cleanup, keeping 1: only the build Helm just deployed.
-# (Locally a rollback is a rebuild, so there's no rollback image worth 1 GB.)
+# (Locally a rollback is a rebuild, so there's no rollback image worth keeping.)
 releases=(members-service events-service web)   # same order as IMAGES
 for i in "${!IMAGES[@]}"; do
   scripts/prune-deploy-images.sh "${releases[$i]}" "${IMAGES[$i]}" 1 >/dev/null \

@@ -20,6 +20,17 @@ config:
   #   --set config.membersApiUrl=http://<release>-members-service:3001
   membersApiUrl: http://members-service-members-service:3001
 
+# How a Pod stops during a rollout (templates/deployment.yaml, study guide §7.8).
+shutdown:
+  # Keep serving this long after Kubernetes starts stopping the Pod, before the
+  # app gets SIGTERM. Traefik picks up the endpoint change in about a second;
+  # 5 s is margin. 0 = no preStop hook: the old behaviour, with 502s during a
+  # rollout (the k8s-local-dev.md exercise uses it to show the gap).
+  preStopSeconds: 5
+  # Hard limit for the whole stop, counted from the start of preStop: sleep +
+  # the app's shutdown. Past it, the kubelet SIGKILLs the container.
+  terminationGracePeriodSeconds: 30
+
 ingress:
   enabled: false    # flip to true at deploy time: --set ingress.enabled=true
   host: cms.local
