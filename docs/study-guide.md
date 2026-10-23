@@ -6,7 +6,7 @@ exercised, mapped to the **five learning goals** in
 
 1. **Docker & containers**
 2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability; logs in Loki since CMS-28)_
-3. **System design** _(stage 9 done: async events between services)_
+3. **System design** _(stage 9 done: async events between services; the contract evolved in CMS-27)_
 4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
 5. **Using AI tools** — issue-driven development _(agent orchestration track started: §12.4)_
 
@@ -50,7 +50,9 @@ to ~0.3 GB once they stopped carrying the whole monorepo's `node_modules`, and t
 disk stopped filling up (§2.5). **CMS-32** closed the `502` window during every rollout with a
 `preStop` sleep (§7.8: how a Pod stops, and why Ready isn't safe to remove). **CMS-28** added
 the logs pillar: every Pod's logs, deleted Pods included, searchable in Grafana through Loki
-(§9.9). Next are CMS-27 (publish `MemberRegistered`), tracing (CMS-29) and CMS-20 (Communications).
+(§9.9). **CMS-27** changed the event contract for the first time: Members now publishes a thin
+`MemberRegistered`, ready for Communications (§11.5: what goes in a payload, and why
+contracts grow cheaply but shrink expensively). Next are tracing (CMS-29) and CMS-20 (Communications).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -1390,11 +1392,11 @@ Two flows, one in each direction:
 the only code both services may import:
 
 - The contract: subject and stream names
-  ([`contract.ts:14`](../packages/events/src/contract.ts#L14)), a common **envelope**
+  ([`contract.ts:15`](../packages/events/src/contract.ts#L15)), a common **envelope**
   `{ id, type, version, occurredAt, data }`
-  ([`contract.ts:38`](../packages/events/src/contract.ts#L38)), and `parse*` functions
+  ([`contract.ts:40`](../packages/events/src/contract.ts#L40)), and `parse*` functions
   that validate incoming JSON
-  ([`contract.ts:105`](../packages/events/src/contract.ts#L105)).
+  ([`contract.ts:122`](../packages/events/src/contract.ts#L122)).
 - Idempotent setup: `ensureStream` and `ensureConsumer`, "create, or update to this
   config" ([`nats.ts:51`](../packages/events/src/nats.ts#L51),
   [`nats.ts:78`](../packages/events/src/nats.ts#L78)).
@@ -1412,7 +1414,7 @@ the only code both services may import:
 2. The repository maps the domain event to the wire format
    ([`outbox.ts:21`](../apps/members-service/src/infrastructure/outbox.ts#L21)) and writes
    the member row and an `OutboxMessage` row in **one** transaction
-   ([`PrismaMemberRepository.ts:79`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L79)).
+   ([`PrismaMemberRepository.ts:80`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L80)).
 3. The relay, about once a second, publishes unpublished rows in order, with the row id
    as the `Nats-Msg-Id` header ([`nats.ts:116`](../packages/events/src/nats.ts#L116)), and
    sets `publishedAt`. If publishing fails, it stops the batch and retries next tick, so
@@ -1512,6 +1514,105 @@ ConfigMap change roll the Pods.
 | Code review: `max_deliver: 10` with a 1–30 s backoff gives up after ~2.5 minutes | A redelivery limit turns a long database outage into **silently lost messages**. Transient failures retry with no limit; only messages that can never succeed are `term`ed |
 | Code review: if the consumer loop died, the Pod stayed Ready but processed nothing | The loop is now supervised, and the service exits on failure so Kubernetes restarts it. Testing that took two tries: deleting a consumer is noticed **instantly** if a pull request is open, but only at the next heartbeat check (~30 s) if not. A test with a 15 s timeout failed once in five runs; the budget now covers both paths |
 | `nats stream info` on a missing stream doesn't say "not found"; it tries to prompt for a stream name | Runbook text should come from running the command, not from memory. The troubleshooting table uses the message actually seen |
+
+### 11.5 Evolving the event contract: publishing `MemberRegistered` (CMS-27)
+
+#### The concept
+
+Stage 9 built the pipes. CMS-27 is the first time the **contract** itself changed: Members
+started publishing an event it had only ever kept to itself. Communications (CMS-20) will
+use it to send a welcome email. Two questions come up every time a contract changes.
+
+**1. What goes in the payload?** There are two well-known shapes:
+
+| Shape | Payload | The consumer… | Good for | Costs |
+| --- | --- | --- | --- | --- |
+| **Notification** (thin) | IDs only: `{ memberId }` | asks the owner for the details when it reacts | keeping data in one place; a small, stable contract | a call back to the owner, which may be down or slow |
+| **Event-carried state** (fat) | the facts: `{ memberId, name, email }` | has everything it needs in the message | consumers that must work while the owner is down; "what was true *then*" | the data is copied into every stream, log and outbox row it passes through |
+
+Neither is "the" best practice. The deciding question is usually: **what happens to
+that data once it's published?** A stream is built to keep and replay messages, so
+personal data in it is hard to take back (data-protection laws like GDPR give people the
+right to be erased).
+
+**2. How does a contract change without breaking its consumers?** Changes are not
+symmetric:
+
+- **Additive** (a new event type, a new field in `data`): nothing breaks. A consumer that
+  doesn't know the field ignores it. Our `parse*` functions build their result from the
+  fields they know and drop the rest.
+- **Breaking** (removing, renaming or retyping a field, or changing what it means): every
+  consumer that reads it breaks. You publish a `V2` *alongside* `V1`, move consumers over
+  one at a time, then retire `V1` (ADR-0010's evolution table).
+
+So **contracts grow cheaply and shrink expensively.** Whatever you publish becomes a
+promise to every future consumer. Start with the least you can, and add when a consumer
+really needs it.
+
+#### How we did it here
+
+- The contract: a new subject, `cms.members.registered`
+  ([`contract.ts:17`](../packages/events/src/contract.ts#L17)), the wire type
+  `MemberRegisteredV1 = { memberId }` with the reasoning in its comment
+  ([`contract.ts:65`](../packages/events/src/contract.ts#L65)), and a parser for CMS-20 to
+  import ([`contract.ts:133`](../packages/events/src/contract.ts#L133)). A test proves a
+  V1 consumer survives fields added later
+  ([`contract.test.ts:59`](../packages/events/src/contract.test.ts#L59)).
+- The mapping: one new `case` in `toOutboxMessage`
+  ([`outbox.ts:25`](../apps/members-service/src/infrastructure/outbox.ts#L25)).
+  `MemberUpdated` still returns `null`.
+- The use case now hands the event to the repository, so the outbox row is written in the
+  member's transaction ([`RegisterMemberUseCase.ts:21`](../apps/members-service/src/application/RegisterMemberUseCase.ts#L21)).
+- **Nothing changed in NATS.** The `MEMBERS` stream already captures `cms.members.>`, so
+  it stores the new subject. And **nothing changed in events-service**: its durable
+  consumer is filtered to `cms.members.archived`
+  ([`messaging.ts:54`](../apps/events-service/src/infrastructure/messaging.ts#L54)), so it
+  never receives the new messages. Until CMS-20 adds a consumer, `MemberRegistered`
+  messages sit in the stream, read by nobody, for its 7-day retention.
+- Tests: a unit test for the mapping that checks `data` is *exactly* `{ memberId }`
+  ([`outbox.test.ts`](../apps/members-service/src/infrastructure/outbox.test.ts)), and
+  integration tests for register → outbox row → published to the stream
+  ([`messaging.integration.test.ts:131`](../apps/members-service/src/infrastructure/messaging.integration.test.ts#L131)).
+- To watch it in the cluster, see [`messaging.md`](messaging.md), exercise 6.
+
+#### Why this way
+
+- **Thin, because of the asymmetry.** The ticket first asked for `{ memberId, name, email,
+  registeredAt }`. Adding `name` and `email` later is non-breaking; taking them out after
+  CMS-20 depends on them would need a `V2`. Starting thin leaves both doors open.
+- **No person data on the bus.** The context map says Members is the single source of
+  truth for person data. A fat event would also have left the email in Members' own
+  `OutboxMessage` table, whose published rows are kept forever (ADR-0010), long after the
+  member's own row might be erased.
+- **`registeredAt` was dropped too.** The envelope's `occurredAt` already is the moment
+  of registration. `MemberRegisteredV1` now has the same `data` as `MemberArchivedV1`.
+- **The cost moves to CMS-20.** Communications will fetch name and email from Members by
+  `memberId` when it sends, and `nak` (retry later) if Members is down. ADR-0005 already
+  plans that lookup for broadcasts (the `RecipientResolver`). The rule for the consumer:
+  *use* the data for the email, never *store* a copy.
+- **Trigger to grow the payload:** that lookup proves too slow or too fragile. Then add
+  the fields to V1 (ADR-0010's evolution table).
+- **A catch for the first consumer: retention.** The stream keeps messages for 7 days
+  (`max_age`), and a new durable consumer starts from the oldest message still stored
+  (`DeliverPolicy.All`). So when CMS-20 deploys its consumer, it gets the **last 7 days** of
+  registrations as a backlog, and nothing older. For a welcome email, that means a burst of
+  late emails and no email for anyone registered before the window. CMS-20 has to choose on
+  purpose: process the backlog, start from "now" (`DeliverPolicy.New`), or start from a set
+  time (`ByStartTime`). Publishing ahead of the consumer is only useful within the retention.
+- **Deliberately not done:** a consumer (CMS-20), and a schema registry. Two services
+  sharing one TypeScript package don't need one yet.
+
+#### What setting it up taught
+
+| Problem | Lesson |
+| --- | --- |
+| The ticket asked for name and email in the payload, but `CLAUDE.md` says other contexts never copy person data | A conflict between a ticket and the ADRs is a decision to make *before* coding. Asking "is it easy to remove later?" settled it: no, so start thin |
+| `RegisterMemberUseCase` discarded the event: `const { member } = Member.register(…)` | Mapping the event in `outbox.ts` wasn't enough; no row would ever have been written. The use-case test now asserts the event reaches `save()`. Follow the event from the aggregate to the outbox, not just the piece the ticket names |
+| An integration test asserted that registering writes **no** outbox row | Tests also record old decisions. When the decision changes, the test has to change too: it now checks `MemberUpdated` stays internal, and a new test checks the registered row |
+| Would publishing a new event disturb events-service, which consumes from the same stream? | No: a durable consumer with a **filter subject** only receives what it asked for. A new subject on a stream reaches nobody until a consumer opts in |
+| Code review: two registrations with the same email at once both passed `findByEmail`, and the loser got a `500` (Prisma `P2002`) | A check-then-insert isn't atomic; the database's unique index is the real guard. `rethrowUniqueViolation` turns its error into `ConflictError` (`409`), the same backstop events-service already had. A test races two registrations and expects one member and **one** outbox row |
+| Code review: publishing before any consumer exists, into a stream that keeps 7 days | Retention decides what a late consumer can still read. Added to "Why this way" and to CMS-20 as a decision to make, not built now |
+| In the cluster, the message in the stream had its keys in a different order from the code (`data` before `type`) | The outbox column is Postgres `jsonb`, which stores objects without key order. Harmless, since JSON objects are unordered and parsers read fields by name, but don't compare messages as strings |
 
 ---
 
@@ -1820,6 +1921,13 @@ in parentheses (and the file it links) is where to look.
 - [ ] When does a consumer `ack`, `nak` and `term` a message, and why does a `nak` get a growing delay? (§11.2)
 - [ ] Why does `recordAttendance` only move `lastAttendedAt` forward? (§11.2)
 - [ ] Why do both services declare both streams, and why doesn't that break "each publisher owns its stream"? (§11.2, ADR-0010)
+- [ ] What's the difference between a notification (thin) event and event-carried state? Give one reason to pick each. (§11.5)
+- [ ] Why is adding a field to `MemberRegisteredV1` safe for an existing consumer, but removing one isn't? Which line of `parseMemberRegistered` makes the first true? (§11.5)
+- [ ] Why does `MemberRegisteredV1` have no `registeredAt`? (§11.5)
+- [ ] CMS-20 deploys its consumer three weeks after CMS-27. Which registrations will it see, and what decides that? (§11.5, ADR-0010)
+- [ ] Members started publishing `MemberRegistered` to the same stream events-service reads from. Why didn't events-service notice? (§11.5)
+- [ ] Where would the email have ended up if the event carried it, and why does the outbox table matter here? (§11.5, ADR-0010)
+- [ ] CMS-20's consumer can't reach Members to look up the email. What should it answer: `ack`, `nak` or `term`? (§11.2, §11.5)
 - [ ] The attendance consumer and an HTTP archive load the same member at once. What goes wrong without `Member.version`, and what happens to each writer with it? (§11.2, §11.4)
 - [ ] Both Pods run an outbox relay. What stops them publishing the same row twice, and why is a redelivery limit (`max_deliver`) a bad idea here? (§11.2, §11.3)
 
@@ -1906,16 +2014,16 @@ in parentheses (and the file it links) is where to look.
 ## 14. Where to go next
 
 All nine roadmap stages are done, and the member registration workflow is now usable from
-the browser (§5). **CMS-28** made logs from every Pod searchable in Grafana (§9.9). The committed
-queue is **CMS-27** (publish `MemberRegistered` over NATS), then tracing (CMS-29), browser
+the browser (§5). **CMS-28** made logs from every Pod searchable in Grafana (§9.9), and **CMS-27**
+published `MemberRegistered` (§11.5). The committed queue is tracing (CMS-29), browser
 monitoring (CMS-30) and SLOs (CMS-31), then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
 contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
 Each one is now mostly a matter of applying patterns already learned. The most
 interesting next contexts are the ones that add a new kind of message flow:
 
-- **Communications** consuming `MemberRegistered` (a welcome email): Members would
-  publish its first new event type since stage 9. It's a type in `@cms/events`, a case in
-  `outbox.ts`, and nothing changes on the Events side (§11.3, ADR-0010).
+- **Communications** consuming `MemberRegistered` (a welcome email): the event is
+  already in the stream (CMS-27, §11.5). It's thin, so the consumer looks up name and email
+  from Members by `memberId`, and `nak`s while Members is unavailable.
 - **Validating `memberId` in Events from messages**: a local list of known members,
   kept up to date from `MemberRegistered`/`MemberArchived`, instead of a sync call
   ([`events-service-ddd.md` §8](events-service-ddd.md#8-known-gaps-deliberate)).

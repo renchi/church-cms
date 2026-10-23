@@ -1,8 +1,8 @@
 // Messaging integration tests (ADR-0010): a real Postgres AND a real NATS,
 // both throwaway containers (Testcontainers). They check the guarantees the
 // design relies on, end to end:
-//   - archiving a member writes its outbox row in the same transaction
-//   - the relay publishes that row to the MEMBERS stream
+//   - archiving or registering a member writes its outbox row in the same transaction
+//   - the relay publishes those rows to the MEMBERS stream
 //   - an AttendanceRecorded message updates the member's summary exactly once,
 //     even when it's delivered twice or two deliveries race
 import { execFileSync } from "node:child_process";
@@ -14,6 +14,7 @@ import { GenericContainer, Wait, type StartedTestContainer } from "testcontainer
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ArchiveMemberUseCase } from "../application/ArchiveMemberUseCase.js";
 import { RecordAttendanceInSummaryUseCase } from "../application/RecordAttendanceInSummaryUseCase.js";
+import { RegisterMemberUseCase } from "../application/RegisterMemberUseCase.js";
 import { ConflictError } from "../domain/errors.js";
 import { Member } from "../domain/Member.js";
 import type { MemberRepository } from "../domain/MemberRepository.js";
@@ -127,9 +128,41 @@ describe("Messaging (integration)", () => {
       expect(published).toEqual(expectedOrder);
     });
 
+    it("registering a member writes exactly one thin MemberRegistered outbox row", async () => {
+      const { id } = await new RegisterMemberUseCase(repo).execute({ name: "Alice", email: "alice@example.com" });
+
+      const rows = await prisma.outboxMessage.findMany();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        subject: "cms.members.registered",
+        publishedAt: null,
+        payload: { id: rows[0].id, type: "MemberRegistered", version: 1 },
+      });
+      // No person data in the row: it outlives the member's own row (ADR-0010).
+      expect((rows[0].payload as { data: unknown }).data).toEqual({ memberId: id });
+    });
+
+    it("two registrations with the same email at once: one wins, the other is a 409-style conflict", async () => {
+      // Both can pass findByEmail before either commits; the unique index on
+      // email decides, and its error must surface as ConflictError, not a 500.
+      const register = () => new RegisterMemberUseCase(repo).execute({ name: "Twin", email: "twin@example.com" });
+
+      const results = await Promise.allSettled([register(), register()]);
+
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+      // The loser's outbox row rolled back with it: one member, one message.
+      expect(await prisma.member.count()).toBe(1);
+      expect(await prisma.outboxMessage.count()).toBe(1);
+    });
+
     it("writes no outbox row for events no other context consumes", async () => {
-      const { member, event } = Member.register({ name: "Alice", email: "alice@example.com" });
-      await repo.save(member, [event]); // MemberRegistered: not in the contract
+      const { member } = Member.register({ name: "Alice", email: "alice@example.com" });
+      await repo.save(member);
+      const saved = (await repo.findById(member.id))!;
+      const event = saved.update({ name: "Alicia" }); // MemberUpdated: not in the contract
+      await repo.save(saved, [event]);
 
       expect(await prisma.outboxMessage.count()).toBe(0);
     });
@@ -256,6 +289,23 @@ describe("Messaging (integration)", () => {
         last_by_subj: SUBJECTS.memberArchived,
       });
       expect(stored?.json()).toMatchObject({ type: "MemberArchived", data: { memberId: member.id } });
+    });
+
+    it("the relay publishes a registered member to the MEMBERS stream", async () => {
+      const { id } = await new RegisterMemberUseCase(repo).execute({ name: "Bob", email: "bob@example.com" });
+
+      await eventually(async () => {
+        const row = await prisma.outboxMessage.findFirstOrThrow();
+        expect(row.publishedAt).not.toBeNull();
+      });
+      const stored = await nats.jsm.streams.getMessage(STREAMS.members.name, {
+        last_by_subj: SUBJECTS.memberRegistered,
+      });
+      expect(stored?.json()).toMatchObject({ type: "MemberRegistered", data: { memberId: id } });
+      // Exactly one message on the subject: a relay that published the row
+      // twice (under two different Nats-Msg-Ids) would fail here.
+      const info = await nats.jsm.streams.info(STREAMS.members.name, { subjects_filter: SUBJECTS.memberRegistered });
+      expect(info.state.subjects).toEqual({ [SUBJECTS.memberRegistered]: 1 });
     });
 
     it("an AttendanceRecorded message updates the summary once, even if delivered twice", async () => {

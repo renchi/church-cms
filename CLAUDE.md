@@ -88,7 +88,7 @@ Full context map: [`docs/adr/context-map.md`](docs/adr/context-map.md). Details 
 - **Members is the core domain.** Every other context references a `memberId`. It never duplicates person data.
 - **Each context owns its own database.** One Postgres per service. No context reads another's database.
 - **Anti-corruption layer:** never import another context's code. Reference it by ID. ESLint enforces this (`no-restricted-imports`).
-- **Cross-context communication:** async domain events over NATS JetStream (stage 9, ADR-0010): `MemberArchived` (Members → Events) and `AttendanceRecorded` (Events → Members). Wire types, subjects and the outbox/consumer plumbing live in `packages/events` (`@cms/events`). Publishers write to a transactional outbox (never publish directly from a use case); consumers are idempotent via `UnitOfWork.runOnce`. A new cross-context event is a new type in `@cms/events` plus a mapping in the publisher's `infrastructure/outbox.ts`.
+- **Cross-context communication:** async domain events over NATS JetStream (stage 9, ADR-0010): `MemberArchived` (Members → Events), `AttendanceRecorded` (Events → Members), and `MemberRegistered` (Members → Communications, published since CMS-27, no consumer until CMS-20; a thin `{ memberId }` event). Wire types, subjects and the outbox/consumer plumbing live in `packages/events` (`@cms/events`). Publishers write to a transactional outbox (never publish directly from a use case); consumers are idempotent via `UnitOfWork.runOnce`. A new cross-context event is a new type in `@cms/events` plus a mapping in the publisher's `infrastructure/outbox.ts`.
 
 ## Environments
 
@@ -111,7 +111,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `ServiceEvent` covers services + one-off events (no split aggregates) | Type-specific invariants appear in more than one or two places               | 0004        |
 | `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
 | One outbox relay batch at a time per service (advisory lock)          | One relay can't keep up, or polling latency/load matters                     | 0010        |
-| Only `MemberArchived` and `AttendanceRecorded` cross the bus          | A context needs another event (e.g. Comms/Groups consuming `MemberRegistered`) | 0010        |
+| `MemberArchived`, `AttendanceRecorded` and a thin `MemberRegistered` cross the bus | A context needs another event, or a consumer needs `MemberRegistered` to carry more than `memberId` (adding fields is non-breaking) | 0010        |
 | OTel metrics only, Prometheus pull; no Collector or traces            | Events service + NATS live, or traces wanted                                 | 0009        |
 
 ## ADR index

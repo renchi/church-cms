@@ -52,10 +52,19 @@ Moving an event from one service to another raises three questions:
 
 | Stream    | Subjects        | Created by      | Durable consumer on it         |
 | --------- | --------------- | --------------- | ------------------------------ |
-| `MEMBERS` | `cms.members.>` | members-service | `events-service` (archived)    |
+| `MEMBERS` | `cms.members.>` | members-service | `events-service` (archived only) |
 | `EVENTS`  | `cms.events.>`  | events-service  | `members-service` (attendance) |
 
-- Subjects: `cms.members.archived` and `cms.events.attendance.recorded`.
+- Subjects: `cms.members.archived`, `cms.members.registered` (CMS-27) and
+  `cms.events.attendance.recorded`.
+- Each durable consumer sets a **filter subject**, so a new subject on a stream
+  reaches nobody until a consumer asks for it. `events-service` filters on
+  `cms.members.archived`, which is why publishing `MemberRegistered` didn't
+  change it.
+- `MemberRegistered` is published before its consumer exists. A new durable
+  consumer starts from the oldest message still stored, so the first consumer
+  (CMS-20) sees at most the stream's 7 days of backlog. It must pick its
+  deliver policy on purpose (all, new, or by start time).
 - The stream configurations live in the shared contract (`STREAMS` in
   `@cms/events`). At startup each service declares **both** streams ("add, or
   update if it exists") and then its own durable consumer on the other's stream.
@@ -68,7 +77,7 @@ Moving an event from one service to another raises three questions:
 ### 3. The wire contract lives in `@cms/events`
 
 - `packages/events` holds the **wire** types (`MemberArchivedV1`,
-  `AttendanceRecordedV1`), the subject names, and `parse*` guards that check
+  `MemberRegisteredV1`, `AttendanceRecordedV1`), the subject names, and `parse*` guards that check
   incoming JSON.
 - It is the **only** package both contexts may import. Each service's domain keeps
   its own internal event types. A mapper in `infrastructure/` translates
@@ -157,4 +166,5 @@ Moving an event from one service to another raises three questions:
 | `ProcessedMessage` and published `OutboxMessage` rows kept forever | The tables grow large | A cleanup job: delete processed ids older than the stream's 7-day retention (they can't be redelivered any more) and published outbox rows after a few days |
 | Follow messages by `id` in logs               | Cross-service debugging gets painful       | OTel trace context in message headers, plus the Collector and Tempo (ADR-0009)        |
 | One NATS server, file storage on one PVC      | Production                                 | A 3-node NATS cluster with replicated streams (`replicas: 3`)                         |
-| Comms and Groups subscribers absent (deferred) | Those services are un-deferred            | They add their own durable consumers on `MEMBERS`. Members doesn't change             |
+| Comms and Groups subscribers absent (deferred) | Those services are un-deferred            | They add their own durable consumers on `MEMBERS`. Members doesn't change. `MemberRegistered` is already published for this (CMS-27) |
+| `MemberRegistered` is thin: `data: { memberId }` (CMS-27) | A consumer's lookup of name/email back to Members proves too slow or too fragile | Add the fields to V1. That's additive, so no consumer breaks. Removing a field would need a V2, which is why the event started thin and keeps person data out of the stream and the outbox |

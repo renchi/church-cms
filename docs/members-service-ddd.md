@@ -153,7 +153,8 @@ could swap Postgres for MongoDB and the use cases would not change at all.
 **Domain Events — `MemberRegistered`, `MemberUpdated`, `MemberArchived`**
 Plain typed objects returned whenever something meaningful happens inside the
 aggregate. The aggregate never publishes them itself. Since CMS-22 (ADR-0010),
-`MemberArchived` crosses to the Events context:
+`MemberArchived` crosses to the Events context, and since CMS-27 `MemberRegistered`
+is published too (`RegisterMemberUseCase` follows the same steps):
 
 1. `ArchiveMemberUseCase` passes the event to `repo.save(member, [event])`.
 2. `PrismaMemberRepository` maps it to the wire format (`infrastructure/outbox.ts`)
@@ -161,8 +162,9 @@ aggregate. The aggregate never publishes them itself. Since CMS-22 (ADR-0010),
 3. The outbox relay (`infrastructure/messaging.ts`) publishes it to NATS, and
    events-service declines the member's future volunteer assignments.
 
-`MemberRegistered` and `MemberUpdated` stay internal: no other context consumes
-them yet, so they produce no outbox row.
+`MemberRegistered` goes out as a thin `{ memberId }` event and waits in the stream
+for Communications (CMS-20). `MemberUpdated` stays internal: no other context
+consumes it, so it produces no outbox row.
 
 **Consuming: the attendance summary**
 Members also *receives* `AttendanceRecorded` from Events and keeps a copy on

@@ -4,6 +4,7 @@ import type { MemberDomainEvent } from "../domain/events.js";
 import type { MemberRepository } from "../domain/MemberRepository.js";
 import { toOutboxMessage } from "./outbox.js";
 import { prisma as defaultPrisma, inTransaction, type Db, type Prisma } from "./prisma.js";
+import { rethrowUniqueViolation } from "./uniqueViolation.js";
 
 type MemberRow = {
   id: string;
@@ -84,7 +85,10 @@ export class PrismaMemberRepository implements MemberRepository {
 
     await inTransaction(this.db, async (tx) => {
       if (snap.version === 0) {
-        await tx.member.create({ data: { ...snap, version: 1 } });
+        // The email is unique in the database. A concurrent registration with
+        // the same email loses here, and the whole transaction (its outbox row
+        // included) rolls back.
+        await rethrowUniqueViolation(tx.member.create({ data: { ...snap, version: 1 } }), "Email already registered");
       } else {
         const { count } = await tx.member.updateMany({
           where: { id: snap.id, version: snap.version },

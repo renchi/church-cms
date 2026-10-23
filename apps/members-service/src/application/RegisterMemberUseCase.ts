@@ -15,8 +15,10 @@ export class RegisterMemberUseCase {
     const existing = await this.repo.findByEmail(input.email.toLowerCase().trim());
     if (existing) throw new ConflictError("Email already registered");
 
-    const { member } = Member.register(input);
-    await this.repo.save(member);
+    // The event goes to save() with the member: the repository writes its
+    // outbox row in the same transaction (ADR-0010). A use case never publishes.
+    const { member, event } = Member.register(input);
+    await this.repo.save(member, [event]);
     return { id: member.id };
   }
 }
