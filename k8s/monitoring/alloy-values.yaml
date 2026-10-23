@@ -1,0 +1,148 @@
+# Values for the Grafana Alloy Helm chart: the agent that ships logs to Loki
+# (CMS-28, ADR-0009 addendum). Install / upgrade (docs/observability.md §8):
+#
+#   helm repo add grafana https://grafana.github.io/helm-charts
+#   helm upgrade --install alloy grafana/alloy --version 1.13.1 \
+#     -n monitoring -f k8s/monitoring/alloy-values.yaml
+#
+# Push, not pull. Prometheus *pulls* metrics: it asks each Pod for /metrics.
+# Logs work the other way round: the apps just print to stdout, the container
+# runtime writes that to a file on the node, and an agent on every node tails
+# those files and *pushes* the lines to Loki. Alloy is that agent.
+#
+# What Alloy is: Grafana's distribution of the OpenTelemetry Collector, with its
+# own config language (below). It can also collect metrics and traces, which is
+# why CMS-29 (tracing) can reuse it. Here it only does logs.
+
+controller:
+  # A DaemonSet runs one Alloy Pod per node. Each Pod reads only the log files
+  # on its own node, so every node's logs are covered exactly once.
+  type: daemonset
+
+alloy:
+  # The node's log files, mounted read-only into the Alloy Pod:
+  #   /var/log/pods/<namespace>_<pod>_<uid>/<container>/0.log  ← what we tail
+  # With minikube's `docker` runtime each 0.log is a SYMLINK into
+  #   /var/lib/docker/containers/<id>/<id>-json.log
+  # so that directory must be mounted too, or the symlinks point at nothing and
+  # Alloy finds the files but can't read them (observability.md troubleshooting).
+  mounts:
+    varlog: true
+    dockercontainers: true
+
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 128Mi }
+
+  configMap:
+    # The pipeline, in Alloy's config language. Each block is a "component"; a
+    # component's output is wired into the next one's input
+    # (e.g. `forward_to = [loki.write.default.receiver]`). Read it top to bottom:
+    # find Pods → label them → tail their files → parse → send to Loki.
+    content: |
+      // 1. Ask the Kubernetes API which Pods run on THIS node. Each result
+      //    carries metadata as __meta_kubernetes_* labels (namespace, Pod name,
+      //    Pod labels, container name, Pod uid). Needs RBAC to list Pods,
+      //    which the chart creates. K8S_NODE_NAME is set by the chart from the
+      //    Pod's own spec.nodeName (the Downward API).
+      discovery.kubernetes "pods" {
+        role = "pod"
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + sys.env("K8S_NODE_NAME")
+        }
+      }
+
+      // 2. Choose the labels each log stream gets in Loki. ONLY these four:
+      //    every distinct label combination is a separate stream with its own
+      //    index entry, so labels must have few possible values (cardinality).
+      //    Per-request values like reqId or memberId stay inside the log line,
+      //    where `| json` reads them at query time (study-guide §9.9).
+      //    The __meta_* labels are dropped automatically after this step.
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        // app = the standard app.kubernetes.io/name Pod label if it's set
+        // (the services, web, Traefik), else the plain `app` label (Postgres).
+        // The two values are joined as "<name>;<app>"; the regex takes the
+        // first non-empty one.
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name", "__meta_kubernetes_pod_label_app"]
+          separator     = ";"
+          regex         = "^;*([^;]+).*$"
+          target_label  = "app"
+        }
+        // Where this container's log file is: /var/log/pods/*<uid>/<container>/*.log
+        // (__path__ is the special label the file tailer reads).
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+      }
+
+      // 3. Expand the globs into real files, and tail them. Alloy remembers how
+      //    far it has read in each file (a "positions" file), so a restart
+      //    carries on where it stopped. Logs of a deleted Pod are already in
+      //    Loki, which is the point: `kubectl logs` loses them, Loki doesn't.
+      local.file_match "pods" {
+        path_targets = discovery.relabel.pods.output
+      }
+
+      loki.source.file "pods" {
+        targets    = local.file_match.pods.targets
+        forward_to = [loki.process.pods.receiver]
+      }
+
+      // 4. Unwrap the container runtime's format. The docker runtime stores
+      //    each line as {"log":"<what the app printed>\n","stream":"stdout","time":...}.
+      //    stage.docker keeps only the app's line and uses the runtime's
+      //    timestamp. (A containerd/CRI-O node would need stage.cri instead.)
+      //    Then drop two labels the pipeline adds by itself, to keep exactly our
+      //    four: `filename` (the file tailer adds the path; one value per log
+      //    file, redundant with pod + container) and `stream` (stage.docker adds
+      //    stdout/stderr, which would split every container into two streams).
+      //    Loki itself adds `service_name`, a copy of `app` for Grafana's Logs
+      //    Drilldown; it adds no streams, so it stays.
+      loki.process "pods" {
+        stage.docker {}
+        stage.label_drop {
+          values = ["filename", "stream"]
+        }
+        forward_to = [loki.write.default.receiver]
+      }
+
+      // 5. Kubernetes events: Pod scheduled, killed, probe failed, OOMKilled,
+      //    HPA scaled. They live in the API (`kubectl get events`), not in any
+      //    log file, and expire after an hour. Collecting them puts cluster
+      //    events on the same timeline as the app logs.
+      //    Caveat: this runs in EVERY Alloy Pod, and each one watches the whole
+      //    cluster's events. With one node that's fine; with N nodes every event
+      //    would be stored N times. The fix then: run this block in a separate
+      //    one-replica Alloy Deployment, or turn on Alloy clustering.
+      loki.source.kubernetes_events "cluster" {
+        job_name   = "kubernetes-events"
+        log_format = "json"
+        forward_to = [loki.write.default.receiver]
+      }
+
+      // 6. Push everything to Loki's HTTP API. Loki's Service, not a gateway:
+      //    k8s/monitoring/loki-values.yaml runs a single Loki process.
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }

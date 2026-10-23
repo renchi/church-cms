@@ -13,6 +13,13 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-web
+        # The standard name label, which the services' charts already set. Alloy
+        # turns it into the `app` log label, so web's logs are {app="web"} in Loki,
+        # like {app="members-service"} (k8s/monitoring/alloy-values.yaml).
+        # Only on the Pod template, not in spec.selector above: a Deployment's
+        # selector can't be changed after creation, and adding a label to the
+        # Pods doesn't need it to be.
+        app.kubernetes.io/name: web
     spec:
       {{- /* The defaults repeat values.yaml on purpose. `helm upgrade --reuse-values`
       on a release made before CMS-32 does NOT get the chart's new defaults (Helm 4),
@@ -59,6 +66,9 @@ spec:
             # "Could not load members" (the bug fixed in CMS-26).
             - name: MEMBERS_API_URL
               value: {{ .Values.config.membersApiUrl | quote }}
+            # Read by apps/web/lib/log.ts: lines below this level aren't written.
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel | default "info" | quote }}
           readinessProbe:
             httpGet:
               path: /

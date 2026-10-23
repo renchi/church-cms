@@ -30,9 +30,27 @@ grafana:
       enabled: true
       label: grafana_dashboard
       labelValue: "1"
+  # Loki as a second data source, next to the Prometheus one the chart adds.
+  # A fixed uid lets dashboards point at it by name (service-red-dashboard.yaml
+  # uses "uid": "loki"). The URL is Loki's Service inside the cluster
+  # (k8s/monitoring/loki-values.yaml), so the browser never talks to Loki directly:
+  # Grafana queries it on the browser's behalf.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      url: http://loki.monitoring.svc.cluster.local:3100
+      access: proxy
+      jsonData:
+        # Loki returns at most this many lines per query (Grafana's default is 1000).
+        maxLines: 1000
+  # 256Mi was too tight: after ~2 weeks of uptime Grafana sat at 255/256Mi, spent
+  # its CPU on garbage collection, and failed its probes, so Traefik answered 503
+  # (found during CMS-28; study-guide §9.9). 512Mi leaves room for log queries,
+  # which Grafana holds in memory while it renders them.
   resources:
-    requests: { cpu: 50m, memory: 128Mi }
-    limits: { memory: 256Mi }
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { memory: 512Mi }
 
 prometheus:
   prometheusSpec:

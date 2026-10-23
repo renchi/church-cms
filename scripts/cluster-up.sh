@@ -29,6 +29,8 @@ set -euo pipefail   # stop on the first error, on unset variables, and on failur
 TRAEFIK_CHART_VERSION=41.6.1
 KPS_CHART_VERSION=92.2.0          # kube-prometheus-stack
 NATS_CHART_VERSION=2.15.0
+LOKI_CHART_VERSION=18.15.0        # grafana-community/loki (the OSS chart's home since 2026-03)
+ALLOY_CHART_VERSION=1.13.1        # grafana/alloy
 # Resources for a NEW cluster. Prometheus + Grafana + both services + NATS fit in
 # this. An existing cluster can't be resized — that needs --fresh.
 MINIKUBE_MEMORY_MB=6144
@@ -122,7 +124,9 @@ step "k8s-local-dev §2" "Traefik Ingress controller (chart $TRAEFIK_CHART_VERSI
 helm repo add traefik https://traefik.github.io/charts --force-update >/dev/null
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/ --force-update >/dev/null
-helm repo update traefik prometheus-community nats >/dev/null
+helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null
+helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null
+helm repo update traefik prometheus-community nats grafana grafana-community >/dev/null
 helm_quiet upgrade --install traefik traefik/traefik \
   --version "$TRAEFIK_CHART_VERSION" \
   -n traefik --create-namespace \
@@ -146,6 +150,25 @@ ok "monitoring stack ready"
 
 step "observability §3" "Grafana dashboard"
 kubectl apply -f k8s/monitoring/service-red-dashboard.yaml
+
+# --- Logs: Loki + Alloy --------------------------------------------------------
+# Loki before Alloy, so Alloy's first pushes find it (Alloy would retry anyway).
+# Grafana already has Loki as a data source (kube-prometheus-stack values).
+step "observability §7" "Loki log store (chart $LOKI_CHART_VERSION)"
+helm_quiet upgrade --install loki grafana-community/loki \
+  --version "$LOKI_CHART_VERSION" \
+  -n monitoring \
+  -f k8s/monitoring/loki-values.yaml \
+  --wait --timeout 5m
+ok "Loki ready"
+
+step "observability §8" "Alloy log agent, one per node (chart $ALLOY_CHART_VERSION)"
+helm_quiet upgrade --install alloy grafana/alloy \
+  --version "$ALLOY_CHART_VERSION" \
+  -n monitoring \
+  -f k8s/monitoring/alloy-values.yaml \
+  --wait --timeout 3m
+ok "Alloy ready"
 
 # --- 5. Postgres -------------------------------------------------------------
 step "k8s-local-dev §5" "Postgres for members-service and events-service (one each, ADR-0008)"
@@ -410,10 +433,23 @@ else
   warn "skipping HTTP checks until the tunnel and /etc/hosts are fixed (see above)"
 fi
 
-# Prometheus has no Ingress; reach it through a temporary port-forward.
+# Prometheus and Loki have no Ingress; reach them through temporary port-forwards.
+# If something else already listens on the port (often your own port-forward from
+# the runbook, maybe to an older cluster), kubectl can't bind it, and the checks
+# below would quietly query whatever that is. So refuse, and say why.
+# port_free <port> — true when nothing answers on localhost:<port>.
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+for port in 9090 3100; do
+  if ! port_free "$port"; then
+    smoke_ok=false
+    fail "localhost:$port is already in use (an old port-forward? find it: lsof -i :$port). The Prometheus/Loki checks below would query it instead of this cluster"
+  fi
+done
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090 >/dev/null 2>&1 &
 pf_pid=$!
-trap 'kill $pf_pid 2>/dev/null || true' EXIT
+kubectl -n monitoring port-forward svc/loki 3100 >/dev/null 2>&1 &
+loki_pf_pid=$!
+trap 'kill $pf_pid $loki_pf_pid 2>/dev/null || true' EXIT
 # targets_up <job> — true once Prometheus scrapes both Pods of that service.
 targets_up() {
   curl -s 'http://localhost:9090/api/v1/targets?state=active' \
@@ -427,6 +463,24 @@ for job in members-service events-service; do
     smoke_ok=false
   fi
 done
+
+# The whole log path in one check: a members-service line in Loki means Alloy found
+# the Pod, read its log file, labelled it (namespace/app), and Loki stored it.
+# Any members-service line will do: the service logs at startup and on every request.
+# loki_has_logs — true once Loki returns at least one line from the last 15 minutes.
+loki_has_logs() {
+  curl -s -G 'http://localhost:3100/loki/api/v1/query_range' \
+    --data-urlencode 'query={namespace="default", app="members-service"}' \
+    --data-urlencode "start=$(( $(date +%s) - 900 ))000000000" \
+    --data-urlencode 'limit=1' \
+    | jq -e '[.data.result[].values[]] | length >= 1'
+}
+if wait_for 60 "members-service logs in Loki" loki_has_logs; then
+  ok "Loki has members-service logs (Alloy → Loki works)"
+else
+  smoke_ok=false
+  fail "no members-service logs in Loki: check kubectl -n monitoring logs ds/alloy (docs/observability.md troubleshooting)"
+fi
 
 # Each service creates its durable consumer on the OTHER service's stream when it
 # connects (ADR-0010). Both existing means both services reached NATS.
@@ -454,6 +508,7 @@ cat <<EOF
     Grafana password   kubectl get secret -n monitoring -l app.kubernetes.io/component=admin-secret \\
                          -o jsonpath="{.items[0].data.admin-password}" | base64 --decode; echo
     Prometheus         kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090
+    Logs (Loki)        Grafana → Explore → Loki, e.g. {app="members-service"} | json
 
     Next: send some traffic and watch the dashboard — docs/observability.md, exercises.
 EOF

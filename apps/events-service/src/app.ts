@@ -14,10 +14,13 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   const app = Fastify({
     // pino JSON logs; `service` tells the two services' lines apart once
     // `kubectl logs` output from both is mixed together (study-guide §9.6).
+    // The level is written as a word ("error", not 50) for readable Loki
+    // queries, as in members-service (study-guide §9.9).
     logger: logger
       ? {
           level: process.env.LOG_LEVEL ?? "info",
           base: { service: "events-service" },
+          formatters: { level: (label: string) => ({ level: label }) },
         }
       : false,
   });

@@ -10,6 +10,7 @@
 // here too, once Identity exists (deferred).
 
 import { redirect } from "next/navigation";
+import { logEvent } from "@/lib/log";
 import { registerMember } from "@/lib/membersApi";
 import type { RegisterFormState } from "./formState";
 
@@ -32,7 +33,14 @@ export async function registerMemberAction(
   const result = await registerMember(values);
 
   // Failure: no redirect. Return the error and the typed values for the form to show.
+  // The log lines carry the outcome and the member's id, never the typed values:
+  // name, email and phone are personal data (study-guide §9.9).
+  // The level says whose problem it is: a 400/409 is the user's to fix (warn); a
+  // 5xx, no answer, or a wrong answer is ours (error), so `level="error"` queries
+  // and the dashboard's errors panel catch outages.
   if (!result.ok) {
+    const userError = result.status === 400 || result.status === 409;
+    logEvent(userError ? "warn" : "error", { status: result.status }, "registration failed");
     return { error: result.error, values };
   }
 
@@ -42,5 +50,7 @@ export async function registerMemberAction(
   // stay outside any try/catch, or the catch would swallow the redirect.
   // The URL carries the new member's id, not their name: the list page looks the
   // name up, so a crafted link can't make the banner say whatever it likes.
+  // Logged before redirect(), which throws and ends the function.
+  logEvent("info", { memberId: result.id, status: result.status }, "registration succeeded");
   redirect(`/members?registered=${encodeURIComponent(result.id)}`);
 }

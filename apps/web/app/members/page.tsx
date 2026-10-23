@@ -1,5 +1,6 @@
 // Server component: fetches the member list from members-service at request time.
 
+import { logEvent } from "@/lib/log";
 import Link from "next/link";
 import {
   fetchMember,
@@ -36,8 +37,9 @@ export default async function MembersPage({ searchParams }: MembersPageProps) {
     response = await fetchMembers();
   } catch (err) {
     // The details (including the internal MEMBERS_API_URL) go to the server log,
-    // `kubectl logs deploy/web-web`, not to the visitor's browser.
-    console.error(`Could not load members from ${MEMBERS_API_URL}:`, err);
+    // not to the visitor's browser: one JSON line at level "error", so Loki's
+    // `{app="web"} | json | level="error"` and the dashboard's errors panel find it.
+    logEvent("error", { url: MEMBERS_API_URL, err }, "could not load members");
     failed = true;
   }
 

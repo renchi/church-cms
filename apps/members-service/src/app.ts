@@ -8,6 +8,9 @@ export interface BuildAppOptions {
   logger?: boolean;
   // Injectable repository for tests; falls back to the Prisma-backed one.
   repo?: MemberRepository;
+  // Where log lines go when `logger` is on. Defaults to stdout; tests pass a
+  // stream they can read, to check what a request logs (memberRoutes.test.ts).
+  logStream?: { write(line: string): void };
 }
 
 // Builds the Fastify app without binding a port, so tests can drive it via
@@ -19,10 +22,16 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
     //   level — LOG_LEVEL from the ConfigMap (debug | info | warn | error).
     //   base  — fields added to every line; `service` tells you which service
     //           wrote it once logs from several services are mixed together.
+    //   formatters.level — write the level as a word ("level":"error") instead
+    //           of pino's number ("level":50). Loki queries then read
+    //           `| json | level="error"`, and Grafana colours lines by level
+    //           (study-guide §9.9).
     logger: opts.logger
       ? {
           level: process.env.LOG_LEVEL ?? "info",
           base: { service: "members-service" },
+          formatters: { level: (label: string) => ({ level: label }) },
+          ...(opts.logStream ? { stream: opts.logStream } : {}),
         }
       : false,
   });

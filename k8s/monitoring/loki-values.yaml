@@ -1,0 +1,117 @@
+# Values for the Loki Helm chart: the log store behind Grafana's "Explore → Loki"
+# (CMS-28, ADR-0009 addendum). Install / upgrade (docs/observability.md §7):
+#
+#   helm repo add grafana-community https://grafana-community.github.io/helm-charts
+#   helm upgrade --install loki grafana-community/loki --version 18.15.0 \
+#     -n monitoring -f k8s/monitoring/loki-values.yaml
+#
+# Why `grafana-community` and not `grafana`: since March 2026 the open-source
+# Loki chart is maintained there. The chart in the `grafana` repo is now for
+# Grafana Enterprise Logs only.
+#
+# What Loki stores, in two parts:
+#   - the INDEX: only the labels of each stream (namespace, pod, container, app),
+#     so it stays tiny. A "stream" is one unique set of label values.
+#   - the CHUNKS: the log lines themselves, compressed, grouped by stream.
+# A query first picks streams by label (the index), then scans those chunks for
+# the text. That's why Loki is cheap to run, and why labels must have few values
+# (study-guide §9.9: cardinality).
+
+# Monolithic (also called "single binary"): every Loki component (ingester,
+# querier, compactor, ...) runs in ONE process. Fine up to tens of GB a day; we
+# make a few MB. The other modes split the components into separate Pods, which
+# needs object storage (S3) and many more Pods than a 6 GB minikube can spare.
+deploymentMode: Monolithic
+
+loki:
+  # No multi-tenancy: one implicit tenant ("fake"), so Alloy and Grafana don't
+  # need an X-Scope-OrgID header. Multi-tenant Loki is for sharing one Loki
+  # between teams or customers.
+  auth_enabled: false
+
+  commonConfig:
+    # One copy of each log line. Replication is for losing an ingester without
+    # losing data, which needs several replicas; we have one.
+    replication_factor: 1
+
+  # Chunks and index on the Pod's local disk (the PersistentVolume below),
+  # instead of an object store like S3.
+  storage:
+    type: filesystem
+
+  # How the index is laid out on disk. tsdb + v13 is the current format; the
+  # date is when this layout starts applying (any date before the first log).
+  # A new schema is added with a later `from` date, never by editing this one.
+  schemaConfig:
+    configs:
+      - from: "2026-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          # One index file per day. Retention deletes whole days.
+          period: 24h
+
+  limits_config:
+    # Keep logs for 7 days, then the compactor deletes them. On this cluster
+    # that is well under 1 GB (check: docs/observability.md §7).
+    retention_period: 168h
+    # Reject lines older than the retention window (e.g. from a long-stopped
+    # node catching up); they would be deleted straight away anyway.
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    # Grafana's log volume histogram (the bar chart above Explore results).
+    volume_enabled: true
+
+  compactor:
+    # The compactor merges index files and, with this on, applies
+    # retention_period. Without it, logs are kept forever and the PVC fills up.
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /var/loki/compactor
+
+singleBinary:
+  replicas: 1
+  # A sidecar that loads alerting rules from ConfigMaps. Alerting on logs is out
+  # of scope (CMS-28), so it would only cost memory.
+  sidecar: false
+  persistence:
+    # A PersistentVolumeClaim, so logs survive a Loki restart (minikube's
+    # default StorageClass provisions it). 7 days of our logs fit easily.
+    enabled: true
+    size: 2Gi
+  # Loki holds recent lines in memory (the ingester) before writing chunks.
+  # The limit keeps it from crowding out the apps on the 6 GB node; Loki +
+  # Alloy together should stay around 500 MB (study-guide §9.9).
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 384Mi }
+
+# The scalable modes' components: not used in Monolithic mode.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# Memcached caches for query results and chunks. They speed up big queries on
+# big installs; here they would use more memory than Loki itself.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+# An nginx in front of Loki that routes reads and writes to different
+# components. With one process there's nothing to route: Alloy and Grafana
+# talk to the `loki` Service directly (port 3100).
+gateway:
+  enabled: false
+
+# A canary that writes and reads test lines to measure Loki itself, and a Helm
+# test Pod. Useful in production; noise here.
+lokiCanary:
+  enabled: false
+test:
+  enabled: false

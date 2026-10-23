@@ -11,6 +11,9 @@
 # SDK publishes target_info (service name, host, SDK version) from the moment a
 # service starts, so services appear even before their first request, and the
 # Events service will show up automatically once it has a ServiceMonitor.
+# The last panel ("Logs — warnings and errors") reads Loki, not Prometheus
+# (CMS-28): the Service dropdown's value is also the `app` log label, so one
+# variable drives both the metrics and the logs.
 # Each panel's description (hover the ⓘ in Grafana) explains its PromQL;
 # docs/study-guide.md walks through the queries in detail.
 apiVersion: v1
@@ -394,6 +397,38 @@ data:
               "refId": "A",
               "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_bucket{job=\"$job\"}[$__rate_interval])))",
               "legendFormat": "{{http_route}}"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "logs",
+          "title": "Logs \u2014 warnings and errors",
+          "description": "Not from Prometheus: from Loki (CMS-28). The selector {app=\"$job\"} picks the service's log streams by label (cheap, indexed); | json parses each line's pino fields; level=~\"warn|error|fatal\" keeps only the problems, and or __error__!=\"\" also keeps lines that aren't JSON at all (a crash's stack trace, a library printing plain text), which are often the worst ones. container!=\"migrate\" leaves out the init container's plain-text migration output. Read it next to the error-rate panel: a 5xx spike above, the cause here. study-guide \u00a79.9.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 24,
+            "h": 10
+          },
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending",
+            "enableLogDetails": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "refId": "A",
+              "expr": "{app=\"$job\", container!=\"migrate\"} | json | level=~\"warn|error|fatal\" or __error__!=\"\""
             }
           ]
         }
