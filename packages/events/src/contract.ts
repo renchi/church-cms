@@ -1,8 +1,9 @@
-// The published contract between the Members and Events contexts (ADR-0010).
+// The published contract between the bounded contexts (ADR-0010): today
+// Members <-> Events, plus MemberRegistered for Communications (CMS-20).
 //
-// This is the ONLY code both services may import (the ESLint
+// This is the ONLY code the services may share (the ESLint
 // no-restricted-imports rule forbids importing another service). It describes
-// what travels over NATS, not either context's domain model: each service
+// what travels over NATS, not any context's domain model: each service
 // keeps its own internal event types in src/domain/events.ts, and a mapper in
 // its infrastructure layer translates domain event → wire event. So a service
 // can refactor its domain freely as long as the wire format stays the same.
@@ -13,6 +14,7 @@
 // tokens. Our naming: cms.<publishing context>.<what happened>.
 export const SUBJECTS = {
   memberArchived: "cms.members.archived",
+  memberRegistered: "cms.members.registered",
   attendanceRecorded: "cms.events.attendance.recorded",
 } as const;
 
@@ -46,6 +48,21 @@ export interface Envelope<TType extends string, TData> {
 // Members → Events. ADR-0004: Events declines the member's volunteer
 // assignments on future events.
 export type MemberArchivedV1 = Envelope<"MemberArchived", { memberId: string }>;
+
+// Members → anyone who reacts to a new member (Communications' welcome email,
+// CMS-20). Added in CMS-27, the first event published before its consumer exists.
+//
+// A THIN event (a "notification"): it says WHO and WHEN, not the person's
+// details. `occurredAt` is the registration time. A consumer that needs the
+// name or email asks Members for them by memberId when it reacts, and doesn't
+// keep a copy: Members stays the single source of truth for person data
+// (context map), and no personal data sits in the stream or the outbox.
+//
+// Why start this small: contracts grow cheaply and shrink expensively.
+// ADDING a field later (say `email`) breaks nobody, because every parser here
+// drops fields it doesn't know. REMOVING or renaming one breaks every consumer
+// that reads it, so that needs a MemberRegisteredV2 published alongside V1.
+export type MemberRegisteredV1 = Envelope<"MemberRegistered", { memberId: string }>;
 
 // Events → Members. The context map: Members keeps a denormalised attendance
 // summary. `eventId` here is the church event (a ServiceEvent), not the message.
@@ -107,6 +124,17 @@ export function parseMemberArchived(raw: unknown): MemberArchivedV1 {
   return {
     id: envelope.id as string,
     type: "MemberArchived",
+    version: 1,
+    occurredAt: envelope.occurredAt as string,
+    data: { memberId: requireString(data, "memberId", "data") },
+  };
+}
+
+export function parseMemberRegistered(raw: unknown): MemberRegisteredV1 {
+  const { envelope, data } = parseEnvelope(raw, "MemberRegistered");
+  return {
+    id: envelope.id as string,
+    type: "MemberRegistered",
     version: 1,
     occurredAt: envelope.occurredAt as string,
     data: { memberId: requireString(data, "memberId", "data") },

@@ -5,7 +5,8 @@ on minikube, and how to watch a message travel from one database to the other.
 **Concepts first?** Read [study-guide §11](study-guide.md#11-async-messaging-with-nats-roadmap-stage-9).
 **Why this design?** See [ADR-0010](adr/0010-async-messaging-nats.md).
 
-Two flows, one in each direction:
+Two flows, one in each direction. A third event, `MemberRegistered` (CMS-27), is also
+published to `MEMBERS` but has no consumer until Communications exists (CMS-20, exercise 6):
 
 ```
 members-service                         NATS (namespace nats)                   events-service
@@ -274,3 +275,48 @@ kubectl logs -l app.kubernetes.io/name=events-service -c events-service --tail=5
 *Expected:* one `invalid message; terminating` line with `message.id must be a non-empty
 string`, and **no** retries. Compare with a `nak`: why would retrying this message
 forever be worse than dropping it?
+
+**6. A message nobody reads yet: `MemberRegistered` (CMS-27).** Since CMS-27, registering
+a member publishes a thin `MemberRegistered` to `cms.members.registered`. Its consumer,
+Communications, doesn't exist until CMS-20. Register someone (from the form at
+`http://cms.local/members/new` or with curl), then follow the message and see where it
+stops:
+
+```bash
+M=$(curl -s -H "$H" -H 'content-type: application/json' \
+  -d '{"name":"Reggie Newcomer","email":"reggie@example.com"}' $B/members/members | jq -r .id)
+
+# Hop 1: the outbox row, written in the same transaction as the member:
+kubectl exec deploy/members-postgres -- psql -U cms_user -d members_db -tAc \
+  "SELECT id, subject, \"publishedAt\", payload->'data' FROM \"OutboxMessage\" WHERE payload->'data'->>'memberId'='$M'"
+# 337b561b-…|cms.members.registered|2026-10-23 18:45:15.033|{"memberId": "e4ee20a6-…"}
+
+# Hop 2: the message in the stream. Note what's NOT in it: no name, no email.
+kubectl exec -n nats deploy/nats-box -- nats stream get MEMBERS --last-for cms.members.registered --json \
+  | jq -r .data | base64 -d | jq .
+# { "id": "337b561b-…", "data": { "memberId": "e4ee20a6-…" },
+#   "type": "MemberRegistered", "version": 1, "occurredAt": "2026-10-23T18:45:14.280Z" }
+
+# Where it stops: the stream has it, but the only consumer on MEMBERS doesn't want it.
+kubectl exec -n nats deploy/nats-box -- nats stream subjects MEMBERS
+# │ cms.members.archived │ 1     │ cms.members.registered │ 2     │
+kubectl exec -n nats deploy/nats-box -- nats consumer info MEMBERS events-service --json \
+  | jq '{filter_subject: .config.filter_subject, num_pending}'
+# { "filter_subject": "cms.members.archived", "num_pending": 0 }
+```
+
+*Expected:* the outbox row has `publishedAt` set within about a second (the relay logs
+`"published":1,"msg":"outbox events published"`), and its `data` is only `{ memberId }`.
+The stream counts the new subject, but events-service's `num_pending` stays `0`: its
+**filter subject** means it never sees registrations, which is why publishing a new event
+needed no change in events-service. The messages simply wait in the stream for its 7-day
+retention. When CMS-20 adds a durable consumer filtered to `cms.members.registered`, it
+starts from what's still in the stream.
+
+Two things to think about (study-guide §11.5):
+
+- The key order in hop 2 differs from the code that built the message (`data` comes before
+  `type`). The outbox stores the payload as Postgres `jsonb`, which doesn't keep key order.
+  That's harmless: a JSON object has no order, and the parsers look fields up by name.
+- The welcome email will need Reggie's email address, and it isn't in the message. Where
+  will CMS-20 get it, and what should its consumer do if Members is down at that moment?

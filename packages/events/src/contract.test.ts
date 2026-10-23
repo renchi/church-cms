@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InvalidMessageError, parseAttendanceRecorded, parseMemberArchived } from "./contract.js";
+import { InvalidMessageError, parseAttendanceRecorded, parseMemberArchived, parseMemberRegistered } from "./contract.js";
 
 const archived = {
   id: "msg-1",
@@ -7,6 +7,14 @@ const archived = {
   version: 1,
   occurredAt: "2026-10-15T10:00:00.000Z",
   data: { memberId: "m-1" },
+};
+
+const registered = {
+  id: "msg-3",
+  type: "MemberRegistered",
+  version: 1,
+  occurredAt: "2026-10-23T10:00:00.000Z",
+  data: { memberId: "m-2" },
 };
 
 const attendance = {
@@ -37,6 +45,28 @@ describe("parseMemberArchived", () => {
     ["empty memberId", { ...archived, data: { memberId: "" } }],
   ])("rejects a message with %s", (_label, raw) => {
     expect(() => parseMemberArchived(raw)).toThrow(InvalidMessageError);
+  });
+});
+
+describe("parseMemberRegistered", () => {
+  it("accepts a valid message", () => {
+    expect(parseMemberRegistered(registered)).toEqual(registered);
+  });
+
+  // The contract can grow: if Members later adds name/email to the payload,
+  // a consumer built against today's V1 keeps working. That's what makes
+  // adding a field a non-breaking change.
+  it("ignores fields added to the payload later", () => {
+    const grown = { ...registered, data: { memberId: "m-2", name: "Ann", email: "ann@example.com" } };
+    expect(parseMemberRegistered(grown)).toEqual(registered);
+  });
+
+  it.each([
+    ["missing memberId", { ...registered, data: {} }],
+    ["wrong type", { ...registered, type: "MemberArchived" }],
+    ["unknown version", { ...registered, version: 2 }],
+  ])("rejects a message with %s", (_label, raw) => {
+    expect(() => parseMemberRegistered(raw)).toThrow(InvalidMessageError);
   });
 });
 

@@ -25,6 +25,20 @@ describe("RegisterMemberUseCase", () => {
     expect(repo.save).toHaveBeenCalledOnce();
   });
 
+  // The event goes to save() with the member, so the repository writes its
+  // outbox row in the same transaction (ADR-0010). Dropping it here would
+  // mean no other context ever hears about the registration.
+  it("passes the MemberRegistered event to the repository", async () => {
+    const repo = makeRepo();
+    const useCase = new RegisterMemberUseCase(repo);
+
+    const { id } = await useCase.execute({ name: "Alice", email: "alice@example.com" });
+
+    expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ id }), [
+      expect.objectContaining({ type: "MemberRegistered", memberId: id }),
+    ]);
+  });
+
   it("throws ConflictError when email is already registered", async () => {
     const { member } = Member.register({ name: "Existing", email: "alice@example.com" });
     const repo = makeRepo({ findByEmail: vi.fn().mockResolvedValue(member) });

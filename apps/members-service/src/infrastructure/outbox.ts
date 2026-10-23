@@ -5,38 +5,47 @@
 // Member aggregate can change shape without breaking the Events context, as
 // long as this mapping still produces the same messages.
 import { randomUUID } from "crypto";
-import { SUBJECTS, type MemberArchivedV1, type OutboxBatch, type OutboxRow, type OutboxStore } from "@cms/events";
+import { SUBJECTS, type MemberArchivedV1, type MemberRegisteredV1, type OutboxBatch, type OutboxRow, type OutboxStore } from "@cms/events";
 import type { MemberDomainEvent } from "../domain/events.js";
 import type { Db, PrismaClient } from "./prisma.js";
 
 export interface OutboxMessage {
   id: string;
   subject: string;
-  payload: MemberArchivedV1;
+  payload: MemberArchivedV1 | MemberRegisteredV1;
 }
 
-// Returns null for events no other context subscribes to (MemberRegistered,
-// MemberUpdated). They stay internal until a consumer needs them; adding one
-// is a new case here plus a new type in @cms/events.
+// Returns null for events no other context subscribes to (MemberUpdated).
+// They stay internal until a consumer needs them; publishing one is a new case
+// here plus a new type in @cms/events (CMS-27 did this for MemberRegistered).
 export function toOutboxMessage(event: MemberDomainEvent): OutboxMessage | null {
   switch (event.type) {
-    case "MemberArchived": {
-      const id = randomUUID();
-      return {
-        id,
-        subject: SUBJECTS.memberArchived,
-        payload: {
-          id,
-          type: "MemberArchived",
-          version: 1,
-          occurredAt: event.occurredAt.toISOString(),
-          data: { memberId: event.memberId },
-        },
-      };
-    }
+    case "MemberArchived":
+      return message(SUBJECTS.memberArchived, "MemberArchived", event, { memberId: event.memberId });
+    case "MemberRegistered":
+      // Thin on purpose: only the id crosses the boundary. The member's name
+      // and email stay here; a consumer asks Members for them (contract.ts).
+      return message(SUBJECTS.memberRegistered, "MemberRegistered", event, { memberId: event.memberId });
     default:
       return null;
   }
+}
+
+// The envelope is the same for every event, so it's built in one place. The
+// row id and the envelope id are the same value: the relay sends it as the
+// Nats-Msg-Id header, and consumers dedupe on it.
+function message<P extends OutboxMessage["payload"]>(
+  subject: string,
+  type: P["type"],
+  event: MemberDomainEvent,
+  data: P["data"]
+): OutboxMessage {
+  const id = randomUUID();
+  return {
+    id,
+    subject,
+    payload: { id, type, version: 1, occurredAt: event.occurredAt.toISOString(), data } as P,
+  };
 }
 
 // Any number: a name for "the outbox relay" lock. Each service has its own
