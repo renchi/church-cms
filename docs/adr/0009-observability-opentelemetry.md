@@ -81,5 +81,61 @@ more components to run.
 | Now                                            | Trigger                                    | Then                                                                                          |
 | ---------------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | Prometheus exporter in each service (pull)     | Traces wanted / Events service + NATS live | Add OTLP exporters → an OTel Collector, which exports metrics to Prometheus and traces to Tempo |
-| Logs only via `kubectl logs`                   | Need to search logs across Pods/services   | Loki + Grafana, and trace IDs in log lines                                                    |
+| ~~Logs only via `kubectl logs`~~ Done (CMS-28, addendum below) | Need to search logs across Pods/services   | Loki + Grafana (done); trace IDs in log lines still deferred to tracing                        |
 | Dashboard only, no alert rules                 | Something must page or notify              | PrometheusRule alerts, routed by Alertmanager (already installed)                             |
+
+---
+
+## Addendum (CMS-28, October 2026): centralised logs with Loki + Alloy
+
+**Status:** Accepted
+
+The trigger in the evolution path above, "need to search logs across Pods/services",
+was met once Events and NATS went live: one member registration now touches web,
+members-service, the outbox relay and Traefik, and `kubectl logs` shows one Pod at a
+time and loses a deleted Pod's lines. This addendum takes the **logs** half of the
+path. Traces, and trace IDs in log lines, stay deferred (CMS-29).
+
+### Decision
+
+- **Store:** Loki (chart `grafana-community/loki`, the open-source chart's home since
+  March 2026) in **monolithic / single-binary** mode, **filesystem** storage on a 2 Gi
+  PVC, **7-day retention** applied by the compactor. No gateway, no memcached caches,
+  no canary: on a 6 GB minikube they would cost more memory than Loki itself.
+- **Shipper:** **Grafana Alloy** as a DaemonSet that tails `/var/log/pods` on its node
+  and pushes to Loki. Alloy is Grafana's distribution of the OpenTelemetry Collector,
+  so the tracing work (CMS-29) can reuse the same agent. Promtail is deprecated; the
+  upstream OTel Collector is weaker at tailing Pod log files.
+- **Labels (the Loki index):** only `namespace`, `pod`, `container` and `app` (from
+  `app.kubernetes.io/name`, falling back to the `app` Pod label). Everything per
+  request (`reqId`, `memberId`, `level`, `service`) stays in the JSON line and is read
+  with `| json` at query time. High-cardinality labels would multiply Loki's streams.
+- **Kubernetes events** go to Loki through the same Alloy DaemonSet
+  (`loki.source.kubernetes_events`). Correct on one node; on more nodes every event
+  would be stored once per node, so that needs a separate one-replica Alloy, or
+  Alloy clustering.
+- **Log lines:** pino levels are written as words (`"level":"error"`). Business
+  events get their own lines: members-service logs `member registered` with only
+  the `memberId` (no personal data) in the API layer, where `req.log` carries the
+  request's `reqId`, and web logs `registration succeeded|failed` through a small
+  JSON helper. Traefik writes JSON access logs, without headers.
+- **Correlation across services is by `memberId`.** `reqId` is per process and only
+  links lines inside one service. Propagating a request or trace ID across services
+  is tracing, which is CMS-29.
+
+### Consequences
+
+**Good:** every Pod's logs, including deleted Pods', are searchable in Grafana next
+to the RED metrics, and one registration can be followed across web, members-service
+and Traefik. Loki + Alloy fit in about 500 MB.
+
+**Costs:** two more components to run and upgrade. Single-binary Loki on a
+filesystem has no redundancy: losing the PVC loses the logs, which is acceptable
+for a learning cluster. Queries that skip labels (only `|= "text"`) scan every
+chunk in the time range, so they get slower as volume grows.
+
+| Now (after this addendum)                      | Trigger                                  | Then                                                       |
+| ---------------------------------------------- | ---------------------------------------- | ---------------------------------------------------------- |
+| Loki single-binary, filesystem                 | More volume than one process handles, or HA | Simple-scalable/distributed Loki on object storage (S3/MinIO) |
+| Alloy DaemonSet also collects Kubernetes events | More than one node                       | A separate one-replica Alloy for events, or Alloy clustering |
+| Correlation by `memberId`; `reqId` per service | Following one request across services    | OTel traces; `trace_id` in every log line (CMS-29)         |

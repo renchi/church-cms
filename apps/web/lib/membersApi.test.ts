@@ -35,7 +35,7 @@ describe("registerMember", () => {
 
     const result = await registerMember({ name: "Ana", email: "ana@example.com" });
 
-    expect(result).toEqual({ ok: true, id: "m-1" });
+    expect(result).toEqual({ ok: true, id: "m-1", status: 201 });
   });
 
   it("sends the input as JSON to POST /members", async () => {
@@ -55,7 +55,7 @@ describe("registerMember", () => {
 
     const result = await registerMember({ name: "Ana", email: "ana@example.com" });
 
-    expect(result).toEqual({ ok: false, error: "Email already registered" });
+    expect(result).toEqual({ ok: false, error: "Email already registered", status: 409 });
   });
 
   it("passes on a domain validation message (400 { error })", async () => {
@@ -63,7 +63,7 @@ describe("registerMember", () => {
 
     const result = await registerMember({ name: "Ana", email: "nope" });
 
-    expect(result).toEqual({ ok: false, error: "Invalid email format" });
+    expect(result).toEqual({ ok: false, error: "Invalid email format", status: 400 });
   });
 
   it("hides Fastify's schema message behind a plain one (400 FST_ERR_VALIDATION)", async () => {
@@ -76,7 +76,7 @@ describe("registerMember", () => {
 
     const result = await registerMember({ name: "Ana", email: "" });
 
-    expect(result).toEqual({ ok: false, error: INVALID_INPUT_MESSAGE });
+    expect(result).toEqual({ ok: false, error: INVALID_INPUT_MESSAGE, status: 400 });
   });
 
   it("treats a 201 without an id as not members-service", async () => {
@@ -87,7 +87,7 @@ describe("registerMember", () => {
 
     const result = await registerMember({ name: "Ana", email: "ana@example.com" });
 
-    expect(result).toEqual({ ok: false, error: UNREACHABLE_MESSAGE });
+    expect(result).toEqual({ ok: false, error: UNREACHABLE_MESSAGE, status: "invalid-response" });
   });
 
   it("shows the generic message on a 5xx", async () => {
@@ -95,7 +95,7 @@ describe("registerMember", () => {
 
     const result = await registerMember({ name: "Ana", email: "ana@example.com" });
 
-    expect(result).toEqual({ ok: false, error: UNREACHABLE_MESSAGE });
+    expect(result).toEqual({ ok: false, error: UNREACHABLE_MESSAGE, status: 500 });
   });
 
   it("shows the generic message when the service can't be reached", async () => {
@@ -103,7 +103,7 @@ describe("registerMember", () => {
 
     const result = await registerMember({ name: "Ana", email: "ana@example.com" });
 
-    expect(result).toEqual({ ok: false, error: UNREACHABLE_MESSAGE });
+    expect(result).toEqual({ ok: false, error: UNREACHABLE_MESSAGE, status: "unreachable" });
   });
 });
 

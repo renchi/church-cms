@@ -5,7 +5,7 @@ exercised, mapped to the **five learning goals** in
 [ADR-0007](adr/0007-learning-scope-and-roadmap.md):
 
 1. **Docker & containers**
-2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability)_
+2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability; logs in Loki since CMS-28)_
 3. **System design** _(stage 9 done: async events between services)_
 4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
 5. **Using AI tools** — issue-driven development _(agent orchestration track started: §12.4)_
@@ -48,8 +48,9 @@ After stage 9: **CMS-26** finished the member registration workflow in the brows
 the way). **CMS-33** then went back to Docker (goal 1): the app images shrank from ~1.3 GB
 to ~0.3 GB once they stopped carrying the whole monorepo's `node_modules`, and the runner's
 disk stopped filling up (§2.5). **CMS-32** closed the `502` window during every rollout with a
-`preStop` sleep (§7.8: how a Pod stops, and why Ready isn't safe to remove). Next are CMS-28
-(Loki), CMS-27 (publish `MemberRegistered`) and CMS-20 (Communications).
+`preStop` sleep (§7.8: how a Pod stops, and why Ready isn't safe to remove). **CMS-28** added
+the logs pillar: every Pod's logs, deleted Pods included, searchable in Grafana through Loki
+(§9.9). Next are CMS-27 (publish `MemberRegistered`), tracing (CMS-29) and CMS-20 (Communications).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -500,31 +501,31 @@ Browser ──POST /members/new (form fields)──▶ Traefik ──▶ web Pod
 Browser ◀── 303 /members?registered=<id>  or  the form + error banner
 ```
 
-- [`lib/membersApi.ts:73`](../apps/web/lib/membersApi.ts#L73): `registerMember()`, the
+- [`lib/membersApi.ts:77`](../apps/web/lib/membersApi.ts#L77): `registerMember()`, the
   only code that sends members-service a registration. It turns the form data into JSON
   and maps the answer to a result: `201 { id }` → ok, a domain `400`/`409` → the
   service's own message, Fastify's schema `400` → a plain "Some fields are missing or
-  invalid" ([line 108](../apps/web/lib/membersApi.ts#L108)), anything else, including a
+  invalid" ([line 112](../apps/web/lib/membersApi.ts#L112)), anything else, including a
   body that isn't JSON → "Couldn't reach the members service"
-  ([line 115](../apps/web/lib/membersApi.ts#L115)). It never throws: a throw would replace
+  ([line 121](../apps/web/lib/membersApi.ts#L121)). It never throws: a throw would replace
   the form with Next's error page.
 - [`app/members/new/actions.ts:1`](../apps/web/app/members/new/actions.ts#L1): the
   Server Action. It sends the values exactly as typed: trimming and "a blank phone means
   no phone" are `Member` rules ([`Member.ts:34`](../apps/members-service/src/domain/Member.ts#L34)).
   On failure it returns `{ error, values }`
-  ([line 36](../apps/web/app/members/new/actions.ts#L36)); on success it calls
-  `redirect()` with the new id ([line 45](../apps/web/app/members/new/actions.ts#L45)),
+  ([line 40](../apps/web/app/members/new/actions.ts#L40)); on success it calls
+  `redirect()` with the new id ([line 51](../apps/web/app/members/new/actions.ts#L51)),
   outside any try/catch because `redirect()` works by throwing.
 - [`app/members/new/RegisterForm.tsx:16`](../apps/web/app/members/new/RegisterForm.tsx#L16):
   the one Client Component: `useActionState`, the error banner, `defaultValue` from the
   returned values, and a button disabled while pending
   ([line 75](../apps/web/app/members/new/RegisterForm.tsx#L75)).
-- [`app/members/page.tsx:21`](../apps/web/app/members/page.tsx#L21): `?registered=<id>`
+- [`app/members/page.tsx:22`](../apps/web/app/members/page.tsx#L22): `?registered=<id>`
   is looked up with `GET /members/:id`, and the banner shows the name members-service
   has. An unknown id, a repeated parameter (an array) or a failed lookup shows no banner.
   If the list can't load, the visitor sees a generic message; the details, including the
-  internal URL, go to the server log ([line 40](../apps/web/app/members/page.tsx#L40)).
-- [`charts/web/values.yaml:21`](../charts/web/values.yaml#L21): `config.membersApiUrl`
+  internal URL, go to the server log as one JSON line at level `error` ([line 42](../apps/web/app/members/page.tsx#L42), §9.9).
+- [`charts/web/values.yaml:24`](../charts/web/values.yaml#L24): `config.membersApiUrl`
   becomes the Pod's `MEMBERS_API_URL`. Compose sets `http://members-service:3001` instead.
 - Tests: [`lib/membersApi.test.ts`](../apps/web/lib/membersApi.test.ts) stubs `fetch`
   for each status; [`actions.test.ts`](../apps/web/app/members/new/actions.test.ts)
@@ -547,8 +548,8 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 
 | Problem | Lesson |
 | --- | --- |
-| On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:21`](../charts/web/values.yaml#L21)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:401`](../scripts/cluster-up.sh#L401)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:24`](../charts/web/values.yaml#L24)) |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:424`](../scripts/cluster-up.sh#L424)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -769,10 +770,10 @@ then gets SIGTERM once no new requests are arriving.
 - [`charts/web/values.yaml:24`](../charts/web/values.yaml#L24): `shutdown.preStopSeconds: 5`
   (Traefik catches up in about a second, so 5 s is margin) and
   `terminationGracePeriodSeconds: 30`, which must cover the sleep *plus* the app's shutdown.
-- [`charts/web/templates/deployment.yaml:36`](../charts/web/templates/deployment.yaml#L36)
+- [`charts/web/templates/deployment.yaml:43`](../charts/web/templates/deployment.yaml#L43)
   adds `lifecycle.preStop.sleep`, but only when the value is above 0, so `0` brings back the
   old behaviour for the exercise in [`k8s-local-dev.md`](k8s-local-dev.md#exercise-the-rollout-gap).
-  A few lines above ([line 20](../charts/web/templates/deployment.yaml#L20)), the template
+  A few lines above ([line 27](../charts/web/templates/deployment.yaml#L27)), the template
   refuses to render if the grace period isn't longer than the sleep, and falls back to the
   defaults when `shutdown` is missing (see the table below for why).
   members-service and events-service use the same template
@@ -780,7 +781,7 @@ then gets SIGTERM once no new requests are arriving.
   the sleep, their SIGTERM handler ([`index.ts:60`](../apps/members-service/src/index.ts#L60))
   lets the NATS consumer finish its current message and drains the connection, all inside
   the same 30 s.
-- [`scripts/cluster-up.sh:251`](../scripts/cluster-up.sh#L251): the script deletes old
+- [`scripts/cluster-up.sh:274`](../scripts/cluster-up.sh#L274): the script deletes old
   `local-*` images after a deploy. `helm --wait` returns when the *new* Pods are Ready, but
   the old ones are now still sleeping, and Docker won't remove an image a container is
   using. So the script first waits until every Pod running one of our images runs this
@@ -904,7 +905,7 @@ The decision record: [ADR-0009](adr/0009-observability-opentelemetry.md).
 | Signal | Answers | Example | Here |
 | --- | --- | --- | --- |
 | **Metrics** | *How much / how often / how fast*, as numbers over time. Cheap to store, great for graphs and alerts | 0.86 req/s, p95 = 7 ms | ✅ Prometheus + Grafana |
-| **Logs** | *What exactly happened* in one event | `{"reqId":"req-e","res":{"statusCode":404}}` | ✅ JSON on stdout, `kubectl logs` |
+| **Logs** | *What exactly happened* in one event | `{"reqId":"req-e","res":{"statusCode":404}}` | ✅ JSON on stdout, shipped to Loki by Alloy (§9.9) |
 | **Traces** | *Where did the time go* as one request crosses services | members → events → NATS | ⏳ with NATS (stage 9), once requests cross services |
 
 You usually start from a **metric** (error rate went up), narrow it with **labels** (only
@@ -1036,8 +1037,10 @@ stdout per container, and `kubectl logs` reads it. JSON makes the logs *queryabl
 
 - `base: { service: "members-service" }` on every line, so mixed logs from several
   services stay attributable.
-- `level` from `LOG_LEVEL` (ConfigMap, `values.yaml` → `config.logLevel`). Pino levels are
-  numbers: 30 info, 40 warn, 50 error.
+- `level` from `LOG_LEVEL` (ConfigMap, `values.yaml` → `config.logLevel`). Pino writes
+  levels as numbers (30 info, 40 warn, 50 error) unless told otherwise; since CMS-28 a
+  `formatters.level` option writes the word instead (`"level":"error"`), so Loki queries read
+  naturally (§9.9).
 - `/health` has `logLevel: "silent"`. Probes every few seconds from 2 Pods would drown
   the real requests. They're excluded from the metrics too.
 - Fastify adds a `reqId` to every line of a request, so you can follow one request through
@@ -1069,6 +1072,139 @@ kubelet scrape, in the built-in "Kubernetes / Compute Resources" dashboards.)
 | `cms.local` resolves to Traefik's LoadBalancer IP (`10.109.105.150`), not `127.0.0.1` as the k8s runbook assumed | Ask the cluster (`kubectl get ingress` → ADDRESS) instead of trusting a hardcoded IP |
 | HPA still `<unknown>` right after enabling metrics-server | New Pods' CPU is ignored for a few minutes. Read `kubectl describe hpa` conditions before changing anything |
 | After a reinstall, 10 fresh 404s showed an error rate of **0** | A series is created on its first observation, so Prometheus's first sample of it was already `10`. `rate()` only sees increases *between* samples, so the jump from "no series" to 10 is invisible. The next 404s registered at once. In production you'd pre-initialise counters to 0 for known label values, or alert on `increase()` over longer windows |
+
+### 9.9 Centralised logging with Loki (CMS-28)
+
+#### The concept
+
+§9.6 made logs *structured*. They were still **local**: `kubectl logs` reads one Pod at a
+time, and when a Pod is deleted (a deploy, a crash, an HPA scale-down) its logs go with it.
+A registration touches web, members-service and Traefik, so following it meant three
+`kubectl logs` commands, and you only got the Pods still alive.
+
+**Centralised logging** copies every container's stdout off the node into one store you
+query from one place. It has three jobs, and each one is a different program here:
+
+| Job | Who does it here | What it means |
+| --- | --- | --- |
+| **Produce** | pino (services), `logEvent()` (web), Traefik | Write one JSON line per event to stdout. The app knows nothing about where logs go |
+| **Ship** | **Grafana Alloy**, one Pod per node (DaemonSet) | Tail the node's log files, attach labels, **push** lines to the store |
+| **Store + query** | **Loki** | Keep lines for 7 days; answer LogQL queries from Grafana |
+
+**Push vs pull.** Prometheus *pulls*: it asks each Pod for `/metrics` (§9.3). Logs go the
+other way: the app prints, the container runtime writes the file, and an agent on the node
+pushes the lines. An app never opens a connection to Loki, so a Loki outage can't slow a
+request down.
+
+**Where OpenTelemetry fits.** OTel (§9.2) is a standard for *producing and shipping*
+telemetry. Loki is a *store*. They meet in the middle: Alloy is Grafana's distribution of the
+OpenTelemetry Collector, so the shipper we installed for logs is the one tracing (CMS-29)
+can use for spans. Our services still write logs with pino, not the OTel logs SDK. Stdout is
+the simplest contract there is, and every shipper can read it.
+
+**Loki indexes labels, not text.** This is the one idea to take away.
+
+| | Elasticsearch / OpenSearch | Loki |
+| --- | --- | --- |
+| Index | Every word of every line (full-text, inverted index) | Only the **labels** of each stream |
+| A query | Looks words up in the index | Picks streams by label, then **scans** their compressed chunks for the text |
+| Cost | Index often larger than the logs; needs lots of RAM | Tiny index; chunks are just compressed files |
+| Fast at | Any search, however you phrase it | Searches that narrow by label first |
+
+A **stream** is one unique combination of label values, e.g.
+`{namespace="default", app="members-service", pod="…-29r5n", container="members-service"}`.
+Loki stores and indexes per stream.
+
+**Cardinality: why `reqId` must never be a label.** Every new label value makes a new
+stream. Four labels with a handful of values each give tens of streams. Add `reqId` as a
+label and every *request* becomes its own stream: millions of tiny streams, a huge index,
+and Loki slows down or refuses lines (`too many streams`). The rule of thumb: **a label is
+something you'd filter a whole dashboard by** (which service, which namespace). Anything
+per event (`reqId`, `memberId`, status, level) stays in the line, and `| json` extracts it
+at query time. That's slower per query, but only over the streams the labels already picked.
+
+**LogQL** reads left to right, like a shell pipe:
+
+```logql
+{namespace="default", app="members-service"}   # 1. stream selector: labels only (the index)
+  |= "member registered"                       # 2. line filter: plain text scan (cheap)
+  | json                                       # 3. parser: JSON fields become temporary labels
+  | memberId != ""                             # 4. label filter on a parsed field
+```
+
+Wrap a query in a range function and it becomes a **metric**, graphed like PromQL:
+`sum by (status) (count_over_time({app="web"} | json | msg=~"registration.*" [1m]))`.
+
+#### How we did it here
+
+- **Loki**: [`k8s/monitoring/loki-values.yaml`](../k8s/monitoring/loki-values.yaml). One
+  process (monolithic mode), chunks and index on a 2 Gi PVC, 7-day retention enforced by
+  the compactor, no gateway or caches.
+- **Alloy**: [`k8s/monitoring/alloy-values.yaml`](../k8s/monitoring/alloy-values.yaml). The
+  pipeline in its config reads top to bottom: discover this node's Pods → set the four
+  labels (`namespace`, `pod`, `container`, `app`) → tail `/var/log/pods/…` → unwrap the
+  docker runtime's JSON envelope → push to Loki. A second source,
+  `loki.source.kubernetes_events`, sends Kubernetes events (Pod killed, probe failed,
+  OOMKilled) to the same place.
+- **Grafana**: Loki is a data source in
+  [`kube-prometheus-stack-values.yaml`](../k8s/monitoring/kube-prometheus-stack-values.yaml),
+  and the RED dashboard's last panel shows warnings and errors for the selected service
+  ([`service-red-dashboard.yaml`](../k8s/monitoring/service-red-dashboard.yaml)).
+- **Business log lines**, so the logs say *what* happened, not only which URL was called:
+  - members-service: `member registered {memberId}`, in the route handler
+    ([`memberRoutes.ts`](../apps/members-service/src/api/memberRoutes.ts)).
+  - web: `registration succeeded {memberId, status}` / `registration failed {status}` from the
+    Server Action ([`actions.ts`](../apps/web/app/members/new/actions.ts)) through a tiny
+    JSON helper ([`lib/log.ts`](../apps/web/lib/log.ts)). `next start` logs nothing on its
+    own.
+  - the outbox relay already logs `outbox events published {published}`
+    ([`outboxRelay.ts`](../packages/events/src/outboxRelay.ts)).
+  - Traefik: JSON access logs ([`traefik-values.yaml`](../k8s/traefik-values.yaml)), the only
+    record of what the *browser* asked for.
+- **No personal data in logs.** The lines carry ids, never names or emails. A log store has
+  its own retention and its own readers; copying personal data into it is a privacy problem
+  that outlives the request. Unit tests pin this
+  ([`memberRoutes.test.ts`](../apps/members-service/src/api/memberRoutes.test.ts),
+  [`actions.test.ts`](../apps/web/app/members/new/actions.test.ts)).
+- The smoke test in [`cluster-up.sh`](../scripts/cluster-up.sh) asks Loki for a members-service
+  line, which proves the whole path (discovery, labels, file tailing, push, storage) at once.
+
+#### Why this way
+
+- **Loki over Elasticsearch**: a label index fits in a few hundred MB of RAM; a full-text
+  index doesn't, on a 6 GB node already running Prometheus. The cost is that a query
+  without good labels scans everything.
+- **Monolithic Loki on a filesystem**: the scalable modes need object storage (S3) and
+  several Pods each. The trade: no redundancy, so losing the PVC loses the logs. Fine here.
+- **Alloy over Promtail or the upstream OTel Collector**: Promtail is deprecated; the
+  Collector is weaker at tailing Pod log files. Alloy is also on the path to traces.
+- **Logging in the route handler, not the use case.** The application layer has no logger
+  (no "port" for it, in the DDD sense of §3.4). Adding one just to say "member registered"
+  would touch every use case. The handler already has `req.log`, which stamps the request's
+  `reqId` on the line for free. If a use case one day needs to log something only it can
+  see, that's the trigger for a `Logger` port.
+- **Following a request across services is by `memberId`, not `reqId`.** Fastify's `reqId`
+  is a counter inside one process (`req-1`, `req-2`…): web's request and members-service's
+  request have unrelated ids. Passing one id across services (a `traceparent` header) is
+  exactly what distributed tracing does, so that's CMS-29, not a home-made header now.
+- Recorded in the [ADR-0009 addendum](adr/0009-observability-opentelemetry.md). Deferred:
+  traces and `trace_id` in log lines (CMS-29), alerting on log queries, and shipping logs
+  through the OTel logs SDK.
+
+#### What setting it up taught (real problems we hit)
+
+| Problem | Lesson |
+| --- | --- |
+| The newest `grafana/loki` chart's description said "Grafana Enterprise Logs" | Since March 2026 the open-source chart lives in `grafana-community/helm-charts`; the old one is for the paid product. Read a chart's README before pinning it, not only its version list |
+| On the node, `/var/log/pods/<pod>/<container>/0.log` is a **symlink** into `/var/lib/docker/containers/` (minikube's `docker` runtime) | An agent that mounts only `/var/log` finds the files but can't read them. Mount both (`mounts.dockercontainers`), and parse with `stage.docker`, not `stage.cri` |
+| The ticket's `logs.access` for Traefik failed the chart's schema check (`additional properties 'logs' not allowed`) | Chart 41 calls it `accessLog`. Render with `helm template` before upgrading: a schema error fails the whole upgrade, and that one stops `cluster-up.sh` |
+| Traefik 3.7.3 added a setting for query parameters in access logs | Our proof of the redirect (`?registered=<id>`) depends on the query string, so it's set to `keep` explicitly rather than trusting a default that just changed |
+| Loki's label list showed `filename` and `stream` next to our four | The file tailer and `stage.docker` add labels by themselves. Check the real index (`/loki/api/v1/labels`, `/series`) after installing; we drop both with `stage.label_drop`. A query *response* also shows `detected_level` and parsed fields, which aren't index labels, so ask the series API, not a query |
+| The label drop "didn't work" right after `helm upgrade` | A ConfigMap mounted as a volume reaches the Pod up to a minute later, and only then does the reloader restart the pipeline. The test Pod had logged 18 s before the reload. Check the reloader's log before concluding a config is wrong |
+| Searching for a `memberId` returned **four** lines, not the three the ticket expected | The list page looks the new member up (`GET /members/<id>`) to show the banner (§5). Real systems make calls you forget about; centralised logs show them |
+| Grafana answered `503`: its probes timed out | Its container sat at 255/256 Mi, with `GOMEMLIMIT` (set by the chart to 90% of the limit) below what Grafana needs, so the garbage collector ran constantly (769m CPU). It had been restarting for days before this ticket. Limit raised to 512 Mi; CPU dropped to ~20m. Read CPU next to memory: memory at the limit with idle CPU is page cache, memory at the limit with busy CPU is GC thrash |
+| Code review: the member list's failure still went to `console.error` as plain text, and every failed registration was `warn`, even a 500 | A line `\| json` can't parse has no `level`, so `level="error"` queries and the dashboard panel never show it. And the level must say *whose* problem it is: a 409 is the user's (`warn`), a 500 is ours (`error`). The panel now also keeps lines that aren't JSON (`or __error__!=""`), because a crash's stack trace is exactly that |
+| With Postgres down, members-service logged the same error every 500 ms | That's the outbox relay's poll loop, not user requests. Centralised logs make a noisy retry loop visible; a backoff would quiet it (noted, not changed here) |
 
 ---
 
@@ -1736,6 +1872,13 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why p95 instead of the average? Why show 4xx and 5xx separately? (§9.5)
 - [ ] metrics-server vs. Prometheus: which one does the HPA use? (§9.7)
 - [ ] Why were Prometheus's scrapes being counted as requests, and how was that caught? (§9.8)
+- [ ] Produce, ship, store: which program does each job for our logs, and which one could CMS-29 reuse for traces? (§9.9)
+- [ ] Loki indexes labels, Elasticsearch indexes words. What does each make cheap, and what expensive? (§9.9)
+- [ ] Why must `reqId` or `memberId` never be a Loki label? What would happen to the streams? (§9.9)
+- [ ] Why does `kubectl logs` lose a deleted Pod's lines, and why does Loki still have them? (§9.9)
+- [ ] Read `{app="web"} |= "registration" | json | status != 201` piece by piece. Which part uses the index? (§9.9)
+- [ ] Why is `member registered` logged in the route handler and not the use case? What would justify a `Logger` port? (§9.9)
+- [ ] Why can't `reqId` follow a registration from web into members-service, and what fixes that? (§9.9)
 
 **AI tools**
 
@@ -1763,8 +1906,9 @@ in parentheses (and the file it links) is where to look.
 ## 14. Where to go next
 
 All nine roadmap stages are done, and the member registration workflow is now usable from
-the browser (§5). The committed queue is **CMS-27** (publish `MemberRegistered` over NATS),
-then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
+the browser (§5). **CMS-28** made logs from every Pod searchable in Grafana (§9.9). The committed
+queue is **CMS-27** (publish `MemberRegistered` over NATS), then tracing (CMS-29), browser
+monitoring (CMS-30) and SLOs (CMS-31), then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
 contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
 Each one is now mostly a matter of applying patterns already learned. The most
 interesting next contexts are the ones that add a new kind of message flow:
@@ -1785,11 +1929,14 @@ Observability has natural next steps that wait for a real need (ADR-0009):
 - **Traces**: Members and Events now talk through NATS, so this trigger has fired. An
   OTel Collector and Tempo, with trace context carried in message headers, would let
   you follow one archive from the HTTP request, through the outbox and NATS, to the
-  declined assignments. For now, follow a message by its `id` in both services' logs.
+  declined assignments. For now, follow a message by its `id` in both services' logs, now
+  in one Loki query (§9.9). This is CMS-29, next after CMS-27.
 - **Alerting**: `PrometheusRule`s (e.g. 5xx ratio > 1% for 5 min) routed by Alertmanager,
   which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
-- **Log aggregation**: Loki, so logs from all Pods are searchable in Grafana instead of
-  one `kubectl logs` at a time.
+- ~~**Log aggregation**~~: done in CMS-28 (§9.9). Next for logs, when a reason appears:
+  `trace_id` in every log line (with CMS-29), so Grafana jumps from a log line to its trace;
+  alerts on log queries (Loki's ruler); and a separate one-replica Alloy for Kubernetes events
+  once there's more than one node.
 
 Images and the runner's disk (§2.5) have cheap next steps, each waiting for a reason:
 

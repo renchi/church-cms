@@ -24,3 +24,25 @@ api:
   # Serve the dashboard without authentication. Fine for a local learning
   # cluster, never for anything reachable from a network.
   insecure: true
+
+accessLog:
+  # Access logs: one line per request that passes through Traefik (CMS-28).
+  # Traefik is the only component that sees the *browser's* requests as they
+  # arrive, e.g. the GET /members?registered=<id> that follows a registration,
+  # so these lines are the client-side hop in Loki (study-guide §9.9).
+  enabled: true
+  # JSON, so `| json` in LogQL turns RequestPath, DownstreamStatus, Duration, ...
+  # into fields, the same way it does for the services' pino lines.
+  format: json
+  fields:
+    headers:
+      # Leave request headers out of the log: they can carry cookies and
+      # auth tokens, which must never land in a log store. (The chart's
+      # default already; stated so it's visible.)
+      defaultMode: drop
+    queryParameters:
+      # Keep the query string in RequestPath. Ours carries only ids
+      # (?registered=<memberId>), which is how a registration's redirect is
+      # found in Loki. An app that put tokens or emails in URLs would need
+      # `drop` here.
+      defaultMode: keep

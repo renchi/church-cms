@@ -46,6 +46,13 @@ export async function memberRoutes(
     async (req, reply) => {
       try {
         const result = await registerMember.execute(req.body);
+        // A business log line: says *what* happened, not just which HTTP call ran.
+        // Only the id: a name or email in a log is personal data copied into a
+        // system with its own retention and access rules (memberRoutes.test.ts
+        // checks this). Logged here, not in the use case, because `req.log`
+        // stamps the request's `reqId` on the line, and the application layer
+        // has no logging port (study-guide §9.9).
+        req.log.info({ memberId: result.id }, "member registered");
         return reply.status(201).send(result);
       } catch (err) {
         return handleError(reply, err);

@@ -11,6 +11,9 @@ service:
 
 config:
   nodeEnv: production
+  # Lowest level apps/web/lib/log.ts writes: debug | info | warn | error. The same
+  # setting as the services' config.logLevel; raise to debug while troubleshooting.
+  logLevel: info
   # Where server-side code (pages, Server Actions) reaches members-service.
   # This is the in-cluster Service DNS name, <release>-<chart> = members-service-members-service.
   # The browser never uses it: it can't resolve cluster DNS. Becomes MEMBERS_API_URL.

@@ -246,6 +246,8 @@ services:
       # valid inside the Docker network, which is why it has no NEXT_PUBLIC_
       # prefix: the browser never calls it.
       MEMBERS_API_URL: http://members-service:3001
+      # Lowest level apps/web/lib/log.ts writes (debug | info | warn | error).
+      LOG_LEVEL: info
 
     # "init: true" tells Docker to inject its own tini binary (/usr/bin/docker-init)
     # as PID 1 in this container.  This gives us signal forwarding and zombie

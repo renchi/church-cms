@@ -64,7 +64,13 @@ export interface RegisterMemberInput {
 // A result instead of a thrown error: a duplicate email is an expected outcome
 // the form has to display, not an exceptional crash.
 // On success members-service returns only the new id (201 { id }), not the whole member.
-export type RegisterMemberResult = { ok: true; id: string } | { ok: false; error: string };
+// `status` is for the logs (the Server Action logs it on both outcomes): the HTTP
+// status members-service answered, "unreachable" when no response came back at all,
+// or "invalid-response" when the answer wasn't members-service's (a 201 with no id).
+// On failure, `error` is the text for the user.
+export type RegisterMemberResult =
+  | { ok: true; id: string; status: number }
+  | { ok: false; error: string; status: number | "unreachable" | "invalid-response" };
 
 export const UNREACHABLE_MESSAGE = "Couldn't reach the members service, try again.";
 export const INVALID_INPUT_MESSAGE =
@@ -83,7 +89,7 @@ export async function registerMember(input: RegisterMemberInput): Promise<Regist
     });
   } catch {
     // fetch only throws when there's no HTTP response at all (DNS, connection refused).
-    return { ok: false, error: UNREACHABLE_MESSAGE };
+    return { ok: false, error: UNREACHABLE_MESSAGE, status: "unreachable" };
   }
 
   // Never let a body we can't parse throw out of the Server Action: that would
@@ -96,8 +102,9 @@ export async function registerMember(input: RegisterMemberInput): Promise<Regist
 
   if (res.status === 201) {
     // A 201 without an id isn't members-service (e.g. a misconfigured URL).
-    if (typeof body.id === "string") return { ok: true, id: body.id };
-    return { ok: false, error: UNREACHABLE_MESSAGE };
+    if (typeof body.id === "string") return { ok: true, id: body.id, status: res.status };
+    // Not logged as 201: "registration failed, status 201" would read like a success.
+    return { ok: false, error: UNREACHABLE_MESSAGE, status: "invalid-response" };
   }
 
   // 400 (invalid input) and 409 (email already registered) are the user's to fix.
@@ -105,12 +112,14 @@ export async function registerMember(input: RegisterMemberInput): Promise<Regist
     // Two shapes reach us. Fastify's own schema validation (e.g. a missing field):
     // { code: "FST_ERR_VALIDATION", message: "body/email must NOT have fewer than 1
     // characters" }. That's written for developers, so the user gets a plain message.
-    if (body.code === "FST_ERR_VALIDATION") return { ok: false, error: INVALID_INPUT_MESSAGE };
+    if (body.code === "FST_ERR_VALIDATION") {
+      return { ok: false, error: INVALID_INPUT_MESSAGE, status: res.status };
+    }
     // Domain errors: { error: "Invalid email format" }. Those are shown as-is: the
     // rules live in the Member aggregate, so the UI doesn't duplicate them (or their wording).
-    if (body.error) return { ok: false, error: body.error };
+    if (body.error) return { ok: false, error: body.error, status: res.status };
   }
 
   // 5xx, or a 4xx without a readable message: not something the user can fix.
-  return { ok: false, error: UNREACHABLE_MESSAGE };
+  return { ok: false, error: UNREACHABLE_MESSAGE, status: res.status };
 }
