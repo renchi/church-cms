@@ -1,3 +1,4 @@
+import { inSpan } from "@cms/events";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { ArchiveMemberUseCase } from "../application/ArchiveMemberUseCase.js";
 import { RegisterMemberUseCase } from "../application/RegisterMemberUseCase.js";
@@ -11,6 +12,14 @@ export interface MemberRoutesOptions {
   // throwaway database. Defaults to the Prisma-backed repository.
   repo?: MemberRepository;
 }
+
+// A span around each use case, so the trace waterfall shows the business step
+// between the HTTP span and the database spans (CMS-29). Started here in the API
+// layer, not in the use case: the application layer stays free of telemetry,
+// like it stays free of logging. A rejected rule (e.g. a duplicate email → 409)
+// marks the span as an error (inSpan does that), which is what makes TraceQL
+// `{ status = error }` find it: the HTTP span itself only counts 5xx as errors.
+const traced = <T>(name: string, work: () => Promise<T>): Promise<T> => inSpan(name, {}, work);
 
 function handleError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof NotFoundError) return reply.status(404).send({ error: err.message });
@@ -45,7 +54,7 @@ export async function memberRoutes(
     },
     async (req, reply) => {
       try {
-        const result = await registerMember.execute(req.body);
+        const result = await traced("RegisterMemberUseCase", () => registerMember.execute(req.body));
         // A business log line: says *what* happened, not just which HTTP call ran.
         // Only the id: a name or email in a log is personal data copied into a
         // system with its own retention and access rules (memberRoutes.test.ts
@@ -105,7 +114,7 @@ export async function memberRoutes(
     },
     async (req, reply) => {
       try {
-        await updateMember.execute(req.params.id, req.body);
+        await traced("UpdateMemberUseCase", () => updateMember.execute(req.params.id, req.body));
         return reply.status(204).send();
       } catch (err) {
         return handleError(reply, err);
@@ -115,7 +124,7 @@ export async function memberRoutes(
 
   app.delete<{ Params: { id: string } }>("/members/:id", async (req, reply) => {
     try {
-      await archiveMember.execute(req.params.id);
+      await traced("ArchiveMemberUseCase", () => archiveMember.execute(req.params.id));
       return reply.status(204).send();
     } catch (err) {
       return handleError(reply, err);

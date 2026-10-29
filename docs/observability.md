@@ -1,8 +1,9 @@
-# Observability Runbook — Prometheus, Grafana, Loki: metrics and logs
+# Observability Runbook — Prometheus, Grafana, Loki, Tempo: metrics, logs and traces
 
 How to install the monitoring stack on minikube, see the services' metrics in Grafana,
-and search every Pod's logs in Grafana through Loki. **Concepts first?** Read
-[study-guide §9](study-guide.md#9-observability-roadmap-stage-7) (logs: §9.9).
+search every Pod's logs in Grafana through Loki, and follow one request across every
+service as a trace in Tempo. **Concepts first?** Read
+[study-guide §9](study-guide.md#9-observability-roadmap-stage-7) (logs: §9.9; traces: §13).
 **Why this design?** See [ADR-0009](adr/0009-observability-opentelemetry.md).
 
 What you end up with:
@@ -26,9 +27,9 @@ members-service Pod                         monitoring namespace
 Prerequisites: the cluster from [`k8s-local-dev.md`](k8s-local-dev.md) is running
 (minikube, Traefik, members-service), and `minikube tunnel` is open.
 
-> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs steps 1–3 and 7–8 below (and the
+> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs steps 1–3, 7–8 and 10–11 below (and the
 > whole k8s runbook), keeps `grafana.cms.local` in `/etc/hosts` up to date for step 4, and checks
-> steps 5 and 8 for you. Read on to learn what it does.
+> steps 5, 8 and 11 for you. Read on to learn what it does.
 
 ---
 
@@ -248,6 +249,118 @@ Rules of thumb: put as much as you can in the `{}` selector (that's the index), 
 before `| json` when you can (a text scan is cheaper than parsing), and never filter on a
 field that should have been a label, or vice versa (study-guide §9.9: cardinality).
 
+## 10. Install Tempo (the trace store)
+
+Traces are the third signal (CMS-29, [study-guide §13](study-guide.md#13-distributed-tracing-cms-29)).
+The path a span takes:
+
+```
+web / members-service / events-service ──OTLP/HTTP :4318──► OTel Collector ──OTLP/gRPC :4317──► Tempo
+          (spans, pushed in batches)                        │  batch, memory_limiter                 ▲
+                                                            └─ span_metrics ─► :8889 ◄─scrape─ Prometheus
+                                                                                      Grafana ┘ (TraceQL, port 3200)
+```
+
+```bash
+# The Tempo chart moved to grafana-community, like Loki's (§7).
+helm repo add grafana-community https://grafana-community.github.io/helm-charts
+helm repo update grafana-community
+
+helm upgrade --install tempo grafana-community/tempo \
+  --version 3.2.0 \
+  -n monitoring \
+  -f k8s/monitoring/tempo-values.yaml \
+  --wait --timeout 5m
+
+kubectl -n monitoring get pods,pvc -l app.kubernetes.io/name=tempo
+# pod/tempo-0                           1/1   Running
+# persistentvolumeclaim/storage-tempo-0   Bound   ...   2Gi
+```
+
+> **What this does:** Tempo in single-binary mode (one Pod does receiving, storing,
+> compacting and querying), with traces on a 2 Gi PersistentVolume, deleted after 24h.
+> Grafana already has it as a data source (uid `tempo`, in
+> [`kube-prometheus-stack-values.yaml`](../k8s/monitoring/kube-prometheus-stack-values.yaml)),
+> so step 2 must have run with the current values. That same upgrade turns on
+> Prometheus's `exemplar-storage` and the links between Loki and Tempo.
+
+## 11. Install the OpenTelemetry Collector (the apps' trace pipeline)
+
+```bash
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm repo update open-telemetry
+
+helm upgrade --install otel-collector open-telemetry/opentelemetry-collector \
+  --version 0.176.0 \
+  -n monitoring \
+  -f k8s/monitoring/otel-collector-values.yaml \
+  --wait --timeout 3m
+
+kubectl -n monitoring logs deploy/otel-collector | grep -E 'Everything is ready|error'
+# ... info  service@v0.162.0/service.go:256  Everything is ready. Begin running and processing data.
+```
+
+> **What this does:** one Collector Pod, reachable as
+> `otel-collector.monitoring.svc.cluster.local` (`fullnameOverride`). It receives OTLP on
+> 4317/4318, drops data when near its memory limit (`memory_limiter`), batches, and sends
+> traces to Tempo. The `span_metrics` connector also turns every span into a latency
+> histogram with trace-id **exemplars**, served on :8889 for Prometheus (a ServiceMonitor
+> in the same chart). The pipeline is commented block by block in
+> [`otel-collector-values.yaml`](../k8s/monitoring/otel-collector-values.yaml).
+
+Then turn tracing on in the apps. It's off by default in every chart; Deploy and
+`cluster-up.sh` pass the endpoint:
+
+```bash
+helm upgrade members-service ./charts/members-service --reuse-values \
+  --set tracing.otlpEndpoint=http://otel-collector.monitoring.svc.cluster.local:4318
+kubectl get cm members-service-members-service-config -o yaml | grep OTEL_
+#   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring.svc.cluster.local:4318
+#   OTEL_TRACES_EXPORTER: otlp
+```
+
+Check the whole path end to end, the same check `cluster-up.sh` makes: send a request
+with a trace id you made up, then ask Tempo for it.
+
+```bash
+kubectl -n monitoring port-forward svc/tempo 3200 &
+TRACE=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+curl -s -o /dev/null -H "traceparent: 00-$TRACE-00f067aa0ba902b7-01" http://cms.local/api/members/members
+sleep 10  # measured: ~10 s. The SDK exports every 5 s, the Collector batches up to 2 s, then Tempo ingests
+curl -s http://localhost:3200/api/traces/$TRACE | jq -c '[.. | .name? // empty | strings] | unique'
+# ["@cms/events","@fastify/otel","@opentelemetry/instrumentation-http","GET /members",
+#  "handler - memberRoutes","prisma:Member.count","prisma:Member.findMany","request"]
+#   the span names, plus the names of the libraries that made them (instrumentation scopes)
+```
+
+## 12. Following a trace (TraceQL cheat sheet)
+
+In Grafana → **Explore** → data source **Tempo** → *Search* (a form) or *TraceQL* (a query).
+A TraceQL query selects **spans** with conditions in `{}` and returns the traces that
+contain them. `resource.` attributes describe the process (which service), `span.`
+attributes describe the operation, and `name`, `status`, `duration`, `kind` are intrinsic.
+
+| Want | TraceQL |
+| --- | --- |
+| Everything from one service | `{ resource.service.name = "members-service" }` |
+| Failed anything | `{ status = error }` |
+| Failed registrations (the 409 too) | `{ name = "RegisterMemberUseCase" && status = error }` |
+| Slow requests | `{ kind = server && duration > 200ms }` |
+| An archive that reached events-service | `{ name = "publish cms.members.archived" } >> { resource.service.name = "events-service" }` (`>>`: a descendant) |
+| Messages processed after a retry | `{ kind = consumer && span.messaging.nats.delivery_count > 1 }` |
+| One query type | `{ name = "prisma:Member.create" }` |
+| One outbox message, by id | `{ span.messaging.message.id = "<outbox row id>" }` |
+| One trace | paste the trace id into the search box |
+
+Moving between the three signals:
+
+| From | To | How |
+| --- | --- | --- |
+| a log line in Loki | its trace | expand the line → **View trace** (the `trace_id` field, `derivedFields`) |
+| a span in Tempo | its logs | the span's **Logs for this span** button (`tracesToLogsV2`) |
+| a dot on *Duration from traces* | that request's trace | hover the exemplar → **View trace** |
+| a trace id from anywhere | Loki | `{namespace="default"} \|= "<trace id>"` |
+
 ---
 
 ## Troubleshooting
@@ -270,6 +383,15 @@ field that should have been a label, or vice versa (study-guide §9.9: cardinali
 | Loki refuses lines: `maximum active stream limit exceeded` / too many streams | A label with too many values (a per-request id, a timestamp, a file path that changes). `curl -s localhost:3100/loki/api/v1/labels` and look at each label's values; move the culprit into the line. Alloy drops `filename` and `stream` for this reason |
 | Each Kubernetes event appears **twice** (or N times) | More than one node: every Alloy Pod watches the whole cluster's events. Move `loki.source.kubernetes_events` into a separate one-replica Alloy Deployment, or enable Alloy clustering |
 | Grafana answers `503 no available server` / its probes time out | Grafana at its memory limit spends its CPU on garbage collection (`kubectl -n monitoring top pod -l app.kubernetes.io/name=grafana --containers`: memory at the limit, CPU high). The limit is 512Mi since CMS-28 |
+| **No traces in Tempo** at all | Work outward from the app. (1) Is tracing on? `kubectl get cm members-service-members-service-config -o yaml \| grep OTEL_` must show `otlp` and the endpoint; without them the SDK exports to `none`. (2) Does the Collector receive? `kubectl -n monitoring logs deploy/otel-collector \| grep -i error`: `connection refused` to `tempo...:4317` means Tempo is down. (3) Remember the delays: the SDK batches for ~5 s and the Collector for 2 s, so wait ~10 s before searching |
+| The app logs `could not send the last trace spans before exiting` | The Collector was unreachable when the Pod stopped; the flush gave up after 3 s instead of delaying shutdown. Harmless, but check the Collector if it repeats |
+| Every API call returns `502`; the service logs `TypeError: parentTracer.getSpanLimits is not a function` | A tracing library built for the 1.x OTel SDK, running against our 2.x SDK (it happened with `@prisma/instrumentation` 5.22, study-guide §13.4). Check every OTel-related package's own `dependencies` against the SDK version |
+| **The trace breaks at NATS**: the events-service spans are a separate trace | The `traceparent` header didn't make it. Read the stored message: `kubectl exec -n nats deploy/nats-box -- nats stream get MEMBERS --last-for cms.members.archived`; the headers must include `traceparent`. No header → `jetStreamPublisher` (`packages/events/src/nats.ts`) isn't sending it. An empty `traceparent` column on the outbox row → the row was written while tracing was off |
+| **The trace breaks at web**: web and members-service are separate traces | web's `fetch` sends `traceparent` only to `propagateContextUrls` (`apps/web/instrumentation.ts`). If `MEMBERS_API_URL` changed, the allow-list follows it automatically; anything else must be added |
+| **Orphan spans**: a span whose parent is "missing" in the waterfall | The parent span was never exported: its process crashed or was killed before its batch went out, or it was sampled out. Check that service's restarts (`kubectl get pods`) |
+| Thousands of tiny traces named `prisma:OutboxMessage.findMany` | The relay's poll loop is being traced. The shared sampler (`packages/events/src/sampling.ts`) drops database spans with no parent; was the `prisma:` span name prefix changed? |
+| No exemplar dots on *Duration from traces* | Prometheus needs `enableFeatures: [exemplar-storage]` (step 2 values; the Prometheus Pod restarts to pick it up), and the panel's query needs the *Exemplars* toggle on. Check that Prometheus scrapes the Collector: Targets → `otel-collector` |
+| Collector logs `"spanmetrics" alias is deprecated` (or the chart rewrites `otlp` to `otlp_grpc`) | The Collector renamed components in 2026. Use the new names (`span_metrics`, `otlp_grpc`); the values file already does |
 
 ---
 
@@ -441,3 +563,99 @@ with `"status":500` a few ms later; then Postgres `ready to accept connections`.
 cause (Postgres) and the effect (the 500) on one timeline, from three different apps.
 Why does the relay's error repeat so often, and what would you change before a real
 outage floods the logs?
+
+### Traces in Tempo (CMS-29)
+
+Grafana → Explore → **Tempo**, time range "last 15 minutes". Each exercise gives what you
+should see; if it differs, the troubleshooting table above has the likely cause.
+
+**12. Read a registration's waterfall.** Register a member in the browser
+(<http://cms.local/members/new>), then search `{ resource.service.name = "web" }` and open
+the newest trace.
+
+*Expected:* one trace, spans from two services, in this order (measured, CMS-29):
+
+```
+0ms    web              POST /members/new                  49ms   ← the Server Action, the root
+15ms   web              fetch POST http://members-service-members-service:3001/members
+21ms   members-service  POST /members                      22ms
+26ms   members-service  RegisterMemberUseCase              16ms
+28ms   members-service  prisma:Member.findUnique            3ms   ← the duplicate-email check
+36ms   members-service  prisma:Member.create                3ms
+40ms   members-service  prisma:OutboxMessage.createMany     2ms
+188ms  members-service  publish cms.members.registered      4ms   ← the relay, after the request ended
+```
+
+Find the slowest span. Then the gap: nothing happens between 49 ms and 188 ms. Why?
+(The relay polls once a second, study-guide §11.) And why does the trace *end* at
+`publish`? `MemberRegistered` has no consumer yet (CMS-27; Communications is CMS-20), so
+nothing processes it. To see a trace cross NATS into events-service, archive the member:
+press **Archive** next to them on <http://cms.local/members>, then search
+`{ name = "ArchiveMemberUseCase" }` and open the newest trace. (Searching web's
+`POST /members` alone also finds page renders: a Server Action posts to the page's own URL.)
+
+*Expected:* the longest trace in the system, one click across three apps and the bus:
+`POST /members` (**web**, the Archive button's Server Action, the root) → `fetch DELETE …/members/<id>`
+→ `DELETE /members/:id` → `ArchiveMemberUseCase` → `prisma:Member.findUnique`, `prisma:Member.updateMany`,
+`prisma:OutboxMessage.createMany` (members-service) → `publish cms.members.archived` (the relay) →
+`process cms.members.archived` (**events-service**) → `DeclineAssignmentsForArchivedMemberUseCase` →
+`prisma:ProcessedMessage.createMany`, `prisma:VolunteerAssignment.findMany`, all in one trace.
+Measured (CMS-29 review), start times only:
+
+```
+0ms    web              POST /members                          ← the Archive button's Server Action, the root
+9ms    web              fetch DELETE http://members-service-members-service:3001/members/<id>
+11ms   members-service  DELETE /members/:id
+12ms   members-service  ArchiveMemberUseCase
+13ms   members-service  prisma:Member.findUnique
+17ms   members-service  prisma:Member.updateMany
+18ms   members-service  prisma:OutboxMessage.createMany
+527ms  members-service  publish cms.members.archived          ← the relay's next poll
+532ms  events-service   process cms.members.archived          ← 5 ms through NATS
+534ms  events-service   DeclineAssignmentsForArchivedMemberUseCase
+535ms  events-service   prisma:ProcessedMessage.createMany
+537ms  events-service   prisma:VolunteerAssignment.findMany
+```
+
+**13. Find a failure without an id.** Register the same email twice. Then search
+`{ status = error }`.
+
+*Expected:* the second registration's trace, with `RegisterMemberUseCase` in red and the
+error message "A member with this email already exists". The HTTP span is *not* red: a 409
+is the client's error, and OTel only marks 5xx server spans. Expand the use-case span's
+*Events* to see the recorded exception. Now press **Logs for this span**: Loki opens with
+web's `registration failed` line and members-service's request lines, all carrying the
+same `trace_id`.
+
+**14. Break the trace on purpose.** In [`packages/events/src/nats.ts`](../packages/events/src/nats.ts),
+comment out the line that copies the headers (`for (const [name, value] of Object.entries(traceHeaders)) headers.set(name, value);`),
+redeploy (`scripts/cluster-up.sh --skip-build` won't do: the image must change, so run it
+without `--skip-build`), and archive another member from <http://cms.local/members>.
+
+*Expected:* the archive's trace now ends at `publish cms.members.archived`. The
+`process cms.members.archived` span (events-service) is in a **trace of its own**, a root span
+with no parent. Same work, same order, but nothing joins the two halves: that's what the header
+carries. Search `{ name = "process cms.members.archived" }` to find the orphaned half.
+(A registration shows nothing here: `MemberRegistered` has no consumer, so there is no second
+half to orphan.) Undo the change and redeploy.
+
+**15. Find a slow request from a graph.** Add a delay to the use case,
+`await new Promise((r) => setTimeout(r, 300));` at the top of `RegisterMemberUseCase.execute`
+(`apps/members-service/src/application/RegisterMemberUseCase.ts`), redeploy, and register a
+few members. Open the RED dashboard's *Duration from traces* panel.
+
+*Expected:* the `POST /members` line jumps above 300 ms, with **exemplar dots** on it.
+Hover one → **View trace**: Tempo opens that exact request, and the waterfall shows a
+~300 ms gap inside `RegisterMemberUseCase` with no child span in it. The time is *in the
+code*, not in a query or a call: that's how a trace tells you where to look. Remove the
+delay.
+
+**16. Log → trace → log.** In Loki, run `{app="members-service"} |= "member registered"`,
+expand a line, and press **View trace** next to `trace_id`.
+
+*Expected:* Tempo opens the registration's trace (exercise 12). On the web span
+`POST /members/new`, press **Logs for this span**: you land on web's `registration succeeded`
+line. You went from one service's log line to another service's through the trace, with no
+`memberId` and no search by hand. Repeat it with an archive (exercise 12's Archive button), starting
+from events-service's span `process cms.members.archived`: its logs are events-service's
+`message processed` line for that message.

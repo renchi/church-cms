@@ -1,7 +1,9 @@
 // Server component: fetches the member list from members-service at request time.
+// Each active member gets an Archive button (a small Client Component).
 
 import { logEvent } from "@/lib/log";
 import Link from "next/link";
+import { ArchiveButton } from "./ArchiveButton";
 import {
   fetchMember,
   fetchMembers,
@@ -13,23 +15,25 @@ import {
 // In Next.js 15, searchParams is a Promise: the page awaits it. A repeated
 // parameter (?registered=a&registered=b) arrives as an array, hence the union.
 interface MembersPageProps {
-  searchParams: Promise<{ registered?: string | string[] }>;
+  searchParams: Promise<{ registered?: string | string[]; archived?: string | string[] }>;
 }
 
-// The registration Server Action redirects to /members?registered=<id>. The banner
-// shows the name members-service has for that id, so a crafted link can't make it
-// say anything else. An unknown id, an array or a lookup failure: no banner.
-async function findRegistered(registered: string | string[] | undefined): Promise<Member | null> {
-  if (typeof registered !== "string" || !registered) return null;
+// The Server Actions redirect to /members?registered=<id> or ?archived=<id>. The
+// banner shows the name members-service has for that id, so a crafted link can't
+// make it say anything else. An unknown id, an array or a lookup failure: no banner.
+async function findBannerMember(id: string | string[] | undefined): Promise<Member | null> {
+  if (typeof id !== "string" || !id) return null;
   try {
-    return await fetchMember(registered);
+    return await fetchMember(id);
   } catch {
     return null;
   }
 }
 
 export default async function MembersPage({ searchParams }: MembersPageProps) {
-  const registered = await findRegistered((await searchParams).registered);
+  const params = await searchParams;
+  const registered = await findBannerMember(params.registered);
+  const archived = await findBannerMember(params.archived);
   let response: MemberListResponse | null = null;
   let failed = false;
 
@@ -64,6 +68,15 @@ export default async function MembersPage({ searchParams }: MembersPageProps) {
         </div>
       )}
 
+      {archived && (
+        <div
+          role="status"
+          className="rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700"
+        >
+          Archived {archived.name}
+        </div>
+      )}
+
       {failed && (
         <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           Could not load members. Try again in a moment.
@@ -86,7 +99,10 @@ export default async function MembersPage({ searchParams }: MembersPageProps) {
               <th className="py-2 pr-4 font-medium">Name</th>
               <th className="py-2 pr-4 font-medium">Email</th>
               <th className="py-2 pr-4 font-medium">Phone</th>
-              <th className="py-2 font-medium">Status</th>
+              <th className="py-2 pr-4 font-medium">Status</th>
+              <th className="py-2 font-medium">
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -95,7 +111,7 @@ export default async function MembersPage({ searchParams }: MembersPageProps) {
                 <td className="py-2 pr-4">{member.name}</td>
                 <td className="py-2 pr-4 text-gray-600">{member.email}</td>
                 <td className="py-2 pr-4 text-gray-600">{member.phone ?? "—"}</td>
-                <td className="py-2">
+                <td className="py-2 pr-4">
                   <span
                     className={
                       member.status === "active"
@@ -105,6 +121,11 @@ export default async function MembersPage({ searchParams }: MembersPageProps) {
                   >
                     {member.status}
                   </span>
+                </td>
+                <td className="py-2">
+                  {/* Archiving an archived member is a domain error, so only
+                      active members get the button. */}
+                  {member.status === "active" && <ArchiveButton memberId={member.id} />}
                 </td>
               </tr>
             ))}

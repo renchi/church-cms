@@ -53,7 +53,7 @@ Never work directly on main. Scaffold new services with `/new-service`, and only
 
 ```
 apps/       # deployable services (members-service, events-service, web)
-packages/   # shared packages: @cms/events, the cross-context message contract + NATS plumbing
+packages/   # shared packages: @cms/events, the cross-context message contract + NATS plumbing, plus the services' shared tracing helpers (spans, sampler)
 charts/     # one Helm chart per deployable app
 k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik, monitoring, NATS, ...)
 scripts/    # cluster-up.sh: idempotent bootstrap that runs the k8s + observability runbooks
@@ -112,7 +112,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
 | One outbox relay batch at a time per service (advisory lock)          | One relay can't keep up, or polling latency/load matters                     | 0010        |
 | `MemberArchived`, `AttendanceRecorded` and a thin `MemberRegistered` cross the bus | A context needs another event, or a consumer needs `MemberRegistered` to carry more than `memberId` (adding fields is non-breaking) | 0010        |
-| OTel metrics only, Prometheus pull; no Collector or traces            | Events service + NATS live, or traces wanted                                 | 0009        |
+| Traces through an OTel Collector → Tempo (CMS-29), head-sampled 100%; metrics still pulled by Prometheus, logs via Alloy | Trace volume matters (→ ratio or tail sampling), or one pipeline for all signals is wanted | 0009        |
 
 ## ADR index
 
@@ -139,6 +139,6 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `docs/docker-local-dev.md`    | Runbook: Compose stack, images                                                                                |
 | `docs/k8s-local-dev.md`       | Runbook: minikube, Traefik, Helm deploys                                                                      |
 | `docs/ci-cd.md`               | Runbook: GitHub Actions, self-hosted runner, debugging                                                        |
-| `docs/observability.md`       | Runbook: Prometheus, Grafana, metrics and logs, with hands-on exercises                                       |
+| `docs/observability.md`       | Runbook: Prometheus, Grafana, metrics, logs and traces, with hands-on exercises                               |
 | `docs/messaging.md`           | Runbook: NATS JetStream, following an event across services, replay and idempotency exercises                |
 | `docs/status-dashboards.md`   | Where to watch the pipeline and the cluster                                                                   |

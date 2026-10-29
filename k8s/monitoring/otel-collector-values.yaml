@@ -1,0 +1,143 @@
+# Values for the OpenTelemetry Collector Helm chart (CMS-29, ADR-0009 addendum).
+# Install / upgrade (docs/observability.md §11):
+#
+#   helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+#   helm upgrade --install otel-collector open-telemetry/opentelemetry-collector --version 0.176.0 \
+#     -n monitoring -f k8s/monitoring/otel-collector-values.yaml
+#
+# THE COLLECTOR PATTERN. The apps don't send traces to Tempo directly. They push
+# OTLP (OpenTelemetry's vendor-neutral protocol) to this Collector, and only the
+# Collector knows where traces end up. Swapping Tempo for Jaeger or a SaaS
+# backend is then a change to this file, not to three apps. The Collector also
+# does the work an app shouldn't: batching, retrying, dropping under memory
+# pressure, and (here) deriving metrics from spans.
+#
+# Why the upstream Collector and not Alloy, which ships the logs (CMS-28) and is
+# itself a Collector distribution? The standard Collector YAML below is what
+# most documentation, vendors and jobs use; Alloy's config language is
+# Grafana-specific. Both could do this job (ADR-0009 addendum, CMS-29).
+
+# A Deployment with one replica: the apps reach it through its Service. The
+# alternative, a DaemonSet ("agent" per node), suits clusters with many nodes,
+# where spans should leave the node as early as possible.
+mode: deployment
+replicaCount: 1
+
+# Name the objects "otel-collector" instead of the chart's default
+# "<release>-opentelemetry-collector", so the apps' endpoint is short:
+#   http://otel-collector.monitoring.svc.cluster.local:4318
+fullnameOverride: otel-collector
+
+# "contrib" is the distribution with the community components, including the
+# spanmetrics connector below; the core image has only the basics.
+image:
+  repository: otel/opentelemetry-collector-contrib
+command:
+  name: otelcol-contrib
+
+resources:
+  requests: { cpu: 50m, memory: 96Mi }
+  limits: { memory: 256Mi }
+# (useGOMEMLIMIT, a chart default, tells the Go runtime about that limit, so it
+# collects garbage harder before the kernel would OOM-kill the Pod.)
+
+# Only the ports we use. The chart opens Jaeger and Zipkin receivers by default.
+ports:
+  otlp: { enabled: true }        # 4317, OTLP over gRPC
+  otlp-http: { enabled: true }   # 4318, OTLP over HTTP: what our three apps use
+  jaeger-compact: { enabled: false }
+  jaeger-thrift: { enabled: false }
+  jaeger-grpc: { enabled: false }
+  zipkin: { enabled: false }
+  # The span metrics Prometheus scrapes (exporters.prometheus below).
+  spanmetrics:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+# Prometheus finds the span metrics through this ServiceMonitor, the same way
+# it finds the services' /metrics (it only picks up ServiceMonitors carrying the
+# kube-prometheus-stack release label).
+serviceMonitor:
+  enabled: true
+  metricsEndpoints:
+    - port: spanmetrics
+      interval: 15s
+  extraLabels:
+    release: kube-prometheus-stack
+
+# The pipeline. The chart MERGES this with its default config, so components we
+# don't want are set to null to remove them.
+#   receivers  → how data gets in
+#   processors → what happens to it on the way
+#   exporters  → where it goes out
+#   connectors → an exporter of one pipeline that is the receiver of another
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc: { endpoint: "${env:MY_POD_IP}:4317" }
+        http: { endpoint: "${env:MY_POD_IP}:4318" }
+    jaeger: null
+    zipkin: null
+    prometheus: null   # the chart's default self-scrape; not needed here
+
+  processors:
+    # First in every pipeline: refuse data (the apps retry) when the Collector
+    # nears its memory limit, instead of being OOM-killed and losing all of it.
+    memory_limiter:
+      check_interval: 1s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+    # Groups spans into larger requests to Tempo: fewer, bigger writes.
+    batch:
+      timeout: 2s
+
+  connectors:
+    # METRICS FROM TRACES. Every span that passes through is counted and timed
+    # into a histogram, labelled by service, span name, kind and status. Each
+    # histogram bucket also remembers a few trace ids that landed in it: those
+    # are EXEMPLARS. Grafana draws them as dots on the latency graph; clicking a
+    # dot opens that exact trace. (The apps' own Prometheus exporter can't attach
+    # exemplars, which is why they come from here.)
+    # Because only sampled spans reach the Collector, these counts are sampled
+    # too: at 100% here they are exact, at 10% they'd be a tenth.
+    # (`span_metrics` is the component's current name; older docs say `spanmetrics`.)
+    span_metrics:
+      histogram:
+        explicit:
+          buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s]
+      exemplars:
+        enabled: true
+      # How often the accumulated metrics are emitted to the metrics pipeline.
+      metrics_flush_interval: 15s
+
+  exporters:
+    # Traces → Tempo's OTLP gRPC receiver. Plain text inside the cluster;
+    # across a network you'd turn TLS on. `otlp_grpc` is this exporter's current
+    # name (older docs call it `otlp`); `/tempo` names this instance of it.
+    otlp_grpc/tempo:
+      endpoint: tempo.monitoring.svc.cluster.local:4317
+      tls:
+        insecure: true
+    # Span metrics → a /metrics endpoint for Prometheus to scrape. OpenMetrics
+    # is the text format that can carry exemplars; the classic one can't.
+    prometheus:
+      endpoint: "${env:MY_POD_IP}:8889"
+      enable_open_metrics: true
+    debug: null
+
+  service:
+    pipelines:
+      # Spans go two ways: stored in Tempo, and counted by span_metrics.
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp_grpc/tempo, span_metrics]
+      metrics:
+        receivers: [span_metrics]
+        processors: [memory_limiter]
+        exporters: [prometheus]
+      # Logs reach Loki through Alloy (CMS-28), not through here.
+      logs: null

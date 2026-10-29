@@ -1,4 +1,4 @@
-replicaCount: 2
+replicaCount: 2   # only used when autoscaling.enabled=false; otherwise the HPA sets the count
 
 image:
   repository: members-service
@@ -53,6 +53,16 @@ ingress:
   enabled: false    # flip to true at deploy time: --set ingress.enabled=true
   host: cms.local
   path: /api/members
+
+# Distributed tracing (CMS-29, ADR-0009 addendum). Where the app pushes its spans
+# over OTLP/HTTP: the OTel Collector in the `monitoring` namespace, which batches
+# them and forwards them to Tempo. "" = tracing off (the default, so the chart
+# installs on a cluster without a Collector); deploy.yml and cluster-up.sh set:
+#   --set tracing.otlpEndpoint=http://otel-collector.monitoring.svc.cluster.local:4318
+# The Collector being down never breaks a request: the SDK buffers spans in
+# memory, drops them when the buffer is full, and logs the failed export.
+tracing:
+  otlpEndpoint: ""
 
 # Prometheus metrics (OpenTelemetry SDK, see apps/members-service/src/instrumentation.ts)
 metrics:

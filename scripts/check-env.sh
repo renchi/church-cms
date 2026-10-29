@@ -38,7 +38,8 @@ cd "$(dirname "$0")/.."
 
 ALLOWED=(NODE_ENV)   # set by Next.js / the Dockerfile for every app. Add a key of an
                      # externally created Secret (envFrom secretRef) here, with a comment.
-DEPLOY_FLAGS=(--set ingress.enabled=true --set metrics.serviceMonitor.enabled=true)   # as deploy.yml
+DEPLOY_FLAGS=(--set ingress.enabled=true --set metrics.serviceMonitor.enabled=true
+              --set tracing.otlpEndpoint=http://otel-collector.monitoring.svc.cluster.local:4318)   # as deploy.yml
 
 fail() { echo "✘ $1"; problems=$((problems + 1)); }
 problems=0

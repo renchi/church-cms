@@ -1,0 +1,53 @@
+# Values for the Grafana Tempo Helm chart: the trace store (CMS-29, ADR-0009
+# addendum). Install / upgrade (docs/observability.md §10):
+#
+#   helm repo add grafana-community https://grafana-community.github.io/helm-charts
+#   helm upgrade --install tempo grafana-community/tempo --version 3.2.0 \
+#     -n monitoring -f k8s/monitoring/tempo-values.yaml
+#
+# The chart moved from grafana/ to grafana-community/ along with Loki's
+# (k8s/monitoring/loki-values.yaml). This one is Tempo in SINGLE-BINARY mode:
+# one Pod runs every Tempo component (receive, store, compact, query). The
+# "distributed" chart splits them into separately scaled Deployments, which
+# only pays off at far more traffic than a learning cluster has.
+#
+# What Tempo stores: whole traces, looked up by trace id, plus enough of an
+# index for TraceQL searches like `{ resource.service.name = "members-service"
+# && status = error }`. Unlike Prometheus it doesn't aggregate: every span is
+# kept, so retention (below) is the main lever on disk use.
+
+tempo:
+  # Traces are kept for one day. Enough to follow today's experiments; on disk
+  # that's a few MB here. The compactor deletes older blocks.
+  retention: 24h
+
+  # Spans arrive only from the OTel Collector, over OTLP gRPC (4317). The chart
+  # also opens Jaeger and OTLP/HTTP receivers, and its Service template needs
+  # those settings to exist, so they stay at the chart default. Nothing sends to
+  # them: the apps only know the Collector's address, never Tempo's.
+
+  # Tempo phones home with anonymous usage stats by default.
+  reportingEnabled: false
+
+  # Spans wait in memory (and a write-ahead log) until a block is cut and
+  # written. Measured on minikube (docs/k8s-local-dev.md cluster facts); the
+  # limit leaves room for a TraceQL search over the whole retention.
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }
+
+  # Storage: the local filesystem, i.e. the PVC below. Production Tempo writes
+  # blocks to object storage (S3, GCS, MinIO) so any replica can read them.
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+# A PersistentVolumeClaim for /var/tempo, so traces survive a Pod restart.
+# minikube's default StorageClass provisions it on the node's disk.
+persistence:
+  enabled: true
+  size: 2Gi

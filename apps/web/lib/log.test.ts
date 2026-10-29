@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { trace } from "@opentelemetry/api";
 import { logEvent } from "./log";
 
 afterEach(() => {
@@ -75,4 +76,24 @@ describe("logEvent", () => {
 
     expect(lines().map((l) => l.msg)).toEqual(["registration succeeded"]);
   });
+
+  it("adds trace_id and span_id while a span is active, so Grafana can link the line to its trace", () => {
+    const read = captureLines();
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const spanId = "00f067aa0ba902b7";
+    // In production Next.js's request span is the active one. Here there is no
+    // SDK, so stand in a span with known ids.
+    vi.spyOn(trace, "getActiveSpan").mockReturnValue(trace.wrapSpanContext({ traceId, spanId, traceFlags: 1 }));
+
+    logEvent("info", {}, "registration succeeded");
+
+    expect(read()[0]).toMatchObject({ trace_id: traceId, span_id: spanId });
+  });
+
+  it("leaves the trace keys out when nothing is being traced", () => {
+    const read = captureLines();
+    logEvent("info", {}, "registration succeeded");
+    expect(read()[0]).not.toHaveProperty("trace_id");
+  });
 });
+

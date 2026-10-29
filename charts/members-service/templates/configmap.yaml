@@ -14,3 +14,10 @@ data:
   # Where to publish and consume domain events; src/index.ts reads it.
   NATS_URL: {{ . | quote }}
   {{- end }}
+  # Tracing (values.yaml `tracing`). src/instrumentation.ts reads neither key
+  # itself: the OTel SDK does. "none" keeps the SDK from exporting anywhere.
+  OTEL_TRACES_EXPORTER: {{ if .Values.tracing.otlpEndpoint }}"otlp"{{ else }}"none"{{ end }}
+  {{- with .Values.tracing.otlpEndpoint }}
+  # The SDK appends /v1/traces to this base URL.
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+  {{- end }}

@@ -72,6 +72,7 @@ sudo -E minikube tunnel
 | Traefik dashboard (routers, services, middlewares) | <http://traefik.cms.local/dashboard/> |
 | Grafana: RED dashboard (rate, errors, latency per service) | <http://grafana.cms.local> → Dashboards → *CMS — Service RED metrics* ([setup](observability.md)) |
 | Logs from every Pod (deleted ones too), Kubernetes events | <http://grafana.cms.local> → Explore → *Loki* → e.g. `{app="members-service"} \| json` ([LogQL cheat sheet](observability.md#9-logql-cheat-sheet-our-fields)) |
+| One request across every service (web → members → NATS → events), as a waterfall | <http://grafana.cms.local> → Explore → *Tempo* → TraceQL, e.g. `{ resource.service.name = "members-service" && status = error }` ([TraceQL cheat sheet](observability.md#12-following-a-trace-traceql-cheat-sheet)) |
 | Prometheus: scrape targets (is each Pod `up`?) | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` → <http://localhost:9090/targets> |
 | NATS: streams and consumers as JSON (messages stored, pending per consumer) | `kubectl -n nats port-forward pod/nats-0 8222` → <http://localhost:8222/jsz?consumers=true> ([runbook](messaging.md)) |
 
@@ -214,7 +215,7 @@ export AGENT_STATUS_DIR=/tmp/agent-status-demo     # every command below uses it
 | CI jobs **cancelled**, "not acquired by Runner" | <https://www.githubstatus.com>. It's a GitHub outage; re-run later |
 | `cms.local` doesn't load | Is `minikube tunnel` running? Is minikube up? |
 | Pods not Ready | Kubernetes Dashboard → the pod → Events and Logs |
-| API slow or erroring | Grafana RED dashboard → which route, since when → the dashboard's *Logs — warnings and errors* panel, or Explore → Loki for those requests |
+| API slow or erroring | Grafana RED dashboard → which route, since when → click an exemplar dot on *Duration from traces* to open one slow request's trace, or the *Logs — warnings and errors* panel → a line's *View trace* button |
 | A change in one service never shows up in the other (archive → volunteers still pending; check-in → count unchanged) | The two terminal checks under "Messaging" above: unpublished outbox rows point at the publisher (or NATS), unprocessed consumer messages at the consumer. See [messaging troubleshooting](messaging.md#troubleshooting) |
 | The status line or `/status` says a step is **stale** | The session that ran it ended. Check it live: `gh pr checks <pr>` or `gh run list --workflow=Deploy` ("Watching the agent" above) |
 | Grafana panels say **No data** | Prometheus Targets: is `members-service` (or `events-service`) up? See [observability troubleshooting](observability.md#troubleshooting) |

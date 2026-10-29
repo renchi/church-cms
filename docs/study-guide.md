@@ -5,7 +5,7 @@ exercised, mapped to the **five learning goals** in
 [ADR-0007](adr/0007-learning-scope-and-roadmap.md):
 
 1. **Docker & containers**
-2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability; logs in Loki since CMS-28)_
+2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability; logs in Loki since CMS-28, traces in Tempo since CMS-29)_
 3. **System design** _(stage 9 done: async events between services; the contract evolved in CMS-27)_
 4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
 5. **Using AI tools** — issue-driven development _(agent orchestration track started: §12.4)_
@@ -18,7 +18,7 @@ This guide is the **map**. The companion docs are the **detail**:
 - [`k8s-local-dev.md`](k8s-local-dev.md) — deploying to minikube with Helm + Traefik, step by step
 - [`ci-cd.md`](ci-cd.md) — the GitHub Actions pipeline, self-hosted runner, debugging
 - [`status-dashboards.md`](status-dashboards.md) — where to watch the pipeline and the cluster
-- [`observability.md`](observability.md) — Prometheus, Grafana, metrics and logs, with exercises
+- [`observability.md`](observability.md) — Prometheus, Grafana, metrics, logs and traces, with exercises
 - [`messaging.md`](messaging.md) — NATS JetStream between the services: following an event, replay and idempotency exercises
 
 Read this top to bottom once. Then, whenever a section feels thin, open the file it
@@ -52,7 +52,10 @@ disk stopped filling up (§2.5). **CMS-32** closed the `502` window during every
 the logs pillar: every Pod's logs, deleted Pods included, searchable in Grafana through Loki
 (§9.9). **CMS-27** changed the event contract for the first time: Members now publishes a thin
 `MemberRegistered`, ready for Communications (§11.5: what goes in a payload, and why
-contracts grow cheaply but shrink expensively). Next are tracing (CMS-29) and CMS-20 (Communications).
+contracts grow cheaply but shrink expensively). **CMS-29** added the third pillar, traces:
+one registration is now one trace in Tempo, from web's Server Action through the outbox and
+NATS to events-service, with log lines and graph points linking to it (§13). Next are browser
+monitoring (CMS-30), SLOs (CMS-31) and CMS-20 (Communications, the welcome email).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -261,7 +264,7 @@ Three pieces of vocabulary made the CMS-33 investigation possible:
   [`pnpm --filter members-service deploy --prod`](../apps/members-service/Dockerfile#L111).
   The service's `"files"` list (`dist`, `generated`, `prisma`) makes that folder the whole
   app, so the runner [copies it in one step](../apps/members-service/Dockerfile#L149).
-  [`prisma`](../apps/members-service/package.json#L32) moved to `dependencies` (the
+  [`prisma`](../apps/members-service/package.json#L33) moved to `dependencies` (the
   migration init container runs its CLI from this image). `@cms/events` also declares
   [`"files": ["dist"]`](../packages/events/package.json#L15), so the copy holds only its
   compiled code, not `src/`, `tsconfig.json` and test config.
@@ -526,7 +529,7 @@ Browser ◀── 303 /members?registered=<id>  or  the form + error banner
   is looked up with `GET /members/:id`, and the banner shows the name members-service
   has. An unknown id, a repeated parameter (an array) or a failed lookup shows no banner.
   If the list can't load, the visitor sees a generic message; the details, including the
-  internal URL, go to the server log as one JSON line at level `error` ([line 42](../apps/web/app/members/page.tsx#L42), §9.9).
+  internal URL, go to the server log as one JSON line at level `error` ([line 46](../apps/web/app/members/page.tsx#L46), §9.9).
 - [`charts/web/values.yaml:24`](../charts/web/values.yaml#L24): `config.membersApiUrl`
   becomes the Pod's `MEMBERS_API_URL`. Compose sets `http://members-service:3001` instead.
 - Tests: [`lib/membersApi.test.ts`](../apps/web/lib/membersApi.test.ts) stubs `fetch`
@@ -551,7 +554,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:24`](../charts/web/values.yaml#L24)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:424`](../scripts/cluster-up.sh#L424)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:453`](../scripts/cluster-up.sh#L453)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -779,11 +782,11 @@ then gets SIGTERM once no new requests are arriving.
   refuses to render if the grace period isn't longer than the sleep, and falls back to the
   defaults when `shutdown` is missing (see the table below for why).
   members-service and events-service use the same template
-  ([`deployment.yaml:73`](../charts/members-service/templates/deployment.yaml#L73)). After
-  the sleep, their SIGTERM handler ([`index.ts:60`](../apps/members-service/src/index.ts#L60))
+  ([`deployment.yaml:84`](../charts/members-service/templates/deployment.yaml#L84)). After
+  the sleep, their SIGTERM handler ([`index.ts:63`](../apps/members-service/src/index.ts#L63))
   lets the NATS consumer finish its current message and drains the connection, all inside
   the same 30 s.
-- [`scripts/cluster-up.sh:274`](../scripts/cluster-up.sh#L274): the script deletes old
+- [`scripts/cluster-up.sh:303`](../scripts/cluster-up.sh#L303): the script deletes old
   `local-*` images after a deploy. `helm --wait` returns when the *new* Pods are Ready, but
   the old ones are now still sleeping, and Docker won't remove an image a container is
   using. So the script first waits until every Pod running one of our images runs this
@@ -908,7 +911,7 @@ The decision record: [ADR-0009](adr/0009-observability-opentelemetry.md).
 | --- | --- | --- | --- |
 | **Metrics** | *How much / how often / how fast*, as numbers over time. Cheap to store, great for graphs and alerts | 0.86 req/s, p95 = 7 ms | ✅ Prometheus + Grafana |
 | **Logs** | *What exactly happened* in one event | `{"reqId":"req-e","res":{"statusCode":404}}` | ✅ JSON on stdout, shipped to Loki by Alloy (§9.9) |
-| **Traces** | *Where did the time go* as one request crosses services | members → events → NATS | ⏳ with NATS (stage 9), once requests cross services |
+| **Traces** | *Where did the time go* as one request crosses services | web → members → NATS → events | ✅ OTel Collector + Tempo (§13, CMS-29) |
 
 You usually start from a **metric** (error rate went up), narrow it with **labels** (only
 `/members/:id`, only 404s), then read the **logs** for those requests. Traces join that
@@ -924,7 +927,7 @@ up across services, which is why they wait until there *is* a second service.
 | **SDK** | The implementation: aggregates measurements, holds config | `NodeSDK` in [`instrumentation.ts`](../apps/members-service/src/instrumentation.ts) |
 | **Instrumentation** | Libraries that measure *other* libraries for you by patching them | `instrumentation-http` (durations), `@fastify/otel` (route names) |
 | **Exporter** | Sends or serves the data in some backend's format | `PrometheusExporter`, serving `:9464/metrics` |
-| **Collector** | Optional separate process that receives, processes and fans out telemetry | not yet (ADR-0009) |
+| **Collector** | Optional separate process that receives, processes and fans out telemetry | for traces since CMS-29 (§13) |
 
 The point of the split: **services describe *what* happened; the backend is a
 configuration choice.** Switching from Prometheus to another vendor, or adding traces,
@@ -1398,11 +1401,11 @@ the only code both services may import:
   that validate incoming JSON
   ([`contract.ts:122`](../packages/events/src/contract.ts#L122)).
 - Idempotent setup: `ensureStream` and `ensureConsumer`, "create, or update to this
-  config" ([`nats.ts:51`](../packages/events/src/nats.ts#L51),
-  [`nats.ts:78`](../packages/events/src/nats.ts#L78)).
-- The outbox relay ([`outboxRelay.ts:66`](../packages/events/src/outboxRelay.ts#L66)) and
+  config" ([`nats.ts:52`](../packages/events/src/nats.ts#L52),
+  [`nats.ts:79`](../packages/events/src/nats.ts#L79)).
+- The outbox relay ([`outboxRelay.ts:76`](../packages/events/src/outboxRelay.ts#L76)) and
   the ack/nak/term decision for each message
-  ([`consumer.ts:37`](../packages/events/src/consumer.ts#L37)). Neither knows about
+  ([`consumer.ts:47`](../packages/events/src/consumer.ts#L47)). Neither knows about
   Prisma: each service passes in functions over its own tables.
 
 **Publishing (the outbox), using archive as the example:**
@@ -1414,9 +1417,9 @@ the only code both services may import:
 2. The repository maps the domain event to the wire format
    ([`outbox.ts:21`](../apps/members-service/src/infrastructure/outbox.ts#L21)) and writes
    the member row and an `OutboxMessage` row in **one** transaction
-   ([`PrismaMemberRepository.ts:80`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L80)).
+   ([`PrismaMemberRepository.ts:81`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L81)).
 3. The relay, about once a second, publishes unpublished rows in order, with the row id
-   as the `Nats-Msg-Id` header ([`nats.ts:116`](../packages/events/src/nats.ts#L116)), and
+   as the `Nats-Msg-Id` header ([`nats.ts:124`](../packages/events/src/nats.ts#L124)), and
    sets `publishedAt`. If publishing fails, it stops the batch and retries next tick, so
    order is kept. Both Pods run a relay, but each batch first takes a Postgres advisory
    lock ([`outbox.ts`](../apps/members-service/src/infrastructure/outbox.ts)), so only one
@@ -1425,7 +1428,7 @@ the only code both services may import:
    drops the duplicate id within the stream's 2-minute `duplicate_window`.
 
 Events does the same for check-ins
-([`PrismaAttendanceRepository.ts:25`](../apps/events-service/src/infrastructure/PrismaAttendanceRepository.ts#L25)).
+([`PrismaAttendanceRepository.ts:26`](../apps/events-service/src/infrastructure/PrismaAttendanceRepository.ts#L26)).
 A rejected duplicate check-in rolls back the outbox row together with the attendance.
 
 **Consuming (idempotently), using archive as the example:**
@@ -1457,7 +1460,7 @@ Members' side is the same shape, with `Member.recordAttendance()`
 attendance and only moves `lastAttendedAt` *forward*, because messages can arrive out of order.
 
 **Startup and shutdown.** Messaging starts *after* the HTTP server, in the background
-([`index.ts:34`](../apps/members-service/src/index.ts#L34)). While NATS is down, HTTP
+([`index.ts:37`](../apps/members-service/src/index.ts#L37)). While NATS is down, HTTP
 works and events wait in the outbox. Each service declares **both** streams from the
 shared config ([`messaging.ts:49`](../apps/members-service/src/infrastructure/messaging.ts#L49)),
 so either can start first. On SIGTERM, the consumer stops, the relay finishes its batch,
@@ -1467,7 +1470,7 @@ and the connection drains.
 ([`k8s/nats-values.yaml`](../k8s/nats-values.yaml)): one server, JetStream on a 1 Gi
 PVC, plus `nats-box` for inspecting it. Compose gets a `nats` service. Both charts pass
 `NATS_URL` through their ConfigMap, and a `checksum/config` annotation
-([`deployment.yaml:20`](../charts/members-service/templates/deployment.yaml#L20)) makes a
+([`deployment.yaml:31`](../charts/members-service/templates/deployment.yaml#L31)) makes a
 ConfigMap change roll the Pods.
 
 ### 11.3 Why this way
@@ -1566,7 +1569,7 @@ really needs it.
 - **Nothing changed in NATS.** The `MEMBERS` stream already captures `cms.members.>`, so
   it stores the new subject. And **nothing changed in events-service**: its durable
   consumer is filtered to `cms.members.archived`
-  ([`messaging.ts:54`](../apps/events-service/src/infrastructure/messaging.ts#L54)), so it
+  ([`messaging.ts:55`](../apps/events-service/src/infrastructure/messaging.ts#L55)), so it
   never receives the new messages. Until CMS-20 adds a consumer, `MemberRegistered`
   messages sit in the stream, read by nobody, for its 7-day retention.
 - Tests: a unit test for the mapping that checks `data` is *exactly* `{ memberId }`
@@ -1860,7 +1863,148 @@ from the record) fixes exactly that. It's deliberately not built yet. Also defer
 
 ---
 
-## 13. Self-check — can you explain each of these?
+## 13. Distributed tracing (CMS-29)
+
+Logs say *what* happened in one service, and metrics say *how much*. Neither answers
+*"this registration took 900 ms: where did the time go?"* once the work crosses web,
+members-service, Postgres, the outbox, NATS and events-service. CMS-28 could follow a
+registration across services by `memberId`. A failed request has no `memberId`, though,
+and nothing told you which lines belonged to the *same* click. A **trace** does both.
+
+Runbook (install, TraceQL, troubleshooting, exercises): [`observability.md` §10–12](observability.md#10-install-tempo-the-trace-store).
+The decision record: [ADR-0009 addendum (CMS-29)](adr/0009-observability-opentelemetry.md).
+
+### 13.1 The concept
+
+A **trace** is the record of one piece of work (one click, one message) across every
+process it touched. It's a tree of **spans**. A span is one timed operation (*"POST
+/members, 41 ms"*, *"prisma:Member.create, 3 ms"*) with a name, a start and end time,
+attributes, and a status (OK, or ERROR).
+
+| Term | Meaning | Here |
+| --- | --- | --- |
+| **trace id** | 32 hex characters shared by every span of one trace | what you search and link by |
+| **span id**, **parent span id** | each span's own id, and the id of the span that caused it | draws the waterfall |
+| **root span** | the span with no parent: where the trace starts | web's Server Action request |
+| **span kind** | SERVER (received a request), CLIENT (sent one), PRODUCER (sent a message), CONSUMER (received one), INTERNAL | `publish cms.members.registered` is PRODUCER |
+| **context propagation** | handing "the current span" on, so the next span becomes its child | three different ways, below |
+| **span link** | a reference to a span in *another* trace: "related to", not "caused by" | not used (§13.3) |
+| **sampling** | deciding which traces to keep | 100%, head-based |
+
+**Propagation is the whole trick.** A span can only name its parent if it knows the
+current context. There are three hops, and each one works differently:
+
+1. **Inside one process:** Node's `AsyncLocalStorage` carries the active span through
+   every `await`, so a Prisma query started inside the use case knows it's a child of
+   the use case's span. The SDK does this for you.
+2. **Across HTTP:** the caller writes the context into the W3C **`traceparent`** header,
+   and the callee's instrumentation reads it and continues the trace:
+
+   ```
+   traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+                ││ └────────── trace id ──────────┘ └─ parent span ─┘ └ flags: 01 = sampled
+                └ version
+   ```
+3. **Across a queue:** there's no request to ride on. The context has to be put *in the
+   message*, as a header, by whoever publishes.
+
+Our outbox adds a twist to hop 3. The relay doesn't publish during the request: it
+publishes up to a second later, on its own timer, when the request's context has long
+left memory. So the context has to be **written down** with the event:
+
+```
+POST /members ─► RegisterMemberUseCase ─► INSERT Member + INSERT OutboxMessage(traceparent)
+   (request context lives in AsyncLocalStorage)          │ the request ends here
+                                                         ⋮  ≤ 1 s later, a timer
+relay: read row ─► PRODUCER span (parent = stored traceparent) ─► NATS msg + header traceparent
+                                                                       │
+events-service: CONSUMER span (parent = header) ─► use case ─► Prisma spans
+```
+
+**The Collector pattern.** Apps could send spans straight to the trace store, but then
+each app would know which store it is, how to retry, and how to batch. The
+**OpenTelemetry Collector** sits in between: apps push OTLP to it, and it batches,
+protects itself (`memory_limiter`), and fans out to one or more backends. Change the
+backend and only the Collector's config changes.
+
+**Metrics from traces.** Because every span passes through the Collector, it can count
+them too. The **spanmetrics** connector turns spans into a latency histogram. Each bucket
+remembers a few trace ids, called **exemplars**, so a point on a graph can link to a real
+request that produced it.
+
+### 13.2 How we did it here
+
+| Piece | File | What it does |
+| --- | --- | --- |
+| Service SDK | [`instrumentation.ts:50`](../apps/members-service/src/instrumentation.ts#L50) (same in events-service) | adds traces to the existing `NodeSDK`: the shared sampler ([`sampling.ts`](../packages/events/src/sampling.ts)), `PinoInstrumentation` (`trace_id` in logs, [`:68`](../apps/members-service/src/instrumentation.ts#L68)). The exporter comes from env vars the chart sets |
+| Query spans | [`prisma.ts:22`](../apps/members-service/src/infrastructure/prisma.ts#L22) (same in events-service), built by `inDbSpan` ([`tracing.ts:127`](../packages/events/src/tracing.ts#L127)) | a Prisma middleware: one CLIENT span per query, `prisma:<Model>.<action>`, tagged `db.system.name` (what the sampler looks for) |
+| Web SDK | [`apps/web/instrumentation.ts:34`](../apps/web/instrumentation.ts#L34) | `@vercel/otel`; the Server Action is the root span; `fetch` sends `traceparent` to `MEMBERS_API_URL` only |
+| Web log lines | [`lib/log.ts:45`](../apps/web/lib/log.ts#L45) | the active span's ids on every `logEvent` line |
+| Use-case span | [`memberRoutes.ts:22`](../apps/members-service/src/api/memberRoutes.ts#L22), [`eventRoutes.ts:39`](../apps/events-service/src/api/eventRoutes.ts#L39) | every use case as a span (`RegisterMemberUseCase`, `ScheduleEventUseCase`, ...), marked ERROR when a rule rejects (409); the consumer's use case too ([`messaging.ts:74`](../apps/events-service/src/infrastructure/messaging.ts#L74)) |
+| The longest trace | [`app/members/actions.ts:16`](../apps/web/app/members/actions.ts#L16) | the Archive button's Server Action: one click, one trace through web, members-service, the outbox, NATS and events-service |
+| Store the context | [`PrismaMemberRepository.ts:116`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L116), migration `20261029120000_outbox_traceparent` | `traceparent` column, written with the outbox row |
+| Shared helpers | [`packages/events/src/tracing.ts:56`](../packages/events/src/tracing.ts#L56) | `captureTraceContext`, `contextFromHeaders` ([`:64`](../packages/events/src/tracing.ts#L64)), `inMessagingSpan` ([`:102`](../packages/events/src/tracing.ts#L102)), `flushTraces` ([`:153`](../packages/events/src/tracing.ts#L153)) |
+| Relay → NATS | [`outboxRelay.ts:98`](../packages/events/src/outboxRelay.ts#L98), [`nats.ts:122`](../packages/events/src/nats.ts#L122) | PRODUCER span, child of the stored context; its own context goes out as a NATS header |
+| NATS → consumer | [`consumer.ts:54`](../packages/events/src/consumer.ts#L54) | CONSUMER span, child of the header; the handler runs inside it |
+| Charts | `charts/*/values.yaml` `tracing.otlpEndpoint` | `""` = off; on: `OTEL_TRACES_EXPORTER=otlp` + `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| Collector | [`otel-collector-values.yaml`](../k8s/monitoring/otel-collector-values.yaml) | `otlp` receiver → `memory_limiter`, `batch` → Tempo + `span_metrics` → Prometheus |
+| Tempo | [`tempo-values.yaml`](../k8s/monitoring/tempo-values.yaml) | single binary, 2 Gi PVC, 24h |
+| Grafana | [`kube-prometheus-stack-values.yaml`](../k8s/monitoring/kube-prometheus-stack-values.yaml) | Tempo data source; Loki line → trace (`derivedFields`); span → logs (`tracesToLogsV2`); exemplar → trace |
+| Dashboard | [`service-red-dashboard.yaml`](../k8s/monitoring/service-red-dashboard.yaml) | "Duration from traces": p95 by span, with exemplar dots |
+
+The tests check the parent ids, not just that a function was called:
+[`tracing.test.ts`](../packages/events/src/tracing.test.ts) registers a real in-memory
+tracer and asserts that the producer's parent is the stored request span and the
+consumer's parent is the header. [`nats.integration.test.ts`](../packages/events/src/nats.integration.test.ts)
+checks that the header survives a real NATS server. members-service's
+[`instrumentation.test.ts`](../apps/members-service/src/instrumentation.test.ts) sends a
+`traceparent` and checks the request's log lines carry that trace id.
+
+### 13.3 Why this way
+
+- **Child, not link, across NATS.** A span link says "related, but in another trace". It
+  fits a consumer that handles a *batch* of messages from many traces in one span. Ours
+  handles one message, caused by one request, so a child keeps the whole story in one
+  waterfall. The OTel messaging conventions allow both.
+- **The header, not the payload.** `traceparent` is transport metadata, like `Nats-Msg-Id`.
+  Putting it in the JSON would make it part of the contract between contexts (§11.5),
+  and every consumer would have to know about it.
+- **Head sampling at 100%.** The decision is made when the root span starts, and travels in
+  the `traceparent` flags, so every service keeps or drops the *same* trace. 100% is
+  affordable here. In production you'd keep ~10% of traces, or **tail-sample** in the
+  Collector (wait for the whole trace, then keep every error and every slow one). Only
+  tail sampling can know the outcome, but it needs all of a trace's spans in one Collector.
+- **One exception to "keep everything":** Prisma spans with no parent. The outbox relay
+  polls every second in every Pod. Without the filter, each poll is a trace of its own,
+  thousands an hour, belonging to no request.
+- **The use-case span lives in the API layer**, like the business log line (§9.9): the
+  application layer stays free of telemetry. OTel's HTTP conventions count only 5xx as a
+  server error, so this span is what makes a 409 findable as an error.
+- **Upstream Collector over Alloy**, and **span metrics over the apps' exporter** for
+  exemplars: see the ADR addendum. Deferred: browser spans (CMS-30), tail sampling, moving
+  metrics and logs onto the Collector.
+
+### 13.4 What setting it up taught (real problems we hit)
+
+| Problem | Lesson |
+| --- | --- |
+| `cluster-up.sh` failed before any tracing work: *conflict with "kube-controller-manager" … .spec.replicas* | Helm 4 applies manifests **server-side**, where every field has an owner. The HPA had scaled members-service to 3 and owned `replicas`; the chart still claimed it (2). A chart with an HPA must leave `replicas` out (`{{- if not .Values.autoscaling.enabled }}`). Helm 3's client-side apply silently overwrote it instead, so the bug had been hidden |
+| `@opentelemetry/sdk-trace-base` installed with a deprecation warning | It's now `@opentelemetry/sdk-trace`, where `BasicTracerProvider` is `TracerProvider` and `SimpleSpanProcessor` takes `{ exporter }`. Read install warnings: they're often the migration notice |
+| The tracing tests found no spans, though the code was right | The new `SimpleSpanProcessor` exports **asynchronously**, so a test must `await provider.forceFlush()` first. TypeScript hadn't caught the wrong constructor argument because the package's `tsconfig` excludes tests |
+| `SyntaxError: Named export 'SeverityNumber' not found` from `@opentelemetry/api` | `instrumentation-pino` 0.70 belongs to the new OTel 3.x line (it peers on API 1.10, core 3). Our SDK is the 0.223 / 2.x line, so pin 0.69. OTel packages version together: check a contrib package's `dependencies` against the SDK you run |
+| `@vercel/otel` would not have sent `traceparent` to members-service | Its default propagates context only to Vercel deployment URLs, so the trace would have split at web. It's a deliberate privacy default: a trace id sent to a third party tells it which of your requests it belongs to. Allow-list your own APIs (`propagateContextUrls`) |
+| The relay's once-a-second poll would make a trace per Pod per second | Background loops become root spans once database calls are traced. Decide what a "trace" is for (a request, a message) and sample the rest out |
+| A duplicate email (409) wasn't an error in the trace | HTTP server spans only count 5xx as errors (4xx is the client's fault). The business span marks rule violations itself |
+| The Collector chart rewrote `otlp` to `otlp_grpc`, and the Collector warned `"spanmetrics" alias is deprecated` | The Collector renamed components in 2026. Render the chart (`helm template`) and read the Collector's startup log: the config that runs is the source of truth, not the blog post you copied from |
+| `jaeger: null` in Tempo's values broke the chart: *nil pointer evaluating .protocols* | Helm *merges* your values into the chart's defaults, and `null` deletes a key. But a template that reads that key then fails. Some defaults can't be removed, only left unused |
+| The new members-service Pod crash-looped: *Named export 'PrismaInstrumentation' not found … is a CommonJS module* | `@prisma/instrumentation` 5 is CommonJS, and Node's ESM loader only sees the named exports it can detect statically. Vitest and tsx bridge the gap, so every test passed. Import the default and destructure it. Check: `node --import ./dist/instrumentation.js -e ''` runs the compiled file exactly as the container does |
+| Then every API call failed with `502`: *TypeError: parentTracer.getSpanLimits is not a function* | `@prisma/instrumentation` 5.22 builds its engine spans with the **1.x** SDK's `Span` class, and our tracer is the **2.x** SDK's, which no longer has that method. pnpm only warned about the peer mismatch. A tracing library can take the app down with it: a span is created on *every* query. Replaced by a 20-line middleware that only uses the stable `@opentelemetry/api`. The unit tests had passed because nothing in them made a traced query against a real SDK. Only a deploy did |
+| The review found that acceptance criterion 1 (one trace from web to the events-service consumer) couldn't pass: a registration's `MemberRegistered` has **no consumer** yet (CMS-20), so its trace ends at `publish` | A trace only goes as far as the work does. Pick the flow that really crosses every hop: archiving does (`MemberArchived` → events-service), but the UI had no Archive button, so one was added. Check that a criterion's path exists end to end before building toward it |
+| The apps' Prometheus exporter has no exemplar support | Exemplars come from where the trace ids are: the Collector, which sees every span. Metrics *derived from spans* carry them for free |
+
+---
+
+## 14. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -2009,14 +2153,28 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why does `update()` write a temp file and `mv` it, under a `flock`? What could go wrong without each? (§12.4)
 - [ ] Push vs poll: how is a background-task notification like the NATS consumer in §11? (§12.4)
 
+**Distributed tracing**
+
+- [ ] What's the difference between a trace, a span, and a span's parent? Which span has no parent in a registration's trace? (§13.1)
+- [ ] Name the three ways the trace context travels in a registration, and what carries it each time. (§13.1)
+- [ ] Why does the outbox row store a `traceparent`, when an HTTP call doesn't need anything stored? (§13.1)
+- [ ] Why does the trace context go in a NATS *header*, not in the JSON payload? (§13.3)
+- [ ] Child or span link across NATS: which did we choose, and when would the other be right? (§13.3)
+- [ ] Head vs tail sampling: who decides, when, and which one can keep "every slow trace"? (§13.3)
+- [ ] A 409 shows as OK on the HTTP span. What makes it findable with `{ status = error }`? (§13.3)
+- [ ] Where do the exemplar dots on the dashboard come from, and why not from the services' own `/metrics`? (§13.1, ADR-0009)
+- [ ] Why does a registration's trace stop at `publish`, while an archive's reaches events-service? What would make the registration's trace longer? (§13.4)
+- [ ] Why did Helm 4 refuse to upgrade a Deployment that has an HPA, when Helm 3 never complained? (§13.4)
+
 ---
 
-## 14. Where to go next
+## 15. Where to go next
 
 All nine roadmap stages are done, and the member registration workflow is now usable from
 the browser (§5). **CMS-28** made logs from every Pod searchable in Grafana (§9.9), and **CMS-27**
-published `MemberRegistered` (§11.5). The committed queue is tracing (CMS-29), browser
-monitoring (CMS-30) and SLOs (CMS-31), then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
+published `MemberRegistered` (§11.5). **CMS-29** followed one registration end to end as a
+trace (§13). The committed queue is browser monitoring (CMS-30, which starts the trace at the
+user's click) and SLOs (CMS-31), then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
 contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
 Each one is now mostly a matter of applying patterns already learned. The most
 interesting next contexts are the ones that add a new kind of message flow:
@@ -2034,16 +2192,14 @@ and a 3-node NATS cluster.
 
 Observability has natural next steps that wait for a real need (ADR-0009):
 
-- **Traces**: Members and Events now talk through NATS, so this trigger has fired. An
-  OTel Collector and Tempo, with trace context carried in message headers, would let
-  you follow one archive from the HTTP request, through the outbox and NATS, to the
-  declined assignments. For now, follow a message by its `id` in both services' logs, now
-  in one Loki query (§9.9). This is CMS-29, next after CMS-27.
+- ~~**Traces**~~: done in CMS-29 (§13). Next for traces, each when a reason appears:
+  **tail sampling** in the Collector once volume matters (keep every error and slow trace);
+  moving **metrics and logs onto the Collector** for one pipeline; **browser spans** with
+  Grafana Faro (CMS-30), so the trace starts at the click instead of at the Server Action.
 - **Alerting**: `PrometheusRule`s (e.g. 5xx ratio > 1% for 5 min) routed by Alertmanager,
   which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
 - ~~**Log aggregation**~~: done in CMS-28 (§9.9). Next for logs, when a reason appears:
-  `trace_id` in every log line (with CMS-29), so Grafana jumps from a log line to its trace;
-  alerts on log queries (Loki's ruler); and a separate one-replica Alloy for Kubernetes events
+  ~~`trace_id` in every log line~~ (done in CMS-29); alerts on log queries (Loki's ruler); and a separate one-replica Alloy for Kubernetes events
   once there's more than one node.
 
 Images and the runner's disk (§2.5) have cheap next steps, each waiting for a reason:
