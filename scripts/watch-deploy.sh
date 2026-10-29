@@ -22,6 +22,19 @@ if [[ -z "$sha" ]]; then
   git fetch -q origin main
   sha=$(git rev-parse origin/main)
 fi
+# `gh run list --commit` only matches the FULL 40-character sha. A short one
+# (f4fcb56) matches nothing, so the loop below would wait its whole 10 minutes
+# and report "no Deploy run" for a deploy that succeeded (CMS-29 /ship). Expand
+# it first; fetch main in case the commit isn't local yet.
+if [[ ${#sha} -ne 40 ]]; then
+  full=$(git rev-parse --verify -q "$sha^{commit}" ||
+    { git fetch -q origin main && git rev-parse --verify -q "$sha^{commit}"; } || true)
+  if [[ -z "$full" ]]; then
+    echo "✘ can't resolve '$sha' to a commit. Pass the full sha, or fetch it first." >&2
+    exit 1
+  fi
+  sha=$full
+fi
 echo "==> Deploy for ${sha:0:7}: $(git log -1 --format=%s "$sha" 2>/dev/null || echo '(commit not fetched)')"
 
 # Filter by commit, not "the newest Deploy run": right after a merge, the newest
