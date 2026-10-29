@@ -92,6 +92,10 @@ model OutboxMessage {
   payload     Json // the wire event from @cms/events
   createdAt   DateTime  @default(now())
   publishedAt DateTime? // null = not published yet
+  // W3C trace context of the request that wrote this row (CMS-29). The relay
+  // publishes later, outside that request, and continues its trace from here.
+  // null = written while tracing was off, or before this column existed.
+  traceparent String?
 
   // The relay's query: unpublished rows, oldest first.
   @@index([publishedAt, createdAt])

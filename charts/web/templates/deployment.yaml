@@ -69,6 +69,14 @@ spec:
             # Read by apps/web/lib/log.ts: lines below this level aren't written.
             - name: LOG_LEVEL
               value: {{ .Values.config.logLevel | default "info" | quote }}
+            # Tracing (values.yaml `tracing`). apps/web/instrumentation.ts registers
+            # OpenTelemetry only when this is "otlp"; @vercel/otel then reads the endpoint.
+            - name: OTEL_TRACES_EXPORTER
+              value: {{ if .Values.tracing.otlpEndpoint }}"otlp"{{ else }}"none"{{ end }}
+            {{- with .Values.tracing.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /

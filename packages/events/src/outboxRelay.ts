@@ -24,11 +24,20 @@
 //
 // This file knows nothing about Prisma: each service hands it an OutboxStore
 // over its own table, so the shared package never touches a service's database.
+//
+// TRACING (CMS-29): each row carries the traceparent of the request that wrote
+// it. The relay publishes it inside a PRODUCER span that is a CHILD of that
+// request's span, and sends the producer span's context as message headers.
+// So the trace continues across the gap between "saved" and "published"
+// (see tracing.ts for why the context has to be stored).
+import { SpanKind } from "@opentelemetry/api";
+import { contextFromTraceparent, currentTraceHeaders, inMessagingSpan, type TraceHeaders } from "./tracing.js";
 
 export interface OutboxRow {
   id: string;
   subject: string;
   payload: unknown; // the wire event (see contract.ts), stored as JSON
+  traceparent: string | null; // the writing request's trace context; null = tracing was off
 }
 
 // What one relay batch can do, while it holds the lock.
@@ -46,7 +55,8 @@ export interface OutboxStore {
 }
 
 // Publishes one message and resolves once JetStream has stored it.
-export type Publish = (subject: string, payload: unknown, msgId: string) => Promise<void>;
+// `traceHeaders` carry the trace context to the consumer (empty when tracing is off).
+export type Publish = (subject: string, payload: unknown, msgId: string, traceHeaders: TraceHeaders) => Promise<void>;
 
 // The subset of pino's API we use. Fastify's `app.log` satisfies it.
 export interface Logger {
@@ -84,7 +94,17 @@ export function startOutboxRelay(opts: {
       let count = 0;
       for (const row of rows) {
         try {
-          await opts.publish(row.subject, row.payload, row.id);
+          // Parent = the request that saved the row, not the relay's timer.
+          const parent = contextFromTraceparent(row.traceparent);
+          await inMessagingSpan(
+            `publish ${row.subject}`,
+            SpanKind.PRODUCER,
+            parent,
+            { subject: row.subject, messageId: row.id },
+            // Inside the span, the "current context" is the producer span, so
+            // these headers make the consumer's span a child of it.
+            () => opts.publish(row.subject, row.payload, row.id, currentTraceHeaders())
+          );
         } catch (err) {
           // NATS is unreachable or slow. Stop this batch rather than skip the
           // row, so events keep their order; the next tick retries from here.

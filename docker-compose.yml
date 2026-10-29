@@ -248,6 +248,10 @@ services:
       MEMBERS_API_URL: http://members-service:3001
       # Lowest level apps/web/lib/log.ts writes (debug | info | warn | error).
       LOG_LEVEL: info
+      # Tracing (CMS-29) is off in Compose: there is no Collector here. The chart
+      # sets "otlp" plus OTEL_EXPORTER_OTLP_ENDPOINT when tracing is on
+      # (charts/web/values.yaml `tracing`); apps/web/instrumentation.ts reads it.
+      OTEL_TRACES_EXPORTER: none
 
     # "init: true" tells Docker to inject its own tini binary (/usr/bin/docker-init)
     # as PID 1 in this container.  This gives us signal forwarding and zombie

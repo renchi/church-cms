@@ -10,6 +10,7 @@ import {
   connectNats,
   ensureConsumer,
   ensureStream,
+  inSpan,
   jetStreamPublisher,
   parseMemberArchived,
   runConsumer,
@@ -67,11 +68,12 @@ export async function startMessaging(opts: {
     durable: DURABLE,
     parse: parseMemberArchived,
     // Wire format → use case input. The use case never sees the envelope.
+    // The use-case span nests under the consumer's `process` span, like the
+    // HTTP routes' use-case spans nest under the request (eventRoutes.ts).
     handle: async (msg) => {
-      const result = await declineAssignments.execute({
-        messageId: msg.id,
-        memberId: msg.data.memberId,
-      });
+      const result = await inSpan("DeclineAssignmentsForArchivedMemberUseCase", {}, () =>
+        declineAssignments.execute({ messageId: msg.id, memberId: msg.data.memberId })
+      );
       log.info({ messageId: msg.id, memberId: msg.data.memberId, ...result }, "member archived handled");
     },
     log,

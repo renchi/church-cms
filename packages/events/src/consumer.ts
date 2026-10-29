@@ -12,15 +12,25 @@
 //   term() — it can NEVER be processed: bad JSON, unknown version. Retrying
 //            won't help, so stop. It stays in the stream for inspection.
 //   nak()  — failed this time (database down, ...). Redeliver it later.
+//
+// TRACING (CMS-29): each message is handled inside a CONSUMER span whose parent
+// is read from the message's `traceparent` header (sent by the relay's PRODUCER
+// span, see outboxRelay.ts). The handler runs inside that span, so the use
+// case's database spans nest under it: one trace from the browser's request to
+// this side effect. A message without the header starts a new trace.
+import { SpanKind } from "@opentelemetry/api";
 import type { JetStreamClient } from "@nats-io/jetstream";
 import { InvalidMessageError } from "./contract.js";
 import type { Logger } from "./outboxRelay.js";
+import { contextFromHeaders, inMessagingSpan, markFailed } from "./tracing.js";
 
 // The parts of a JetStream message (JsMsg) we use. A small interface lets the
 // unit tests pass a fake message instead of running a NATS server.
 export interface AckableMessage {
   subject: string;
   info: { deliveryCount: number; streamSequence: number };
+  // NATS message headers; absent when the publisher sent none.
+  headers?: { get(name: string): string };
   json<T = unknown>(): T;
   ack(): void;
   nak(millis?: number): void;
@@ -40,6 +50,23 @@ export async function handleMessage<T extends { id: string }>(
   handle: (event: T) => Promise<void>,
   log: Logger
 ): Promise<void> {
+  // MsgHdrs.get returns "" for a missing header; treat that as absent.
+  const parent = contextFromHeaders((name) => msg.headers?.get(name) || undefined);
+  await inMessagingSpan(`process ${msg.subject}`, SpanKind.CONSUMER, parent, { subject: msg.subject }, async (span) => {
+    span.setAttribute("messaging.nats.delivery_count", msg.info.deliveryCount);
+    await ackOrRetry(msg, parse, handle, log, (err) => markFailed(span, err));
+  });
+}
+
+// The ack / term / nak decision. It never throws: every outcome is an answer to
+// the server, and a failure is recorded on the span with `failed` instead.
+async function ackOrRetry<T extends { id: string }>(
+  msg: AckableMessage,
+  parse: (raw: unknown) => T,
+  handle: (event: T) => Promise<void>,
+  log: Logger,
+  failed: (err: unknown) => void
+): Promise<void> {
   const where = { subject: msg.subject, seq: msg.info.streamSequence, delivery: msg.info.deliveryCount };
 
   let event: T;
@@ -49,6 +76,7 @@ export async function handleMessage<T extends { id: string }>(
     // msg.json() throws on invalid JSON; parse() throws InvalidMessageError.
     // Either way the bytes will never change, so retrying is pointless.
     log.error({ ...where, err }, "invalid message; terminating");
+    failed(err);
     msg.term(err instanceof Error ? err.message : "invalid message");
     return;
   }
@@ -60,11 +88,13 @@ export async function handleMessage<T extends { id: string }>(
   } catch (err) {
     if (err instanceof InvalidMessageError) {
       log.error({ ...where, messageId: event.id, err }, "message rejected by handler; terminating");
+      failed(err);
       msg.term(err.message);
       return;
     }
     const delay = nakDelayMs(msg.info.deliveryCount);
     log.warn({ ...where, messageId: event.id, err, retryInMs: delay }, "message failed; will retry");
+    failed(err);
     msg.nak(delay);
   }
 }

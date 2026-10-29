@@ -5,7 +5,18 @@ metadata:
   labels:
     {{- include "members-service.labels" . | nindent 4 }}
 spec:
+  # With an HPA, the HPA owns the replica count, so the chart must not set it.
+  # Helm 4 applies manifests server-side: if both Helm and the HPA (through
+  # kube-controller-manager) claim .spec.replicas, the upgrade fails with
+  # "conflict ... .spec.replicas" as soon as the HPA has scaled away from
+  # replicaCount. Leaving the field out lets the HPA keep its current count.
+  # One-time catch: on the first upgrade after this change, if Helm was the
+  # field's ONLY owner (the HPA never scaled), server-side apply deletes it and
+  # Kubernetes defaults it to 1 until the HPA's next sync (~15 s) restores
+  # minReplicas. From then on the HPA owns it. A fresh install also starts at 1.
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "members-service.selectorLabels" . | nindent 6 }}

@@ -63,8 +63,8 @@ describe("NATS JetStream plumbing", () => {
     const publish = jetStreamPublisher(nats.js);
     const before = (await nats.jsm.streams.info(STREAMS.members.name)).state.messages;
 
-    await publish(SUBJECTS.memberArchived, archived("dup-1", "m-1"), "dup-1");
-    await publish(SUBJECTS.memberArchived, archived("dup-1", "m-1"), "dup-1"); // the relay retrying
+    await publish(SUBJECTS.memberArchived, archived("dup-1", "m-1"), "dup-1", {});
+    await publish(SUBJECTS.memberArchived, archived("dup-1", "m-1"), "dup-1", {}); // the relay retrying
 
     const after = (await nats.jsm.streams.info(STREAMS.members.name)).state.messages;
     expect(after - before).toBe(1);
@@ -94,19 +94,30 @@ describe("NATS JetStream plumbing", () => {
     // The consumer was created after earlier tests published, so it first
     // receives those (deliver_policy: all). Drain them before counting.
     let consumer = await start();
-    await publish(SUBJECTS.memberArchived, archived("r-1", "m-1"), "r-1");
+    await publish(SUBJECTS.memberArchived, archived("r-1", "m-1"), "r-1", {});
     await eventually(() => expect(seen).toContain("r-1"));
     await consumer.stop();
 
     // The service is "down": these are stored by JetStream, not delivered.
-    await publish(SUBJECTS.memberArchived, archived("r-2", "m-2"), "r-2");
-    await publish(SUBJECTS.memberArchived, archived("r-3", "m-3"), "r-3");
+    await publish(SUBJECTS.memberArchived, archived("r-2", "m-2"), "r-2", {});
+    await publish(SUBJECTS.memberArchived, archived("r-3", "m-3"), "r-3", {});
 
     const before = seen.length;
     consumer = await start(); // "restart": same durable name, picks up where it left off
     await eventually(() => expect(seen.slice(before)).toEqual(["r-2", "r-3"]));
     await consumer.stop();
     expect(seen.filter((id) => id === "r-1")).toHaveLength(1); // acked, so not redelivered
+  });
+
+  it("carries the trace context as a NATS header, not in the payload", async () => {
+    await ensureStream(nats.jsm, STREAMS.members);
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    await jetStreamPublisher(nats.js)(SUBJECTS.memberArchived, archived("tp-1", "m-1"), "tp-1", { traceparent });
+
+    // Read the stored message straight from the stream, as `nats stream get` would.
+    const stored = await nats.jsm.streams.getMessage(STREAMS.members.name, { last_by_subj: SUBJECTS.memberArchived });
+    expect(stored?.header.get("traceparent")).toBe(traceparent);
+    expect(stored?.json<{ id: string }>()).not.toHaveProperty("traceparent");
   });
 
   it("reports a failure when its durable consumer is deleted, instead of going quiet", async () => {

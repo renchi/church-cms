@@ -42,6 +42,9 @@ minikube start --memory 6g --cpus 4 --container-runtime docker
 > (the default here was 3 GB). The apps, Traefik and the monitoring stack already use ~2.7 GB of
 > it, and the Events service and NATS come next. The cap can only be set when the cluster is
 > **created**: an existing cluster needs `minikube delete` (or `scripts/cluster-up.sh --fresh`).
+> Measured with everything installed (CMS-29: apps, NATS, Prometheus, Grafana, Loki, Alloy, Tempo
+> and the OTel Collector): **~3.5 GB of the 6**. Tempo (~280 Mi) and the Collector (~70 Mi) added
+> ~0.4 GB. Check per Pod with `kubectl top pods -A --sort-by=memory`.
 > Check the real cap with `docker inspect minikube --format '{{.HostConfig.Memory}}'`. Note that
 > `free` *inside* the node shows the host's RAM, not the cap.
 >

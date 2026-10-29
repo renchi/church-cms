@@ -1,3 +1,4 @@
+import { flushTraces } from "@cms/events";
 import { buildApp } from "./app.js";
 import { startMessaging, type Messaging } from "./infrastructure/messaging.js";
 import { prisma } from "./infrastructure/prisma.js";
@@ -15,7 +16,9 @@ let messaging: Messaging | undefined;
 // A failure there (e.g. NATS unreachable, so drain() fails) is logged, and the
 // database is disconnected anyway.
 app.addHook("onClose", async () => {
-  await messaging?.stop().catch((err: unknown) => app.log.error({ err }, "stopping messaging failed"));
+  await messaging
+    ?.stop()
+    .catch((err: unknown) => app.log.error({ err }, "stopping messaging failed"));
   await prisma.$disconnect();
 });
 
@@ -66,13 +69,23 @@ function shutdown(signal: NodeJS.Signals): void {
   if (shuttingDown) return;
   shuttingDown = true;
   app.log.info({ signal }, "shutting down");
-  app.close().then(
-    () => process.exit(0),
-    (err: unknown) => {
-      app.log.error({ err }, "shutdown failed");
-      process.exit(1);
-    }
-  );
+  // Close the server first (finishes in-flight requests and messages), then
+  // send the spans still buffered in memory, then exit (CMS-29). The flush is
+  // capped at 3 s and never fails the shutdown: losing the last spans is better
+  // than being SIGKILLed, or exiting 1 after a clean stop.
+  app
+    .close()
+    .then(async () => {
+      if (!(await flushTraces()))
+        app.log.warn("could not send the last trace spans before exiting");
+    })
+    .then(
+      () => process.exit(0),
+      (err: unknown) => {
+        app.log.error({ err }, "shutdown failed");
+        process.exit(1);
+      }
+    );
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

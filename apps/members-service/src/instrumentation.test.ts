@@ -75,3 +75,36 @@ describe("OpenTelemetry metrics", () => {
     expect(unroutedOk).toEqual([]);
   });
 });
+
+// Tracing (CMS-29). No Collector here (traces export to "none"), but spans are
+// still created and their ids still reach the logs, which is what this checks.
+describe("OpenTelemetry tracing", () => {
+  let app: FastifyInstance;
+  let baseUrl: string;
+  const lines: Record<string, unknown>[] = [];
+
+  beforeAll(async () => {
+    // Same SDK as above: the instrumentation module only starts once.
+    await import("./instrumentation.js");
+    const { buildApp } = await import("./app.js");
+    app = buildApp({ repo, logger: true, logStream: { write: (line) => void lines.push(JSON.parse(line)) } });
+    baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it("continues the caller's trace and stamps its trace_id on the request's log lines", async () => {
+    // What web's fetch sends: trace id 4bf9..., the caller's span 00f0..., sampled.
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    await fetch(`${baseUrl}/members/abc`, { headers: { traceparent: `00-${traceId}-00f067aa0ba902b7-01` } });
+
+    const requestLines = lines.filter((l) => l.msg === "incoming request" || l.msg === "request completed");
+    expect(requestLines.length).toBeGreaterThan(0);
+    for (const line of requestLines) {
+      expect(line.trace_id).toBe(traceId); // the SAME trace as the caller
+      expect(line.span_id).toMatch(/^[0-9a-f]{16}$/); // this service's own span
+    }
+  });
+});

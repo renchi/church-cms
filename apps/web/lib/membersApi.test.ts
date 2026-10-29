@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  archiveMember,
   fetchMember,
   INVALID_INPUT_MESSAGE,
   registerMember,
@@ -126,5 +127,57 @@ describe("fetchMember", () => {
     respondWith(500, { error: "Internal Server Error" });
 
     await expect(fetchMember("m-1")).rejects.toThrow("members-service responded 500");
+  });
+});
+
+describe("archiveMember", () => {
+  it("sends DELETE /members/:id and succeeds on 204", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await archiveMember("m-1/x")).toEqual({ ok: true, status: 204 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/members\/m-1%2Fx$/);
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("passes on the domain's message for an already-archived member (400)", async () => {
+    respondWith(400, { error: "Member is already archived" });
+
+    expect(await archiveMember("m-1")).toEqual({
+      ok: false,
+      error: "Member is already archived",
+      status: 400,
+    });
+  });
+
+  it("passes on 'Member not found' (404)", async () => {
+    respondWith(404, { error: "Member not found" });
+
+    expect(await archiveMember("nope")).toEqual({
+      ok: false,
+      error: "Member not found",
+      status: 404,
+    });
+  });
+
+  it("shows the generic message on a 5xx", async () => {
+    respondWith(500, { error: "Internal Server Error" });
+
+    expect(await archiveMember("m-1")).toEqual({
+      ok: false,
+      error: UNREACHABLE_MESSAGE,
+      status: 500,
+    });
+  });
+
+  it("shows the generic message when the service can't be reached", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
+
+    expect(await archiveMember("m-1")).toEqual({
+      ok: false,
+      error: UNREACHABLE_MESSAGE,
+      status: "unreachable",
+    });
   });
 });

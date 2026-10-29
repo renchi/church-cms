@@ -85,7 +85,7 @@ class PrismaOutboxBatch implements OutboxBatch {
       orderBy: { createdAt: "asc" },
       take: limit,
     });
-    return rows.map((r) => ({ id: r.id, subject: r.subject, payload: r.payload }));
+    return rows.map((r) => ({ id: r.id, subject: r.subject, payload: r.payload, traceparent: r.traceparent }));
   }
 
   async markPublished(id: string, publishedAt: Date): Promise<void> {

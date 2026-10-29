@@ -31,6 +31,8 @@ KPS_CHART_VERSION=92.2.0          # kube-prometheus-stack
 NATS_CHART_VERSION=2.15.0
 LOKI_CHART_VERSION=18.15.0        # grafana-community/loki (the OSS chart's home since 2026-03)
 ALLOY_CHART_VERSION=1.13.1        # grafana/alloy
+TEMPO_CHART_VERSION=3.2.0         # grafana-community/tempo (single binary)
+OTELCOL_CHART_VERSION=0.176.0     # open-telemetry/opentelemetry-collector
 # Resources for a NEW cluster. Prometheus + Grafana + both services + NATS fit in
 # this. An existing cluster can't be resized — that needs --fresh.
 MINIKUBE_MEMORY_MB=6144
@@ -126,7 +128,8 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/ --force-update >/dev/null
 helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null
 helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update >/dev/null
-helm repo update traefik prometheus-community nats grafana grafana-community >/dev/null
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts --force-update >/dev/null
+helm repo update traefik prometheus-community nats grafana grafana-community open-telemetry >/dev/null
 helm_quiet upgrade --install traefik traefik/traefik \
   --version "$TRAEFIK_CHART_VERSION" \
   -n traefik --create-namespace \
@@ -169,6 +172,26 @@ helm_quiet upgrade --install alloy grafana/alloy \
   -f k8s/monitoring/alloy-values.yaml \
   --wait --timeout 3m
 ok "Alloy ready"
+
+# --- Traces: Tempo + the OTel Collector (CMS-29) ------------------------------
+# Tempo before the Collector, so the Collector's first exports find it. Grafana
+# already has Tempo as a data source (kube-prometheus-stack values), and the
+# Collector's ServiceMonitor needs the Prometheus Operator's CRDs (§2, above).
+step "observability §10" "Tempo trace store (chart $TEMPO_CHART_VERSION)"
+helm_quiet upgrade --install tempo grafana-community/tempo \
+  --version "$TEMPO_CHART_VERSION" \
+  -n monitoring \
+  -f k8s/monitoring/tempo-values.yaml \
+  --wait --timeout 5m
+ok "Tempo ready"
+
+step "observability §11" "OTel Collector, the apps' trace pipeline (chart $OTELCOL_CHART_VERSION)"
+helm_quiet upgrade --install otel-collector open-telemetry/opentelemetry-collector \
+  --version "$OTELCOL_CHART_VERSION" \
+  -n monitoring \
+  -f k8s/monitoring/otel-collector-values.yaml \
+  --wait --timeout 3m
+ok "OTel Collector ready"
 
 # --- 5. Postgres -------------------------------------------------------------
 step "k8s-local-dev §5" "Postgres for members-service and events-service (one each, ADR-0008)"
@@ -232,6 +255,9 @@ else
 fi
 
 # --- 7–8. Apps ---------------------------------------------------------------
+# Every app pushes its spans here (observability.md §11, the OTel Collector).
+# The same value deploy.yml passes.
+OTLP_ENDPOINT=http://otel-collector.monitoring.svc.cluster.local:4318
 # Migrations run automatically in members-service's init container (§6).
 step "k8s-local-dev §7" "members-service (Helm)"
 helm_quiet upgrade --install members-service ./charts/members-service \
@@ -239,6 +265,7 @@ helm_quiet upgrade --install members-service ./charts/members-service \
   --set image.tag="$IMAGE_TAG" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
+  --set tracing.otlpEndpoint="$OTLP_ENDPOINT" \
   --set metrics.serviceMonitor.enabled=true \
   --wait --timeout 4m
 
@@ -249,6 +276,7 @@ helm_quiet upgrade --install events-service ./charts/events-service \
   --set image.tag="$IMAGE_TAG" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
+  --set tracing.otlpEndpoint="$OTLP_ENDPOINT" \
   --set metrics.serviceMonitor.enabled=true \
   --wait --timeout 4m
 
@@ -258,6 +286,7 @@ helm_quiet upgrade --install web ./charts/web \
   --set image.tag="$IMAGE_TAG" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
+  --set tracing.otlpEndpoint="$OTLP_ENDPOINT" \
   --wait --timeout 4m
 
 # Old local-* builds would pile up and fill the disk. They can go once no Pod
@@ -433,23 +462,29 @@ else
   warn "skipping HTTP checks until the tunnel and /etc/hosts are fixed (see above)"
 fi
 
-# Prometheus and Loki have no Ingress; reach them through temporary port-forwards.
+# Prometheus, Loki and Tempo have no Ingress; reach them through temporary port-forwards.
 # If something else already listens on the port (often your own port-forward from
 # the runbook, maybe to an older cluster), kubectl can't bind it, and the checks
 # below would quietly query whatever that is. So refuse, and say why.
 # port_free <port> — true when nothing answers on localhost:<port>.
 port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-for port in 9090 3100; do
+for port in 9090 3100 3200 13001; do
   if ! port_free "$port"; then
     smoke_ok=false
-    fail "localhost:$port is already in use (an old port-forward? find it: lsof -i :$port). The Prometheus/Loki checks below would query it instead of this cluster"
+    fail "localhost:$port is already in use (an old port-forward? find it: lsof -i :$port). The Prometheus/Loki/Tempo checks below would query it instead of this cluster"
   fi
 done
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090 >/dev/null 2>&1 &
 pf_pid=$!
 kubectl -n monitoring port-forward svc/loki 3100 >/dev/null 2>&1 &
 loki_pf_pid=$!
-trap 'kill $pf_pid $loki_pf_pid 2>/dev/null || true' EXIT
+kubectl -n monitoring port-forward svc/tempo 3200 >/dev/null 2>&1 &
+tempo_pf_pid=$!
+# members-service directly (not through Traefik), so the trace check below works
+# without the tunnel. 13001, not 3001: that is `pnpm dev`'s port.
+kubectl port-forward svc/members-service-members-service 13001:3001 >/dev/null 2>&1 &
+members_pf_pid=$!
+trap 'kill $pf_pid $loki_pf_pid $tempo_pf_pid $members_pf_pid 2>/dev/null || true' EXIT
 # targets_up <job> — true once Prometheus scrapes both Pods of that service.
 targets_up() {
   curl -s 'http://localhost:9090/api/v1/targets?state=active' \
@@ -482,6 +517,25 @@ else
   fail "no members-service logs in Loki: check kubectl -n monitoring logs ds/alloy (docs/observability.md troubleshooting)"
 fi
 
+# The whole trace path in one check: send members-service one request carrying
+# a traceparent we made up, then ask Tempo for that trace id. Finding it means
+# the SDK made spans, exported them to the Collector, and the Collector forwarded
+# them to Tempo. (Health probes are not traced on purpose, so a real API call.)
+# The request is retried inside the loop: the port-forward needs a moment to start.
+trace_id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+# tempo_has_trace — true once Tempo returns the trace we started.
+tempo_has_trace() {
+  curl -s -m 5 -o /dev/null -H "traceparent: 00-$trace_id-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')-01" \
+    'http://localhost:13001/members?limit=1' || true
+  curl -sf -m 5 "http://localhost:3200/api/traces/$trace_id" | jq -e '(.batches // .resourceSpans // []) | length >= 1' >/dev/null
+}
+if wait_for 90 "a members-service trace in Tempo" tempo_has_trace; then
+  ok "Tempo has trace $trace_id (app → OTel Collector → Tempo works)"
+else
+  smoke_ok=false
+  fail "no trace in Tempo: check kubectl -n monitoring logs deploy/otel-collector, then the app's OTEL_* env (docs/observability.md troubleshooting)"
+fi
+
 # Each service creates its durable consumer on the OTHER service's stream when it
 # connects (ADR-0010). Both existing means both services reached NATS.
 # consumer_exists <stream> <durable>
@@ -509,6 +563,7 @@ cat <<EOF
                          -o jsonpath="{.items[0].data.admin-password}" | base64 --decode; echo
     Prometheus         kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090
     Logs (Loki)        Grafana → Explore → Loki, e.g. {app="members-service"} | json
+    Traces (Tempo)     Grafana → Explore → Tempo, e.g. { resource.service.name = "members-service" }
 
     Next: send some traffic and watch the dashboard — docs/observability.md, exercises.
 EOF

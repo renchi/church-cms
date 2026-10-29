@@ -1,3 +1,4 @@
+import { inSpan } from "@cms/events";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { AssignVolunteerUseCase } from "../application/AssignVolunteerUseCase.js";
 import { CancelEventUseCase } from "../application/CancelEventUseCase.js";
@@ -29,6 +30,13 @@ function handleError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof DomainError) return reply.status(400).send({ error: err.message });
   throw err;
 }
+
+// A span around each use case, so the trace waterfall shows the business step
+// between the HTTP span and the database spans (CMS-29). Started here in the API
+// layer, not in the use case: the application layer stays free of telemetry.
+// A rejected rule (a 400/404/409) marks the span as an error (inSpan does that),
+// which TraceQL `{ status = error }` finds: the HTTP span only counts 5xx.
+const traced = <T>(name: string, work: () => Promise<T>): Promise<T> => inSpan(name, {}, work);
 
 // JSON-schema fragments. Fastify validates every request against these BEFORE
 // the handler runs, so malformed input gets a 400 without reaching the domain.
@@ -107,10 +115,9 @@ export async function eventRoutes(
     },
     async (req, reply) => {
       try {
-        const result = await scheduleEvent.execute({
-          ...req.body,
-          scheduledAt: new Date(req.body.scheduledAt),
-        });
+        const result = await traced("ScheduleEventUseCase", () =>
+          scheduleEvent.execute({ ...req.body, scheduledAt: new Date(req.body.scheduledAt) })
+        );
         return reply.status(201).send(result);
       } catch (err) {
         return handleError(reply, err);
@@ -159,10 +166,12 @@ export async function eventRoutes(
     async (req, reply) => {
       try {
         const { scheduledAt, ...rest } = req.body;
-        await updateEvent.execute(req.params.id, {
-          ...rest,
-          ...(scheduledAt !== undefined && { scheduledAt: new Date(scheduledAt) }),
-        });
+        await traced("UpdateEventUseCase", () =>
+          updateEvent.execute(req.params.id, {
+            ...rest,
+            ...(scheduledAt !== undefined && { scheduledAt: new Date(scheduledAt) }),
+          })
+        );
         return reply.status(204).send();
       } catch (err) {
         return handleError(reply, err);
@@ -185,7 +194,7 @@ export async function eventRoutes(
     },
     async (req, reply) => {
       try {
-        await cancelEvent.execute(req.params.id, req.body);
+        await traced("CancelEventUseCase", () => cancelEvent.execute(req.params.id, req.body));
         return reply.status(204).send();
       } catch (err) {
         return handleError(reply, err);
@@ -213,10 +222,12 @@ export async function eventRoutes(
     },
     async (req, reply) => {
       try {
-        const result = await recordAttendance.execute(req.params.id, {
-          ...req.body,
-          method: req.body.method ?? "self",
-        });
+        const result = await traced("RecordAttendanceUseCase", () =>
+          recordAttendance.execute(req.params.id, {
+            ...req.body,
+            method: req.body.method ?? "self",
+          })
+        );
         return reply.status(201).send(result);
       } catch (err) {
         return handleError(reply, err);
@@ -244,7 +255,9 @@ export async function eventRoutes(
     },
     async (req, reply) => {
       try {
-        const result = await assignVolunteer.execute(req.params.id, req.body);
+        const result = await traced("AssignVolunteerUseCase", () =>
+          assignVolunteer.execute(req.params.id, req.body)
+        );
         return reply.status(201).send(result);
       } catch (err) {
         return handleError(reply, err);

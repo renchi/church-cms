@@ -207,8 +207,8 @@ describe("Messaging (integration)", () => {
 
       // Two different Nats-Msg-Ids, so JetStream stores both; ProcessedMessage
       // is what must catch the duplicate.
-      await publish(SUBJECTS.memberArchived, msg, "nats-id-a");
-      await publish(SUBJECTS.memberArchived, msg, "nats-id-b");
+      await publish(SUBJECTS.memberArchived, msg, "nats-id-a", {});
+      await publish(SUBJECTS.memberArchived, msg, "nats-id-b", {});
 
       await eventually(async () => {
         const row = await prisma.volunteerAssignment.findUniqueOrThrow({ where: { id: futureAssignment } });

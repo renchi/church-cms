@@ -14,6 +14,9 @@
 # The last panel ("Logs — warnings and errors") reads Loki, not Prometheus
 # (CMS-28): the Service dropdown's value is also the `app` log label, so one
 # variable drives both the metrics and the logs.
+# The panel below it ("Duration from traces") reads span metrics that the OTel
+# Collector derives from traces (CMS-29), and shows exemplars: dots that link a
+# point on the graph to one real trace in Tempo.
 # Each panel's description (hover the ⓘ in Grafana) explains its PromQL;
 # docs/study-guide.md walks through the queries in detail.
 apiVersion: v1
@@ -294,7 +297,7 @@ data:
           "id": 7,
           "type": "timeseries",
           "title": "Duration \u2014 p50 / p95 / p99 latency",
-          "description": "D of RED. histogram_quantile estimates percentiles from the histogram buckets. p95 = 95% of requests were faster than this line.",
+          "description": "D of RED. histogram_quantile estimates percentiles from the histogram buckets. p95 = 95% of requests were faster than this line. No exemplar dots here: the services' Prometheus exporter can't attach trace ids (ADR-0009 addendum). The same latency with dots that open a trace is the 'Duration from traces' panel at the bottom (CMS-29).",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -429,6 +432,53 @@ data:
               },
               "refId": "A",
               "expr": "{app=\"$job\", container!=\"migrate\"} | json | level=~\"warn|error|fatal\" or __error__!=\"\""
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Duration from traces \u2014 p95 by span, with exemplars",
+          "description": "Not from the service's own /metrics: the OTel Collector's spanmetrics connector counts every SERVER span it forwards to Tempo (CMS-29). The difference is the dots: each one is an EXEMPLAR, the trace id of one real request in that latency bucket. Hover a dot and click View trace to open that request in Tempo. Turn on exemplars with the 'Exemplars' toggle in the query editor if they're hidden. study-guide \u00a713.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 24,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "A",
+              "exemplar": true,
+              "expr": "histogram_quantile(0.95, sum by (le, span_name) (rate(traces_span_metrics_duration_milliseconds_bucket{service_name=\"$job\", span_kind=\"SPAN_KIND_SERVER\"}[$__rate_interval])))",
+              "legendFormat": "{{span_name}}"
             }
           ]
         }

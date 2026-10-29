@@ -1,3 +1,4 @@
+import { captureTraceContext } from "@cms/events";
 import { Member, type MemberStatus } from "../domain/Member.js";
 import { ConflictError } from "../domain/errors.js";
 import type { MemberDomainEvent } from "../domain/events.js";
@@ -109,11 +110,16 @@ export class PrismaMemberRepository implements MemberRepository {
         }
       }
       if (messages.length > 0) {
+        // The trace context of the request saving this aggregate, so the relay
+        // can continue the trace later (CMS-29, @cms/events tracing.ts). One
+        // value for every row: they're all written by the same request.
+        const traceparent = captureTraceContext();
         await tx.outboxMessage.createMany({
           data: messages.map((m) => ({
             id: m.id,
             subject: m.subject,
             payload: m.payload as unknown as Prisma.InputJsonValue,
+            traceparent,
           })),
         });
       }

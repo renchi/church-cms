@@ -316,8 +316,8 @@ describe("Messaging (integration)", () => {
 
       // Two different Nats-Msg-Ids, so JetStream stores both: the consumer's
       // ProcessedMessage table is what must catch the duplicate.
-      await publish(SUBJECTS.attendanceRecorded, msg, "nats-id-a");
-      await publish(SUBJECTS.attendanceRecorded, msg, "nats-id-b");
+      await publish(SUBJECTS.attendanceRecorded, msg, "nats-id-a", {});
+      await publish(SUBJECTS.attendanceRecorded, msg, "nats-id-b", {});
 
       await eventually(async () => {
         expect(await prisma.processedMessage.count()).toBe(1);

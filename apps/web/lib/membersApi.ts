@@ -1,7 +1,7 @@
 // The one place in the web app that talks to members-service.
 //
 // Everything here runs on the SERVER only: in Server Components (the members
-// pages) and in the registration Server Action. The browser never calls
+// pages) and in the Server Actions (register, archive). The browser never calls
 // members-service directly, because MEMBERS_API_URL is a cluster-internal
 // address (http://members-service-members-service:3001 in minikube,
 // http://members-service:3001 in Compose) that a browser can't resolve.
@@ -121,5 +121,34 @@ export async function registerMember(input: RegisterMemberInput): Promise<Regist
   }
 
   // 5xx, or a 4xx without a readable message: not something the user can fix.
+  return { ok: false, error: UNREACHABLE_MESSAGE, status: res.status };
+}
+
+// Archiving answers 204 with no body. 404 (no such member) and 400 ("Member is
+// already archived", a rule of the Member aggregate) are passed on as-is, like a
+// registration's domain errors. `status` is for the logs, as in RegisterMemberResult.
+export type ArchiveMemberResult =
+  | { ok: true; status: number }
+  | { ok: false; error: string; status: number | "unreachable" };
+
+export async function archiveMember(id: string): Promise<ArchiveMemberResult> {
+  let res: Response;
+  try {
+    // DELETE archives: members-service keeps the member (other contexts hold
+    // their id) and publishes MemberArchived, which events-service consumes.
+    res = await fetch(`${MEMBERS_API_URL}/members/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      cache: "no-store",
+    });
+  } catch {
+    return { ok: false, error: UNREACHABLE_MESSAGE, status: "unreachable" };
+  }
+
+  if (res.status === 204) return { ok: true, status: res.status };
+
+  if (res.status === 400 || res.status === 404) {
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+    if (typeof body.error === "string") return { ok: false, error: body.error, status: res.status };
+  }
   return { ok: false, error: UNREACHABLE_MESSAGE, status: res.status };
 }

@@ -23,9 +23,9 @@ function makeStore(
 }
 
 const rows: OutboxRow[] = [
-  { id: "1", subject: "cms.members.archived", payload: { n: 1 } },
-  { id: "2", subject: "cms.members.archived", payload: { n: 2 } },
-  { id: "3", subject: "cms.members.archived", payload: { n: 3 } },
+  { id: "1", subject: "cms.members.archived", payload: { n: 1 }, traceparent: null },
+  { id: "2", subject: "cms.members.archived", payload: { n: 2 }, traceparent: null },
+  { id: "3", subject: "cms.members.archived", payload: { n: 3 }, traceparent: null },
 ];
 
 describe("startOutboxRelay", () => {
@@ -36,7 +36,7 @@ describe("startOutboxRelay", () => {
 
     expect(await relay.runOnce()).toBe(3);
     expect(publish.mock.calls.map((c) => c[2])).toEqual(["1", "2", "3"]);
-    expect(publish).toHaveBeenCalledWith("cms.members.archived", { n: 1 }, "1");
+    expect(publish).toHaveBeenCalledWith("cms.members.archived", { n: 1 }, "1", {});
     expect(store.published).toEqual(["1", "2", "3"]);
     expect(await relay.runOnce()).toBe(0); // nothing left
   });

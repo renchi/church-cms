@@ -4,7 +4,7 @@
 // "make it exist with this configuration", the same idea as
 // `helm upgrade --install` or `kubectl apply`. Restarting a service, or
 // starting both at once, is always safe.
-import { connect, type NatsConnection } from "@nats-io/transport-node";
+import { connect, headers as natsHeaders, type NatsConnection } from "@nats-io/transport-node";
 import {
   AckPolicy,
   DeliverPolicy,
@@ -16,6 +16,7 @@ import {
   type JetStreamClient,
   type JetStreamManager,
 } from "@nats-io/jetstream";
+import type { TraceHeaders } from "./tracing.js";
 
 // The server answers a lookup for a missing stream or consumer with an API
 // error carrying a numeric code. Anything else (no connection, no permission)
@@ -112,7 +113,14 @@ export async function ensureConsumer(
 // resolves only after the stream has stored the message (a "PubAck"), so
 // when it returns, the event is safely persisted in NATS.
 export function jetStreamPublisher(js: JetStreamClient) {
-  return async (subject: string, payload: unknown, msgId: string): Promise<void> => {
-    await js.publish(subject, JSON.stringify(payload), { msgID: msgId });
+  return async (subject: string, payload: unknown, msgId: string, traceHeaders: TraceHeaders): Promise<void> => {
+    // NATS messages have headers, like HTTP. `traceparent` travels here, next
+    // to Nats-Msg-Id (which msgID sets), never inside the JSON payload: the
+    // payload is the domain contract, and trace context is transport metadata.
+    // Remove this loop and the consumer's span starts a NEW trace: the
+    // "broken trace at NATS" exercise in docs/observability.md.
+    const headers = natsHeaders();
+    for (const [name, value] of Object.entries(traceHeaders)) headers.set(name, value);
+    await js.publish(subject, JSON.stringify(payload), { msgID: msgId, headers });
   };
 }

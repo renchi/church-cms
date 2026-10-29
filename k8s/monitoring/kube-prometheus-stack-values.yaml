@@ -30,6 +30,16 @@ grafana:
       enabled: true
       label: grafana_dashboard
       labelValue: "1"
+    # The Prometheus data source the chart creates. EXEMPLARS (CMS-29): a
+    # metric point can carry the trace id of one request it counted (the
+    # Collector's spanmetrics attaches them, k8s/monitoring/otel-collector-values.yaml).
+    # This tells Grafana that label `trace_id` names a trace in the Tempo data
+    # source, so each exemplar dot on a graph becomes a link to its trace.
+    datasources:
+      exemplarTraceIdDestinations:
+        datasourceUid: tempo
+        traceIdLabelName: trace_id
+        urlDisplayLabel: View trace
   # Loki as a second data source, next to the Prometheus one the chart adds.
   # A fixed uid lets dashboards point at it by name (service-red-dashboard.yaml
   # uses "uid": "loki"). The URL is Loki's Service inside the cluster
@@ -44,6 +54,40 @@ grafana:
       jsonData:
         # Loki returns at most this many lines per query (Grafana's default is 1000).
         maxLines: 1000
+        # LOG → TRACE (CMS-29). Every line our apps write while a span is active
+        # carries "trace_id":"<32 hex>" (pino's OTel instrumentation, web's
+        # lib/log.ts). This regex finds it, and Grafana shows a "Trace" button
+        # on the line that opens it in Tempo. `$$` is an escaped `$`: provisioning
+        # files expand `${...}` as environment variables otherwise.
+        derivedFields:
+          - name: TraceID
+            matcherRegex: '"trace_id":"(\w+)"'
+            datasourceUid: tempo
+            url: "$${__value.raw}"
+            urlDisplayLabel: View trace
+    # Tempo, the trace store (k8s/monitoring/tempo-values.yaml). Grafana queries
+    # its HTTP API on port 3200: by trace id, or with TraceQL searches.
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      url: http://tempo.monitoring.svc.cluster.local:3200
+      access: proxy
+      jsonData:
+        # TRACE → LOGS: a "Logs for this span" button on each span. It runs this
+        # LogQL in Loki, over the span's time ±5 minutes. A line filter (|=) on
+        # the trace id is enough: the id only ever appears in that trace's lines.
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: "-5m"
+          spanEndTimeShift: "5m"
+          customQuery: true
+          query: '{namespace="default"} |= "$${__trace.traceId}"'
+        # In Explore's Tempo search, offer "find traces from these logs" too.
+        lokiSearch:
+          datasourceUid: loki
+        # Draw a trace as a graph of services as well as a waterfall.
+        nodeGraph:
+          enabled: true
   # 256Mi was too tight: after ~2 weeks of uptime Grafana sat at 255/256Mi, spent
   # its CPU on garbage collection, and failed its probes, so Traefik answered 503
   # (found during CMS-28; study-guide §9.9). 512Mi leaves room for log queries,
@@ -56,6 +100,11 @@ prometheus:
   prometheusSpec:
     # Keep two days of data — plenty for experiments, small on disk.
     retention: 2d
+    # Keep exemplars (CMS-29): the trace ids attached to metric points. Off by
+    # default in Prometheus; without it Prometheus drops them while scraping.
+    # They're held in a fixed-size in-memory buffer (100k by default), not on disk.
+    enableFeatures:
+      - exemplar-storage
     # Prometheus only scrapes ServiceMonitors labelled release=kube-prometheus-stack
     # (the chart default). Our chart sets that label; see
     # charts/members-service/templates/servicemonitor.yaml.

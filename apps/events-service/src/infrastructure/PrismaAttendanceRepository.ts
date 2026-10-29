@@ -1,3 +1,4 @@
+import { captureTraceContext } from "@cms/events";
 import { inTransaction, type Db, type Prisma } from "./prisma.js";
 import { Attendance, type CheckInMethod } from "../domain/Attendance.js";
 import type { AttendanceRepository } from "../domain/AttendanceRepository.js";
@@ -28,11 +29,16 @@ export class PrismaAttendanceRepository implements AttendanceRepository {
       inTransaction(this.db, async (tx) => {
         await tx.attendance.create({ data: attendance.toSnapshot() });
         if (messages.length > 0) {
+          // The trace context of the request saving this aggregate, so the relay
+          // can continue the trace later (CMS-29, @cms/events tracing.ts). One
+          // value for every row: they're all written by the same request.
+          const traceparent = captureTraceContext();
           await tx.outboxMessage.createMany({
             data: messages.map((m) => ({
               id: m.id,
               subject: m.subject,
               payload: m.payload as unknown as Prisma.InputJsonValue,
+              traceparent,
             })),
           });
         }

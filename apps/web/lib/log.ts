@@ -13,9 +13,16 @@
 //     production;
 //   - Error objects become { type, message }; JSON.stringify would print {}.
 //
+// Trace ids (CMS-29): while a request is being traced, every line also carries
+// `trace_id` and `span_id`, the same keys PinoInstrumentation adds to the
+// services' lines. Grafana turns a trace_id in a Loki line into a link to the
+// trace in Tempo. Without tracing (no span active) the keys are left out.
+//
 // The production Next.js server (`next start`) logs nothing about requests by
 // itself, so without lines like these the web hop is invisible in Loki.
 // Alloy reads them from the container's stdout (study-guide §9.9).
+
+import { trace } from "@opentelemetry/api";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -35,6 +42,8 @@ export function logEvent(level: LogLevel, fields: Record<string, unknown>, msg: 
   const extra = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, serialise(v)]));
   // The fixed keys come last, so a field can't overwrite them: a stray
   // { level: "info" } must not hide an error from `level="error"` queries.
-  const line = { ...extra, level, time: Date.now(), service: "web", msg };
+  const spanContext = trace.getActiveSpan()?.spanContext();
+  const ids = spanContext ? { trace_id: spanContext.traceId, span_id: spanContext.spanId } : {};
+  const line = { ...extra, ...ids, level, time: Date.now(), service: "web", msg };
   console.log(JSON.stringify(line));
 }
