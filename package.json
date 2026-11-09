@@ -18,7 +18,10 @@
       "@prisma/engines",
       "esbuild",
       "prisma"
-    ]
+    ],
+    "overrides": {
+      "@grafana/faro-core": "2.13.0"
+    }
   },
   "devDependencies": {
     "eslint": "^9.39.4",

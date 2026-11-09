@@ -3,7 +3,10 @@
 #
 #   helm repo add grafana https://grafana.github.io/helm-charts
 #   helm upgrade --install alloy grafana/alloy --version 1.13.1 \
-#     -n monitoring -f k8s/monitoring/alloy-values.yaml
+#     -n monitoring -f k8s/monitoring/alloy-values.yaml \
+#     --set "alloy.hostAliases[0].ip=$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.clusterIP}')"
+#   (the --set: Traefik's IP for cms.local, so the Faro receiver can fetch source maps;
+#   see hostAliases below)
 #
 # Push, not pull. Prometheus *pulls* metrics: it asks each Pod for /metrics.
 # Logs work the other way round: the apps just print to stdout, the container
@@ -11,8 +14,17 @@
 # those files and *pushes* the lines to Loki. Alloy is that agent.
 #
 # What Alloy is: Grafana's distribution of the OpenTelemetry Collector, with its
-# own config language (below). It can also collect metrics and traces, which is
-# why CMS-29 (tracing) can reuse it. Here it only does logs.
+# own config language (below). It can also collect metrics and traces.
+#
+# Two jobs here:
+#   1. the node's log files → Loki (CMS-28, blocks 1–6 below);
+#   2. since CMS-30, the RECEIVER for browser monitoring: Grafana Faro in the
+#      browser POSTs to cms.local/faro/collect, Traefik forwards that to port 12347
+#      here (k8s/monitoring/faro-ingress.yaml), and blocks 7–9 split it: browser
+#      logs, errors and Web Vitals → Loki; browser spans → the OTel Collector, which
+#      stays the only way traces reach Tempo (ADR-0009 addendum, CMS-30).
+#      Faro speaks its own protocol, not OTLP, so it needs Faro's receiver: that's
+#      why it lives in Alloy and not in the Collector.
 
 controller:
   # A DaemonSet runs one Alloy Pod per node. Each Pod reads only the log files
@@ -30,6 +42,22 @@ alloy:
     varlog: true
     dockercontainers: true
 
+  # The Faro receiver's port, added to Alloy's Service so the Ingress can reach it.
+  # Browsers never connect here directly: only through Traefik, which rate-limits.
+  extraPorts:
+    - name: faro
+      port: 12347
+      targetPort: 12347
+      protocol: TCP
+  # The receiver downloads source maps from the URLs in browser stack traces:
+  # http://cms.local/_next/static/…  But `cms.local` only exists in YOUR machine's
+  # /etc/hosts; cluster DNS has never heard of it. This alias adds it to the Alloy
+  # Pod's own /etc/hosts, pointing at Traefik's ClusterIP, so the download goes
+  # through the same Ingress a browser uses. The IP is filled in by cluster-up.sh
+  # (--set alloy.hostAliases[0].ip=…), because it changes when Traefik is reinstalled.
+  hostAliases:
+    - ip: "0.0.0.0"   # placeholder: cluster-up.sh sets Traefik's ClusterIP
+      hostnames: ["cms.local"]
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { memory: 128Mi }
@@ -144,5 +172,91 @@ alloy:
       loki.write "default" {
         endpoint {
           url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }
+
+      // 7. Browser monitoring (CMS-30): the endpoint Grafana Faro posts to.
+      //    PUBLIC by nature: every visitor's browser must reach it, so it can't
+      //    require a secret (anything in the page's JavaScript is readable). It's
+      //    protected by limits instead:
+      //      - Traefik's RateLimit middleware, before a request gets here
+      //        (faro-ingress.yaml): a flood must not take out the log collector;
+      //      - max_allowed_payload_size: one huge request can't eat the memory;
+      //      - cors_allowed_origins: only pages from cms.local. The page and this
+      //        endpoint share an origin, so browsers send no CORS preflight today;
+      //        this is the second fence if the endpoint ever moves to its own host.
+      //    Its own rate limiter is off: Traefik's sees the client IP and acts earlier.
+      faro.receiver "browser" {
+        server {
+          listen_address           = "0.0.0.0"
+          listen_port              = 12347
+          cors_allowed_origins     = ["http://cms.local"]
+          max_allowed_payload_size = "1MiB"
+          rate_limiting {
+            enabled = false
+          }
+        }
+        // Stack traces from a production build are minified. The receiver fetches
+        // the .map file next to each bundle (next.config.mjs serves them) and
+        // rewrites every frame to the original file and line. Only from our own
+        // origin: a stack trace is browser input, and must not make Alloy fetch
+        // arbitrary URLs.
+        sourcemaps {
+          download              = true
+          download_from_origins = ["http://cms.local"]
+        }
+        output {
+          logs   = [loki.process.faro.receiver]
+          traces = [otelcol.exporter.otlphttp.collector.input]
+        }
+      }
+
+      // 8. Browser logs, errors and measurements on their way to Loki.
+      //    a) Privacy backstop. The browser already scrubs every item
+      //       (apps/web/lib/rum/scrub.ts); this catches a browser running an old
+      //       bundle. Same rule: email addresses and 9+ digit phone numbers become
+      //       [redacted]. Only the (capture group) is replaced. A phone must
+      //       start after a space, quote or bracket, i.e. inside free text: logfmt
+      //       writes its own numbers right after `=` (lcp=1234.000000,
+      //       browser_version=142.0.7444.162), and those must survive. Dots don't
+      //       count as separators, for the same reason. RE2 has no lookarounds, so
+      //       the characters around the group do that job. Each rule here came
+      //       from real lines it wrongly redacted: the timestamp, LCP values, a
+      //       browser version (study-guide §14). The browser scrub is the precise
+      //       layer; this one is coarse on purpose.
+      //    b) Labels: exactly two. app="web-browser" (apart from the web Pod's
+      //       server logs, app="web") and kind = exception | log | measurement |
+      //       event. Page, browser, device and values stay in the logfmt line and
+      //       are read at query time with `| logfmt` (few labels = few streams).
+      loki.process "faro" {
+        stage.replace {
+          expression = "([^\\s@\"'<>()\\[\\],;:/?=&#]+@[^\\s@\"'<>()\\[\\],;:/?=&#]+\\.[a-zA-Z]{2,})"
+          replace    = "[redacted]"
+        }
+        stage.replace {
+          expression = "(?:^|[\\s\"(])(\\+?\\(?(?:\\d[ ()-]{0,2}){8,}\\d)(?:[^\\w:.]|$)"
+          replace    = "[redacted]"
+        }
+        stage.logfmt {
+          mapping = { "kind" = "" }
+        }
+        stage.labels {
+          values = { "kind" = "" }
+        }
+        stage.static_labels {
+          values = { "app" = "web-browser" }
+        }
+        stage.label_keep {
+          values = ["app", "kind"]
+        }
+        forward_to = [loki.write.default.receiver]
+      }
+
+      // 9. Browser spans → the OTel Collector over OTLP/HTTP. Not straight to
+      //    Tempo: the Collector is the one trace path (ADR-0009, CMS-29), so its
+      //    span-metrics and exemplars cover browser spans too.
+      otelcol.exporter.otlphttp "collector" {
+        client {
+          endpoint = "http://otel-collector.monitoring.svc.cluster.local:4318"
         }
       }

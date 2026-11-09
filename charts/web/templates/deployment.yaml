@@ -77,6 +77,16 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ . | quote }}
             {{- end }}
+            # Browser monitoring (values.yaml `rum`). app/layout.tsx reads these per
+            # request and passes them to the browser as props: not NEXT_PUBLIC_*,
+            # which `next build` would freeze into the image.
+            - name: RUM_ENABLED
+              value: {{ .Values.rum.enabled | quote }}
+            - name: RUM_DEBUG
+              value: {{ .Values.rum.debug | quote }}
+            # The release the browser reports with each error: the image tag.
+            - name: APP_VERSION
+              value: {{ .Values.image.tag | quote }}
           readinessProbe:
             httpGet:
               path: /

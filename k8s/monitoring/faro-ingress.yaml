@@ -1,0 +1,72 @@
+# The public door to browser monitoring (CMS-30, docs/observability.md §13).
+#
+#   browser ──POST cms.local/faro/collect──► Traefik ──► rate limit ──► strip /faro
+#                                                       ──► Alloy :12347 /collect (faro.receiver)
+#
+# Why a public endpoint at all: the data comes from visitors' browsers, which are
+# outside the cluster, so the receiver must be reachable from the internet (here,
+# from anything that can reach cms.local). And why no API key: a key would sit in
+# the page's JavaScript, where anyone can read it. So the protection is LIMITS, not
+# secrets: a rate limit here, a payload size limit and an origin allow-list in the
+# receiver (k8s/monitoring/alloy-values.yaml, block 7).
+#
+# Same origin as the app (cms.local, not faro.cms.local): the browser sends no CORS
+# preflight, there's no extra /etc/hosts entry, and ad blockers that block
+# third-party telemetry hosts don't see one (a path containing "faro" can still be
+# blocked by some lists: observability.md troubleshooting).
+#
+# Apply: kubectl apply -f k8s/monitoring/faro-ingress.yaml   (cluster-up.sh does)
+
+# 1. Rate limit, per client IP: on average 50 requests/s, bursts up to 100. Faro
+#    batches its items (a page load is a handful of requests), so a real visitor
+#    is far below this; a flood gets HTTP 429 from Traefik and never reaches Alloy,
+#    which is also the cluster's log collector.
+#    Caveat: behind `minikube tunnel` every request may arrive from the same IP,
+#    so here the limit is effectively shared. In production, behind a load balancer,
+#    you'd tell Traefik which X-Forwarded-For hop is the client (ipStrategy.depth).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: faro-ratelimit
+  namespace: monitoring
+spec:
+  rateLimit:
+    average: 50
+    burst: 100
+---
+# 2. The receiver listens on /collect; the browser calls /faro/collect so the path
+#    can share cms.local with the app. Strip the prefix on the way in.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: faro-strip
+  namespace: monitoring
+spec:
+  stripPrefix:
+    prefixes: ["/faro"]
+---
+# 3. The route. Traefik picks the most specific match, so /faro wins over the web
+#    app's catch-all / on the same host, even though the two Ingresses live in
+#    different namespaces. Middlewares run in the order listed: limit first, so
+#    rejected requests cost as little as possible.
+#    Annotation format: <namespace>-<middleware name>@kubernetescrd.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: faro
+  namespace: monitoring
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: monitoring-faro-ratelimit@kubernetescrd,monitoring-faro-strip@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: cms.local
+      http:
+        paths:
+          - path: /faro
+            pathType: Prefix
+            backend:
+              service:
+                name: alloy
+                port:
+                  number: 12347

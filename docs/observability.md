@@ -187,10 +187,15 @@ Grafana already knows Loki: the data source is in
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update grafana
 
+# The --set line: since CMS-30 Alloy is also the browser-monitoring receiver (§13), and it
+# downloads source maps from http://cms.local. The values file maps cms.local to a
+# placeholder; this fills in Traefik's in-cluster IP. Leave it out and browser stack
+# traces in Loki stay minified.
 helm upgrade --install alloy grafana/alloy \
   --version 1.13.1 \
   -n monitoring \
   -f k8s/monitoring/alloy-values.yaml \
+  --set "alloy.hostAliases[0].ip=$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.clusterIP}')" \
   --wait --timeout 3m
 
 kubectl -n monitoring get ds alloy
@@ -363,6 +368,93 @@ Moving between the three signals:
 
 ---
 
+## 13. Browser monitoring (RUM)
+
+The browser reports on itself (CMS-30): JS errors, Web Vitals and its own `fetch` spans,
+through Grafana Faro. Concepts: [study-guide §14](study-guide.md#14-frontend-observability-real-user-monitoring-cms-30).
+
+```
+phone ──POST cms.local/faro/collect──► Traefik ─ rate limit ─ strip /faro ─► Alloy :12347 (faro.receiver)
+                                                                              ├─ logs, errors, vitals → Loki  {app="web-browser", kind=…}
+                                                                              └─ spans → OTel Collector → Tempo  (service web-browser)
+```
+
+> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) does steps 1–3. Step 4 is
+> how you check it.
+
+**1. Upgrade Alloy with the receiver.** The same install as §8, plus the receiver's port and a
+host alias: Alloy downloads source maps from `http://cms.local`, which cluster DNS doesn't
+know, so the alias points it at Traefik's in-cluster address.
+
+```bash
+helm upgrade --install alloy grafana/alloy --version 1.13.1 -n monitoring \
+  -f k8s/monitoring/alloy-values.yaml \
+  --set "alloy.hostAliases[0].ip=$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.clusterIP}')" \
+  --wait --timeout 3m
+kubectl -n monitoring get svc alloy -o jsonpath='{.spec.ports[*].port}'; echo
+# 12345 12347                         ← 12347 is the Faro receiver
+kubectl -n monitoring exec ds/alloy -c alloy -- grep cms.local /etc/hosts
+# 10.111.170.160	cms.local           ← Traefik's ClusterIP (yours may differ)
+```
+
+**2. Open the door** (Ingress + rate limit + prefix strip), then the dashboard:
+
+```bash
+kubectl apply -f k8s/monitoring/faro-ingress.yaml -f k8s/monitoring/frontend-dashboard.yaml
+# middleware.traefik.io/faro-ratelimit created
+# middleware.traefik.io/faro-strip created
+# ingress.networking.k8s.io/faro created
+# configmap/cms-frontend-dashboard created
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://cms.local/faro/collect \
+  -H 'Content-Type: application/json' -d '{"meta":{"app":{"name":"curl-test"}}}'
+# 202                                 ← accepted; 404 = Ingress missing, 502 = Alloy has no :12347
+```
+
+**3. Turn it on in the web app.** `charts/web` has `rum.enabled` and `rum.debug` (both off by
+default); `cluster-up.sh` and `deploy.yml` pass `--set rum.enabled=true --set rum.debug=true`.
+
+```bash
+kubectl exec deploy/web-web -- env | grep -E 'RUM_|APP_VERSION'
+# RUM_ENABLED=true
+# RUM_DEBUG=true
+# APP_VERSION=local-b7e1787-…        ← the image tag; errors carry it as app_version
+```
+
+**4. Run the smoke test.** A headless phone (Playwright's Docker image, about 2 GB the first
+time) registers and archives a member, throws the test error, and checks Loki and Tempo:
+
+```bash
+scripts/rum-smoke.sh
+# RUM smoke test against http://cms.local as a 412×839 phone
+#   ✔ 8 telemetry requests, all accepted by the receiver
+#   ✔ no name, email or phone in any telemetry request
+#   ✔ registration: one trace, root "POST" in the browser, services web-browser → web → members-service
+#   ✔ archive: one trace, root "POST" in the browser, services web-browser → members-service → web → events-service
+#   ✔ test error in Loki with page, browser and a source-mapped stack trace
+#   ✔ Web Vitals in Loki for /members
+#   ✔ Web Vitals in Loki for /members/new
+```
+
+**5. Look at it.** Grafana → Dashboards → **CMS — Frontend (browser monitoring)**:
+<http://grafana.cms.local/d/cms-frontend>. Empty panels mean no visits yet: open
+<http://cms.local/members> on any device and switch tabs (Faro sends vitals when a page is
+hidden).
+
+**LogQL for browser data.** Only `app` and `kind` are labels; everything else comes from
+`| logfmt`:
+
+| Want | LogQL |
+| --- | --- |
+| Every browser error | `{app="web-browser", kind="exception"}` |
+| Errors on one page | `{app="web-browser", kind="exception"} \| logfmt \| page_id="/members/new"` |
+| LCP p75 per page | `quantile_over_time(0.75, {app="web-browser", kind="measurement"} \| logfmt \| type="web-vitals" \| unwrap lcp \| __error__="" [5m]) by (page_id)` |
+| Errors on phones only | `{app="web-browser", kind="exception"} \| logfmt \| browser_mobile="true"` |
+| Anything redacted (privacy check) | `{app="web-browser"} \|= "[redacted]"` |
+
+In Tempo: `{ resource.service.name = "web-browser" }` finds traces that start in a browser.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause → fix |
@@ -392,6 +484,14 @@ Moving between the three signals:
 | Thousands of tiny traces named `prisma:OutboxMessage.findMany` | The relay's poll loop is being traced. The shared sampler (`packages/events/src/sampling.ts`) drops database spans with no parent; was the `prisma:` span name prefix changed? |
 | No exemplar dots on *Duration from traces* | Prometheus needs `enableFeatures: [exemplar-storage]` (step 2 values; the Prometheus Pod restarts to pick it up), and the panel's query needs the *Exemplars* toggle on. Check that Prometheus scrapes the Collector: Targets → `otel-collector` |
 | Collector logs `"spanmetrics" alias is deprecated` (or the chart rewrites `otlp` to `otlp_grpc`) | The Collector renamed components in 2026. Use the new names (`span_metrics`, `otlp_grpc`); the values file already does |
+| **No `/faro/collect` requests at all** (browser DevTools → Network) | RUM is off (`kubectl exec deploy/web-web -- env \| grep RUM_ENABLED`), or Faro didn't start: check the browser console. In CMS-30 a start-once guard on `faro.api` silently skipped it (study-guide §14.4) |
+| `/faro/collect` returns **400**, and no browser spans reach Tempo | The receiver couldn't parse the batch. `kubectl -n monitoring logs ds/alloy -c alloy` shows why. Seen in CMS-30: the browser scrubber had redacted the spans' `…UnixNano` times. The receiver's status codes are in Alloy's metrics: `faro_receiver_request_duration_seconds_count` by `status_code` |
+| `/faro/collect` returns **429** | The rate limit (`faro-ingress.yaml`). Expected under a flood. Behind `minikube tunnel` every client may share one IP, so heavy testing from several tabs can hit it |
+| A **CORS error** in the browser console for `/faro/collect` | The page isn't on `http://cms.local` (e.g. `localhost:3000` through a port-forward). The receiver only allows `cms.local` (`cors_allowed_origins`). Use `cms.local` |
+| Telemetry works in one browser but not another | **An ad blocker** dropping requests to paths like `/faro`. DevTools shows them as *blocked*. Real RUM data always misses some visitors for this reason |
+| The trace starts at web, not in the browser | The form was submitted **before the page's JavaScript loaded** (a native POST has no `traceparent`), or the request went to another origin (Faro only adds `traceparent` same-origin). Reload and wait for the page to finish loading |
+| Browser stack traces in Loki are **minified** (`page-1a2b.js:1:28432`) | The receiver couldn't fetch the source map. Check `curl -sI http://cms.local/_next/static/chunks/<file>.js.map` (200?), and that the Alloy Pod resolves `cms.local` (step 1's `/etc/hosts` check) |
+| A Frontend panel says **SampleExtractionErr** | A line whose value isn't a number reached an `unwrap`. The dashboard's queries end with `\| __error__=""`; add it to your own |
 
 ---
 
@@ -659,3 +759,61 @@ line. You went from one service's log line to another service's through the trac
 `memberId` and no search by hand. Repeat it with an archive (exercise 12's Archive button), starting
 from events-service's span `process cms.members.archived`: its logs are events-service's
 `message processed` line for that message.
+
+### Browser (CMS-30)
+
+These need a browser that can reach `cms.local` (DevTools open: F12). The smoke test
+(§13 step 4) checks the same things mechanically; here you watch them happen.
+
+**17. Throw an error and find it in Grafana.** Open
+<http://cms.local/members/new?rum-test-error=1> (needs `rum.debug`, on in this cluster).
+In Grafana → Explore → Loki, run `{app="web-browser", kind="exception"} |= "RUM test error"`.
+
+*Expected:* within a few seconds, one line with `page_id=/members/new`, your `browser_name`,
+`browser_mobile`, and a `stacktrace` whose frames name `Rum.tsx`, not `layout-1a2b.js`: the
+receiver mapped them back with the source maps. Then open the Frontend dashboard: *JS errors
+by page* has a point for `/members/new`.
+
+**18. Throttle the network and watch LCP change.** DevTools → Network → throttling **Slow
+4G**, tick **Disable cache**, load <http://cms.local/members> five times, switching to
+another tab after each load (Faro sends vitals when a page is hidden). Then turn throttling
+off and do it five more times.
+
+*Expected:* the dashboard's *LCP p75 by page* rises for `/members` in the throttled minutes
+(several hundred ms or more, against roughly 100 ms unthrottled), then falls back. That's
+the point of RUM: the server's own latency (*Duration* on the RED dashboard) didn't change
+at all.
+
+**19. Follow one click from the browser to the NATS consumer.** On <http://cms.local/members>,
+press **Archive** on any active member. In Tempo, search
+`{ resource.service.name = "web-browser" && span.http.request.method = "POST" }` and open
+the newest trace.
+
+*Expected* (measured, CMS-30): the first row is `web-browser POST` (the browser's span, the
+root, about 40 ms), then web's `POST /members` (the Server Action), its `fetch DELETE …`,
+members-service's `DELETE /members/:id` and `ArchiveMemberUseCase`, and later the outbox's
+`publish cms.members.archived` and events-service's `process cms.members.archived`. The
+browser row is the widest of the request's spans: it includes the network both ways. Add
+`>> { resource.service.name = "events-service" }` to the query to find only traces that
+reached the consumer.
+
+**20. Confirm no personal data leaves the browser.** Register a member at
+<http://cms.local/members/new> with DevTools → Network filtered to `collect`. Click each
+`collect` request → *Payload*, and search it (Ctrl+F) for the name, email and phone you typed.
+Then in Loki: `{app="web-browser"} |= "<the email you typed>"`.
+
+*Expected:* no match in any payload, and no Loki lines. Now type `jane@example.org` into
+DevTools' **Console** as `console.warn("jane@example.org")`: the next `collect` request
+carries a log with `[redacted]` in its place (the browser scrubber, privacy layer 2).
+
+**21. Hit the rate limit.**
+
+```bash
+seq 1 300 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  http://cms.local/faro/collect -H 'Content-Type: application/json' -d '{"meta":{"app":{"name":"flood"}}}' \
+  | sort | uniq -c
+```
+
+*Expected:* a mix like `120 202` and `180 429` (measured, CMS-30). The 429s came from
+Traefik; Alloy never saw them, so log shipping carried on. Check: `kubectl -n monitoring logs
+ds/alloy -c alloy --since=1m | grep -c error` stays where it was.

@@ -33,6 +33,19 @@ config:
 tracing:
   otlpEndpoint: ""
 
+# Browser monitoring (RUM) with Grafana Faro (CMS-30, ADR-0009 addendum). When on,
+# every page loads app/Rum.tsx, which sends the browser's errors, Web Vitals and
+# fetch spans to /faro/collect. That path only exists when the cluster has the
+# Faro receiver (k8s/monitoring/faro-ingress.yaml), so it's off by default, like
+# tracing. Read at REQUEST time by the root layout, not at build time, so these
+# values work with the one image CI built (study-guide §14).
+rum:
+  enabled: false
+  # Turns on /members/new?rum-test-error=1, a deliberate browser error for the smoke
+  # test (scripts/rum-smoke.sh) and the runbook exercises. Anyone can trigger it, so
+  # a real production site would leave it off; this minikube is a learning cluster.
+  debug: false
+
 # How a Pod stops during a rollout (templates/deployment.yaml, study guide §7.8).
 shutdown:
   # Keep serving this long after Kubernetes starts stopping the Pod, before the
