@@ -93,44 +93,50 @@ export default async function MembersPage({ searchParams }: MembersPageProps) {
       )}
 
       {response && response.data.length > 0 && (
-        <table className="w-full border-collapse text-left text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 text-gray-500">
-              <th className="py-2 pr-4 font-medium">Name</th>
-              <th className="py-2 pr-4 font-medium">Email</th>
-              <th className="py-2 pr-4 font-medium">Phone</th>
-              <th className="py-2 pr-4 font-medium">Status</th>
-              <th className="py-2 font-medium">
-                <span className="sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {response.data.map((member) => (
-              <tr key={member.id} className="border-b border-gray-100">
-                <td className="py-2 pr-4">{member.name}</td>
-                <td className="py-2 pr-4 text-gray-600">{member.email}</td>
-                <td className="py-2 pr-4 text-gray-600">{member.phone ?? "—"}</td>
-                <td className="py-2 pr-4">
-                  <span
-                    className={
-                      member.status === "active"
-                        ? "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
-                        : "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
-                    }
-                  >
-                    {member.status}
-                  </span>
-                </td>
-                <td className="py-2">
-                  {/* Archiving an archived member is a domain error, so only
-                      active members get the button. */}
-                  {member.status === "active" && <ArchiveButton memberId={member.id} />}
-                </td>
+        // On a phone the table is wider than the screen. Without this wrapper the
+        // browser zooms the WHOLE page out to fit it (tiny text, Archive buttons at
+        // the edge); with it, the page stays phone-width and only the table scrolls
+        // sideways. Found by CMS-30's phone-sized smoke test (scripts/rum-smoke.sh).
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-gray-500">
+                <th className="py-2 pr-4 font-medium">Name</th>
+                <th className="py-2 pr-4 font-medium">Email</th>
+                <th className="py-2 pr-4 font-medium">Phone</th>
+                <th className="py-2 pr-4 font-medium">Status</th>
+                <th className="py-2 font-medium">
+                  <span className="sr-only">Actions</span>
+                </th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {response.data.map((member) => (
+                <tr key={member.id} className="border-b border-gray-100">
+                  <td className="py-2 pr-4">{member.name}</td>
+                  <td className="py-2 pr-4 text-gray-600">{member.email}</td>
+                  <td className="py-2 pr-4 text-gray-600">{member.phone ?? "—"}</td>
+                  <td className="py-2 pr-4">
+                    <span
+                      className={
+                        member.status === "active"
+                          ? "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
+                          : "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
+                      }
+                    >
+                      {member.status}
+                    </span>
+                  </td>
+                  <td className="py-2">
+                    {/* Archiving an archived member is a domain error, so only
+                      active members get the button. */}
+                    {member.status === "active" && <ArchiveButton memberId={member.id} />}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

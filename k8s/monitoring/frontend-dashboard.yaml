@@ -1,0 +1,307 @@
+# Grafana dashboard: what real visitors' browsers report (CMS-30, Grafana Faro).
+#
+# Loaded by the same Grafana sidecar as service-red-dashboard.yaml (the
+# grafana_dashboard: "1" label). Every panel is a LOKI query: Faro's receiver writes
+# errors, logs and Web Vitals measurements as log lines (k8s/monitoring/alloy-values.yaml,
+# block 8), and LogQL turns them into graphs:
+#   - count_over_time(... [5m])                 → how many errors
+#   - quantile_over_time(0.75, ... | unwrap lcp) → a Web Vital's p75 (unwrap reads a
+#                                                  number out of the line)
+# Only `app` and `kind` are labels; page_id, browser_name, lcp, … are parsed per query
+# with `| logfmt`. That keeps Loki's stream count small (study-guide §9.9, §14).
+# Every `unwrap` is followed by `| __error__=""`: ONE line whose value isn't a number
+# makes the whole panel fail (Loki's SampleExtractionErr). CMS-30 hit it with lines
+# from a redaction rule that had replaced LCP values with "[redacted]".
+# Each panel's description (the ⓘ in Grafana) says what it shows.
+#
+#   kubectl apply -f k8s/monitoring/frontend-dashboard.yaml    (cluster-up.sh does)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cms-frontend-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  cms-frontend.json: |
+    {
+      "uid": "cms-frontend",
+      "title": "CMS — Frontend (browser monitoring)",
+      "tags": [
+        "cms",
+        "rum"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "text",
+          "title": "How to read this",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 24,
+            "h": 3
+          },
+          "options": {
+            "mode": "markdown",
+            "content": "What real visitors' browsers report through Grafana Faro (CMS-30). Everything here is a Loki query on `{app=\"web-browser\"}`: `kind` is the only other label, the rest is parsed with `| logfmt`. Pages are route ids (`/members/:id`). Study guide §14, runbook observability.md §13."
+          }
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "LCP p75 by page",
+          "description": "75th percentile of LCP per page, from real visitors' browsers. p75 is Google's own threshold: a page passes if 3 in 4 visits are good. Good: ≤ 2500 ms.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 3,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "quantile_over_time(0.75, {app=\"web-browser\", kind=\"measurement\"} | logfmt | type=\"web-vitals\" | unwrap lcp | __error__=\"\" [5m]) by (page_id)",
+              "legendFormat": "{{page_id}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "INP p75 by page",
+          "description": "75th percentile of INP per page, from real visitors' browsers. p75 is Google's own threshold: a page passes if 3 in 4 visits are good. Good: ≤ 200 ms.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 3,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "quantile_over_time(0.75, {app=\"web-browser\", kind=\"measurement\"} | logfmt | type=\"web-vitals\" | unwrap inp | __error__=\"\" [5m]) by (page_id)",
+              "legendFormat": "{{page_id}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "CLS p75 by page",
+          "description": "75th percentile of CLS per page, from real visitors' browsers. p75 is Google's own threshold: a page passes if 3 in 4 visits are good. Good: ≤ 0.1.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 3,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "quantile_over_time(0.75, {app=\"web-browser\", kind=\"measurement\"} | logfmt | type=\"web-vitals\" | unwrap cls | __error__=\"\" [5m]) by (page_id)",
+              "legendFormat": "{{page_id}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "JS errors by page",
+          "description": "Uncaught errors and unhandled promise rejections, per page, per 5 minutes. Click a point, then the Logs panel below, for the stack trace (mapped back to the source with source maps).",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 11,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "sum by (page_id) (count_over_time({app=\"web-browser\", kind=\"exception\"} | logfmt [5m]))",
+              "legendFormat": "{{page_id}}"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "table",
+          "title": "Slowest pages (LCP p75, selected range)",
+          "description": "Pages ranked by LCP p75 over the whole time range: where to look first.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 11,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "queryType": "instant",
+              "instant": true,
+              "expr": "topk(10, quantile_over_time(0.75, {app=\"web-browser\", kind=\"measurement\"} | logfmt | type=\"web-vitals\" | unwrap lcp | __error__=\"\" [$__range]) by (page_id))"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "transformations": [
+            {
+              "id": "reduce",
+              "options": {
+                "reducers": [
+                  "lastNotNull"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "barchart",
+          "title": "Errors by browser and device",
+          "description": "Which browsers and devices hit errors. The app is mobile-first, so browser_mobile=true matters most.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 19,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "queryType": "instant",
+              "instant": true,
+              "expr": "sum by (browser_name, browser_mobile) (count_over_time({app=\"web-browser\", kind=\"exception\"} | logfmt [$__range]))",
+              "legendFormat": "{{browser_name}} mobile={{browser_mobile}}"
+            }
+          ],
+          "options": {
+            "xField": "Metric"
+          },
+          "transformations": [
+            {
+              "id": "reduce",
+              "options": {
+                "reducers": [
+                  "lastNotNull"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "logs",
+          "title": "Recent browser errors",
+          "description": "The raw exception lines, newest first. Each carries the page, browser, a source-mapped stack trace and, when it happened during a traced request, a trace_id.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 19,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{app=\"web-browser\", kind=\"exception\"}"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending"
+          }
+        }
+      ]
+    }

@@ -12,6 +12,8 @@
     "test:unit": "vitest run --exclude '**/*.integration.test.ts'"
   },
   "dependencies": {
+    "@grafana/faro-web-sdk": "2.13.0",
+    "@grafana/faro-web-tracing": "2.13.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.223.0",
     "@opentelemetry/instrumentation": "^0.223.0",

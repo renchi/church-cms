@@ -72,6 +72,7 @@ sudo -E minikube tunnel
 | Traefik dashboard (routers, services, middlewares) | <http://traefik.cms.local/dashboard/> |
 | Grafana: RED dashboard (rate, errors, latency per service) | <http://grafana.cms.local> → Dashboards → *CMS — Service RED metrics* ([setup](observability.md)) |
 | Logs from every Pod (deleted ones too), Kubernetes events | <http://grafana.cms.local> → Explore → *Loki* → e.g. `{app="members-service"} \| json` ([LogQL cheat sheet](observability.md#9-logql-cheat-sheet-our-fields)) |
+| What real visitors' browsers see: Web Vitals (LCP, INP, CLS) and JS errors per page, by browser and device | <http://grafana.cms.local/d/cms-frontend> → *CMS — Frontend (browser monitoring)*; raw lines: Explore → *Loki* → `{app="web-browser"}` ([RUM runbook](observability.md#13-browser-monitoring-rum)) |
 | One request across every service (web → members → NATS → events), as a waterfall | <http://grafana.cms.local> → Explore → *Tempo* → TraceQL, e.g. `{ resource.service.name = "members-service" && status = error }` ([TraceQL cheat sheet](observability.md#12-following-a-trace-traceql-cheat-sheet)) |
 | Prometheus: scrape targets (is each Pod `up`?) | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` → <http://localhost:9090/targets> |
 | NATS: streams and consumers as JSON (messages stored, pending per consumer) | `kubectl -n nats port-forward pod/nats-0 8222` → <http://localhost:8222/jsz?consumers=true> ([runbook](messaging.md)) |

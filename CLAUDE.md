@@ -116,7 +116,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
 | One outbox relay batch at a time per service (advisory lock)          | One relay can't keep up, or polling latency/load matters                     | 0010        |
 | `MemberArchived`, `AttendanceRecorded` and a thin `MemberRegistered` cross the bus | A context needs another event, or a consumer needs `MemberRegistered` to carry more than `memberId` (adding fields is non-breaking) | 0010        |
-| Traces through an OTel Collector → Tempo (CMS-29), head-sampled 100%; metrics still pulled by Prometheus, logs via Alloy | Trace volume matters (→ ratio or tail sampling), or one pipeline for all signals is wanted | 0009        |
+| Traces through an OTel Collector → Tempo (CMS-29), head-sampled 100%, starting in the browser (CMS-30, Faro → Alloy → Collector); metrics still pulled by Prometheus, logs via Alloy | Trace volume matters (→ ratio or tail sampling, and stop trusting the browser's sampled flag), or one pipeline for all signals is wanted | 0009        |
 | The working session orchestrates read-only subagents (`reviewer`, `docs-auditor`); review runs on request | The pipeline must survive the session (→ Agent SDK orchestrator, CMS-36), or every PR should be reviewed (→ advisory CI agent, CMS-37) | 0011        |
 
 ## ADR index

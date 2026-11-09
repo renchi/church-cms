@@ -14,6 +14,14 @@ const nextConfig = {
   // standalone folder then mirrors the monorepo: the server is at
   // .next/standalone/apps/web/server.js.
   outputFileTracingRoot: fileURLToPath(new URL('../../', import.meta.url)),
+  // Serve a .map file next to every browser bundle (CMS-30). A production stack trace
+  // is minified (`at e (page-1a2b.js:1:28432)`); Alloy's faro.receiver downloads the
+  // matching map from cms.local and turns each frame back into
+  // `app/members/new/RegisterForm.tsx:42` before the error reaches Loki.
+  // The trade-off: anyone can now read the original frontend source. Fine here, the
+  // repo is public. A closed-source app would upload the maps to the receiver
+  // privately instead and keep them off the web server (study-guide §14).
+  productionBrowserSourceMaps: true,
 }
 
 export default nextConfig

@@ -151,8 +151,8 @@ helm_quiet upgrade --install kube-prometheus-stack prometheus-community/kube-pro
   --wait --timeout 8m
 ok "monitoring stack ready"
 
-step "observability §3" "Grafana dashboard"
-kubectl apply -f k8s/monitoring/service-red-dashboard.yaml
+step "observability §3" "Grafana dashboards"
+kubectl apply -f k8s/monitoring/service-red-dashboard.yaml -f k8s/monitoring/frontend-dashboard.yaml
 
 # --- Logs: Loki + Alloy --------------------------------------------------------
 # Loki before Alloy, so Alloy's first pushes find it (Alloy would retry anyway).
@@ -165,13 +165,23 @@ helm_quiet upgrade --install loki grafana-community/loki \
   --wait --timeout 5m
 ok "Loki ready"
 
-step "observability §8" "Alloy log agent, one per node (chart $ALLOY_CHART_VERSION)"
+# Alloy is also the browser-monitoring receiver (§13, CMS-30). It downloads source
+# maps from http://cms.local, which cluster DNS doesn't know: the alias points it at
+# Traefik's ClusterIP (the in-cluster address; it changes if Traefik is reinstalled).
+step "observability §8" "Alloy log agent + Faro receiver, one per node (chart $ALLOY_CHART_VERSION)"
+TRAEFIK_CLUSTER_IP=$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.clusterIP}')
 helm_quiet upgrade --install alloy grafana/alloy \
   --version "$ALLOY_CHART_VERSION" \
   -n monitoring \
   -f k8s/monitoring/alloy-values.yaml \
+  --set "alloy.hostAliases[0].ip=$TRAEFIK_CLUSTER_IP" \
   --wait --timeout 3m
 ok "Alloy ready"
+
+# The public door to the Faro receiver: cms.local/faro → Alloy :12347, behind a
+# Traefik rate limit (§13). Needs Traefik's Middleware CRD (installed with Traefik).
+step "observability §13" "browser monitoring endpoint (Ingress + rate limit)"
+kubectl apply -f k8s/monitoring/faro-ingress.yaml
 
 # --- Traces: Tempo + the OTel Collector (CMS-29) ------------------------------
 # Tempo before the Collector, so the Collector's first exports find it. Grafana
@@ -287,6 +297,8 @@ helm_quiet upgrade --install web ./charts/web \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
   --set tracing.otlpEndpoint="$OTLP_ENDPOINT" \
+  --set rum.enabled=true \
+  --set rum.debug=true \
   --wait --timeout 4m
 
 # Old local-* builds would pile up and fill the disk. They can go once no Pod

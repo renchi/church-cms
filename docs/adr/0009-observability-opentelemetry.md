@@ -228,3 +228,73 @@ that's exact, at a lower rate it's a sample.
 | Tempo single-binary on a filesystem | More traffic, or HA | Distributed Tempo on object storage |
 | Server-side spans only; the trace starts at the Server Action | Need to see what the user waited for in the browser | Browser RUM with Grafana Faro (CMS-30) |
 | Consumer span is a child of the producer | A consumer that handles messages in batches | Span links, one per message |
+
+---
+
+## Addendum (CMS-30, November 2026): browser monitoring (RUM) with Grafana Faro
+
+**Status:** Accepted
+
+The CMS-29 evolution row "the trace starts at the Server Action / need to see what the user
+waited for in the browser" has fired. Server telemetry can't see a slow page on a phone, a
+JavaScript error, or how long the user waited before the request even left the browser.
+This addendum adds **real user monitoring (RUM)**: the browser reports its own errors, Web
+Vitals and spans.
+
+### Decision
+
+- **Grafana Faro in the browser** (`@grafana/faro-web-sdk` + `faro-web-tracing`, pinned
+  2.13.0), started once by [`apps/web/app/Rum.tsx`](../../apps/web/app/Rum.tsx) from the
+  root layout. Off by default: `rum.enabled` in `charts/web`, read per request by the
+  layout (not `NEXT_PUBLIC_*`, which `next build` freezes into the image).
+- **Receiver: Alloy's `faro.receiver`, not the Collector.** Faro speaks its own protocol,
+  not OTLP, so something must translate it. The Collector's contrib `faro` receiver exists
+  but is Alpha, and would need a second logs pipeline to Loki. CMS-29 chose the Collector
+  over Alloy *because Alloy's config is Grafana-specific*; that argument doesn't apply to a
+  Grafana protocol. So the receiver runs in the Alloy we already have
+  ([`alloy-values.yaml`](../../k8s/monitoring/alloy-values.yaml), blocks 7–9): logs,
+  errors and measurements go to Loki; **spans go on to the Collector over OTLP**, which
+  stays the only path into Tempo (span metrics and exemplars cover browser spans too).
+- **A public endpoint protected by limits, not secrets.** Every visitor's browser must
+  reach it, and anything in the page's JavaScript is public, so an API key would protect
+  nothing. Instead: same origin (`cms.local/faro`, no CORS preflight), a Traefik
+  `RateLimit` middleware *before* the request reaches Alloy (which is also the log
+  collector), a 1 MiB payload limit and a `cms.local` origin allow-list in the receiver
+  ([`faro-ingress.yaml`](../../k8s/monitoring/faro-ingress.yaml)).
+- **The browser becomes the head of the trace.** Faro's fetch instrumentation adds
+  `traceparent` to same-origin requests, including the Server Action POST, and Next.js
+  continues an incoming trace (checked: the server span's parent is the browser's span id).
+  The root span is **the request the click caused**, not the click: a click span that
+  stays the parent across `await` needs async context tracking in the browser (zone.js),
+  which is fragile in React 19 and deferred. Everything downstream is `ParentBased`, so the
+  browser's sampled flag now decides for web and both services. Kept at 100%.
+- **Personal data stays out, in layers:** capture less (console `warn`/`error` only, no
+  `setUser`); scrub every item in the browser (`lib/rum/scrub.ts`, unit-tested);
+  redact again in Alloy (`stage.replace`); messages name the field, never its value. Names
+  can't be pattern-matched, so for names only the first and last layers protect.
+- **Readable stack traces:** Next.js serves source maps (`productionBrowserSourceMaps`),
+  and the receiver downloads them from `cms.local` only (a host alias points Alloy at
+  Traefik, because cluster DNS doesn't know `cms.local`). The maps are public; acceptable
+  because the repo is.
+- **Two Loki labels:** `app="web-browser"` and `kind` (exception, log, measurement, event).
+  Page, browser and values stay in the logfmt line. Pages are route ids
+  (`/members/:id`, `lib/rum/page.ts`), the browser's `http.route`.
+
+### Consequences
+
+**Good:** one trace from the browser's request to the events-service consumer; JS errors
+with readable stacks; Web Vitals per page, from real visitors' devices. No new component:
+the receiver lives in Alloy.
+
+**Costs:** a public, unauthenticated write endpoint, bounded by limits. Alloy now does two
+jobs, so a receiver problem can affect log shipping (the rate limit is the guard). The
+browser bundle grows by Faro (~tens of KB gzipped), and source maps are public. A client
+controls the sampled flag.
+
+| Now (after this addendum) | Trigger | Then |
+| --- | --- | --- |
+| Root span = the browser's fetch | Need time spent *before* the request (slow client-side validation, rendering) | A user-interaction span as root, with a zone.js context manager |
+| The browser's sampled flag is trusted (100%) | Trace volume or cost matters, or abuse | Web ignores the incoming flag for sampling, or tail-sample in the Collector |
+| Source maps served publicly | A closed-source frontend | Upload maps to the receiver at build time; stop serving them |
+| Web Vitals as Loki log lines, queried with `unwrap` | Long retention, or alerting on vitals | Convert to Prometheus histograms in Alloy |
+| One Alloy for logs and the receiver | Receiver load affects log shipping | A separate one-replica Alloy Deployment for Faro |

@@ -55,8 +55,10 @@ the logs pillar: every Pod's logs, deleted Pods included, searchable in Grafana 
 `MemberRegistered`, ready for Communications (§11.5: what goes in a payload, and why
 contracts grow cheaply but shrink expensively). **CMS-29** added the third pillar, traces:
 one registration is now one trace in Tempo, from web's Server Action through the outbox and
-NATS to events-service, with log lines and graph points linking to it (§13). Next are browser
-monitoring (CMS-30), SLOs (CMS-31) and CMS-20 (Communications, the welcome email).
+NATS to events-service, with log lines and graph points linking to it (§13). **CMS-30**
+moved the start of that trace into the browser: real visitors' phones now report JS errors,
+Web Vitals and their own spans, with no personal data, through a rate-limited public
+endpoint (§14). Next are SLOs (CMS-31) and CMS-20 (Communications, the welcome email).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -556,7 +558,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:24`](../charts/web/values.yaml#L24)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:453`](../scripts/cluster-up.sh#L453)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:465`](../scripts/cluster-up.sh#L465)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -788,7 +790,7 @@ then gets SIGTERM once no new requests are arriving.
   the sleep, their SIGTERM handler ([`index.ts:63`](../apps/members-service/src/index.ts#L63))
   lets the NATS consumer finish its current message and drains the connection, all inside
   the same 30 s.
-- [`scripts/cluster-up.sh:303`](../scripts/cluster-up.sh#L303): the script deletes old
+- [`scripts/cluster-up.sh:315`](../scripts/cluster-up.sh#L315): the script deletes old
   `local-*` images after a deploy. `helm --wait` returns when the *new* Pods are Ready, but
   the old ones are now still sleeping, and Docker won't remove an image a container is
   using. So the script first waits until every Pod running one of our images runs this
@@ -2118,7 +2120,132 @@ checks that the header survives a real NATS server. members-service's
 
 ---
 
-## 14. Self-check — can you explain each of these?
+## 14. Frontend observability: real user monitoring (CMS-30)
+
+§13 made one registration into one trace, but it started at the web *server*. Nothing told
+us what the person on the phone saw: how long the page took to show, whether a button
+reacted, or that a script crashed in their browser and never reached a server at all.
+**Real user monitoring (RUM)** closes that gap: the browser reports on itself.
+
+Runbook (install, queries, troubleshooting, exercises): [`observability.md` §13](observability.md#13-browser-monitoring-rum).
+The decision record: [ADR-0009 addendum (CMS-30)](adr/0009-observability-opentelemetry.md).
+
+### 14.1 The concept
+
+**What RUM sees that server monitoring can't.** A server sees requests arrive and leave. A
+browser sees the rest: how long until the page is usable on *this* phone on *this*
+network, JavaScript errors that never cause a request, and the time between the click and
+the request leaving. Synthetic checks (a script hitting the site) measure one fast machine;
+RUM measures every real visitor, slow phones included.
+
+| Term | Meaning | Here |
+| --- | --- | --- |
+| **RUM** | telemetry sent by real visitors' browsers | Grafana Faro, `app/Rum.tsx` |
+| **Core Web Vitals** | Google's three user-centred page measures | LCP, INP, CLS (below) |
+| **LCP** (Largest Contentful Paint) | when the biggest thing on screen appeared: "the page has loaded", as a user feels it | good ≤ 2.5 s |
+| **INP** (Interaction to Next Paint) | how long the page takes to react visibly to a tap or key | good ≤ 200 ms |
+| **CLS** (Cumulative Layout Shift) | how much content jumps around while loading | good ≤ 0.1 |
+| **p75** | the value 3 in 4 visits beat | Google's pass mark for each vital |
+| **source map** | a file mapping minified code back to the original source | turns `page-1a2b.js:1:28432` into `RegisterForm.tsx:42` |
+
+**Why p75, not the average.** One visitor on a train with LCP = 30 s drags an average up;
+a median hides the slowest half. p75 says "most visits are at least this good", which is
+what Google uses to rate a page.
+
+**A public write endpoint.** Server telemetry goes from Pod to Collector *inside* the
+cluster. Browser telemetry comes from the internet, so the receiver must be reachable by
+anyone who can load the page, and it **can't require a secret**: an API key in the page's
+JavaScript is readable by every visitor. What protects it is *limits*: who may send
+(origin), how often (rate limit), how much (payload size).
+
+**The browser becomes the head of the trace.** The browser now starts the trace and sends
+`traceparent` with its request; everything downstream is `ParentBased` (§13), so the
+browser's *sampled* flag decides for web and both services. The head is now an
+**untrusted client**: anyone can send `sampled=1` on every request.
+
+**Personal data in telemetry.** Telemetry is copied, kept for days and read by whoever is
+debugging. A name or email in an error message is personal data stored somewhere nobody
+thinks of as "the members database". So it must not get there, and the defence has to be
+layered, because one rule always misses something.
+
+### 14.2 How we did it here
+
+- **The browser side.** [`app/Rum.tsx`](../apps/web/app/Rum.tsx) starts Faro once
+  ([`Rum.tsx:43`](../apps/web/app/Rum.tsx#L43)) and sends to the same-origin
+  `/faro/collect` ([`:50`](../apps/web/app/Rum.tsx#L50)). `TracingInstrumentation` adds
+  `traceparent` to same-origin `fetch`es, and submitting a Server Action form *is* a
+  same-origin fetch, so the server joins the browser's trace with no server change (we
+  checked first: the server span's parent was the span id we sent).
+- **Switched per request, not per build.** The root layout reads `RUM_ENABLED`/`RUM_DEBUG`
+  after `await connection()` ([`layout.tsx:26`](../apps/web/app/layout.tsx#L26)) and passes
+  them as props. `NEXT_PUBLIC_*` variables would be written into the bundle by `next build`,
+  so the one image CI builds couldn't be switched by a Helm value.
+- **Privacy, four layers:** capture only console `warn`/`error`
+  ([`Rum.tsx:59`](../apps/web/app/Rum.tsx#L59)) and never `setUser`; scrub every item in the
+  browser with `beforeSend` ([`scrub.ts`](../apps/web/lib/rum/scrub.ts)); redact again in
+  Alloy ([`alloy-values.yaml:228`](../k8s/monitoring/alloy-values.yaml#L228)); and messages
+  name the field, never its value (members-service already did). Names can't be matched by
+  a pattern, so only the first and last layers protect them.
+- **Pages as routes.** [`pageId()`](../apps/web/lib/rum/page.ts) turns `/members/3f2c…`
+  into `/members/:id`, the browser's `http.route`, via Faro's `generatePageId`
+  ([`Rum.tsx:65`](../apps/web/app/Rum.tsx#L65)).
+- **The receiver is Alloy's `faro.receiver`** ([`alloy-values.yaml:186`](../k8s/monitoring/alloy-values.yaml#L186)):
+  logs, errors and vitals go to Loki with exactly two labels (`app="web-browser"`, `kind`;
+  [`:246`](../k8s/monitoring/alloy-values.yaml#L246)), spans go on to the Collector
+  ([`:255`](../k8s/monitoring/alloy-values.yaml#L255)), which stays the only way into Tempo.
+- **Readable stack traces.** Next.js serves source maps
+  ([`next.config.mjs:24`](../apps/web/next.config.mjs#L24)); the receiver downloads them from
+  `cms.local` only ([`alloy-values.yaml:201`](../k8s/monitoring/alloy-values.yaml#L201)).
+  Cluster DNS doesn't know `cms.local`, so a host alias points the Alloy Pod at Traefik
+  ([`:55`](../k8s/monitoring/alloy-values.yaml#L55)).
+- **The door.** [`faro-ingress.yaml`](../k8s/monitoring/faro-ingress.yaml) routes
+  `cms.local/faro` to Alloy through a Traefik `RateLimit` middleware
+  ([`:33`](../k8s/monitoring/faro-ingress.yaml#L33)) and a `stripPrefix`
+  ([`:45`](../k8s/monitoring/faro-ingress.yaml#L45)): 300 requests at once got 120 × 202 and
+  180 × 429.
+- **The Frontend dashboard** ([`frontend-dashboard.yaml`](../k8s/monitoring/frontend-dashboard.yaml)):
+  vitals p75 by page with `quantile_over_time(0.75, … | unwrap lcp | __error__="" [5m])`,
+  errors by page and by browser/device, the slowest pages, recent errors.
+- **The proof:** [`scripts/rum-smoke.sh`](../scripts/rum-smoke.sh) runs
+  [`rum-smoke.mjs`](../scripts/rum-smoke.mjs) in Playwright's Docker image as a Pixel 7. It
+  registers and archives a member, fails if any `/faro/collect` body holds their name,
+  email or phone, or if the receiver rejects any batch
+  ([`rum-smoke.mjs:106`](../scripts/rum-smoke.mjs#L106)), and checks Loki and Tempo for the
+  error, the vitals and both traces.
+
+### 14.3 Why this way
+
+- **Faro, not hand-written telemetry,** because errors, vitals and fetch spans are each
+  fiddly (PerformanceObserver, unload timing, stack parsing) and Faro does them all.
+- **Alloy's receiver, not the Collector's,** although §13 chose the Collector over Alloy.
+  That choice was about vendor-neutral config; Faro is a Grafana protocol anyway, so the
+  argument doesn't carry over. Spans still go through the Collector (ADR-0009 addendum).
+- **The root span is the request, not the click.** A click span that stays the parent
+  across `await` needs zone.js in the browser, fragile with React 19. Deferred until time
+  spent *before* the request matters.
+- **Public source maps** are fine because the repo is public; a closed-source app would
+  upload them privately.
+- **Deliberately not done:** sampling below 100% (and not trusting the browser's flag),
+  vitals as Prometheus metrics, session replay, a separate Alloy for the receiver. Each is in
+  ADR-0009's evolution table with its trigger.
+
+### 14.4 What setting it up taught
+
+| Problem | Lesson |
+| --- | --- |
+| Faro never started: no telemetry at all. The guard `if (!faro.api)` was never true, because before initialisation faro-core sets `faro.api` to a do-nothing placeholder. I first blamed a version mix-up (faro-core had resolved to a newer release than the SDK), but 2.13 has the same placeholder | Don't guard on a library's internals: keep your own flag. And check a theory before acting on it: the version pin was worth keeping, but it wasn't the cause |
+| No browser span ever reached Tempo, while errors and vitals did. The browser scrubber treated OTLP's 19-digit `startTimeUnixNano` strings as phone numbers, so the receiver got `"[redacted]"` where a time belonged and rejected every batch holding a span with HTTP 400. The browser shows nothing when that happens | A privacy filter can destroy data as surely as it protects it: scrub content, not structure. Found by replaying one captured payload and reading the receiver's status-code metric. The smoke test now fails on any rejected batch |
+| Alloy's backstop redacted the line's own timestamp (`2026-11-09 21`), then LCP values (`1234.000000`): all "9+ digits". Browser versions (`142.0.7444.162`) were redacted too, and I blamed Alloy; review found the *browser* scrubber did it, because it counted dots as phone separators and ran over Faro's meta (version, user agent) | A coarse pattern on a structured format needs the format's rules: logfmt writes numbers right after `=`, free text in quotes. Test redaction on *real* lines, not just on the examples you thought of. And when one symptom has two possible sources, check both: fixing Alloy alone would have left the browser redacting versions |
+| After that fix, the LCP panel failed outright: old lines still held `lcp="[redacted]"`, and one unparseable line fails a whole `unwrap` query (`SampleExtractionErr`) | Every `unwrap` gets `| __error__=""`. Bad data written once stays in the store; dashboards must survive it |
+| The phone-sized test couldn't tap **Archive**: the members table was wider than a 412 px screen, so the browser zoomed the whole page out | The point of testing at phone size. One `overflow-x-auto` wrapper keeps the page at phone width and scrolls only the table |
+| Source maps: the receiver downloads them from the URL in the stack frame, `http://cms.local/…`, which only exists in your machine's `/etc/hosts` | In-cluster code can't use your laptop's DNS. A `hostAliases` entry points the Pod at Traefik's ClusterIP, filled in by `cluster-up.sh` |
+| The first smoke runs lost the browser spans: the next page navigation came before OpenTelemetry's batch processor sent them (~5 s) | RUM data is always a little incomplete for real users too. The test waits; dashboards should be read as samples |
+| Registration can't produce a trace that ends in events-service: `MemberRegistered` has no consumer until CMS-20 | The same as §13: archiving crosses NATS, so the test registers *and* archives |
+| `captureConsoleDisabledLevels` (from Faro's own doc comment) isn't an option; it's `consoleInstrumentation.disabledLevels` | Read the types, not the comments, for the version you installed |
+
+---
+
+## 15. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -2286,15 +2413,26 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why does a registration's trace stop at `publish`, while an archive's reaches events-service? What would make the registration's trace longer? (§13.4)
 - [ ] Why did Helm 4 refuse to upgrade a Deployment that has an HPA, when Helm 3 never complained? (§13.4)
 
+**Browser monitoring (RUM)**
+
+- [ ] Name two things a browser can report that no server log or trace can see. (§14.1)
+- [ ] What do LCP, INP and CLS measure, and why is each judged at p75? (§14.1)
+- [ ] The Faro endpoint has no API key. Why would one protect nothing, and what protects it instead? (§14.1, §14.2)
+- [ ] The browser is now the head of the trace. What can an untrusted client do with that, and what's the production fix? (§14.1, §14.3)
+- [ ] Why does the layout read `RUM_ENABLED` per request instead of using a `NEXT_PUBLIC_` variable? (§14.2)
+- [ ] Names aren't redacted by any pattern. What keeps them out of telemetry, then? (§14.2)
+- [ ] The scrubber once made every span batch fail. What did it redact, and what's the general lesson? (§14.4)
+- [ ] Why does every `unwrap` in the Frontend dashboard end with `| __error__=""`? (§14.4)
+
 ---
 
-## 15. Where to go next
+## 16. Where to go next
 
 All nine roadmap stages are done, and the member registration workflow is now usable from
 the browser (§5). **CMS-28** made logs from every Pod searchable in Grafana (§9.9), and **CMS-27**
 published `MemberRegistered` (§11.5). **CMS-29** followed one registration end to end as a
-trace (§13). The committed queue is browser monitoring (CMS-30, which starts the trace at the
-user's click) and SLOs (CMS-31), then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
+trace (§13), and **CMS-30** started that trace in the visitor's browser (§14). The committed
+queue is SLOs (CMS-31), then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
 contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
 Each one is now mostly a matter of applying patterns already learned. The most
 interesting next contexts are the ones that add a new kind of message flow:
@@ -2314,8 +2452,12 @@ Observability has natural next steps that wait for a real need (ADR-0009):
 
 - ~~**Traces**~~: done in CMS-29 (§13). Next for traces, each when a reason appears:
   **tail sampling** in the Collector once volume matters (keep every error and slow trace);
-  moving **metrics and logs onto the Collector** for one pipeline; **browser spans** with
-  Grafana Faro (CMS-30), so the trace starts at the click instead of at the Server Action.
+  moving **metrics and logs onto the Collector** for one pipeline; ~~**browser spans**~~
+  (done in CMS-30, §14).
+- **Browser monitoring** next steps (ADR-0009, CMS-30 addendum), each when a reason appears:
+  a **click span** as the root (needs zone.js), **not trusting the browser's sampled flag**,
+  **Web Vitals as Prometheus metrics** for long retention and alerts, private source-map
+  upload for a closed-source app.
 - **Alerting**: `PrometheusRule`s (e.g. 5xx ratio > 1% for 5 min) routed by Alertmanager,
   which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
 - ~~**Log aggregation**~~: done in CMS-28 (§9.9). Next for logs, when a reason appears:

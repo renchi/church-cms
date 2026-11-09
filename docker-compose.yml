@@ -252,6 +252,11 @@ services:
       # sets "otlp" plus OTEL_EXPORTER_OTLP_ENDPOINT when tracing is on
       # (charts/web/values.yaml `tracing`); apps/web/instrumentation.ts reads it.
       OTEL_TRACES_EXPORTER: none
+      # Browser monitoring (CMS-30) is off too: there is no Faro receiver here, so
+      # /faro/collect would only 404. The chart sets these (charts/web/values.yaml `rum`).
+      RUM_ENABLED: "false"
+      RUM_DEBUG: "false"
+      APP_VERSION: compose
 
     # "init: true" tells Docker to inject its own tini binary (/usr/bin/docker-init)
     # as PID 1 in this container.  This gives us signal forwarding and zombie
