@@ -142,7 +142,7 @@ The step has `continue-on-error`, so a cleanup problem shows as a warning instea
 
 ### Shipping a ticket with `/ship`
 
-After `/verify` and `/code-review`, the agent's `/ship` skill ([`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md)) runs the rest of this section in order. The same steps work by hand:
+After `/verify` and the review (the `reviewer` agent, [`agents.md`](agents.md)), the agent's `/ship` skill ([`.claude/skills/ship/SKILL.md`](../.claude/skills/ship/SKILL.md)) runs the rest of this section in order. The same steps work by hand:
 
 ```bash
 df -h /                                    # 1. Avail ≥ 10G, or the Deploy build can die mid-way

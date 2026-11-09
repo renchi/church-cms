@@ -29,6 +29,8 @@ scripts/check-docs.sh                    # broken doc links, moved line links, m
 scripts/check-env.sh                     # every env var an app reads is set by its Helm chart (also runs in CI)
 scripts/watch-deploy.sh [sha]            # watch the Deploy run for main's newest commit (or <sha>)
 scripts/agent-status.sh show             # the ticket's status record: each workflow stage and whether it's running/done/stale
+scripts/review-input.sh <out-dir>        # the branch's diff + changed files, for the read-only reviewer/docs-auditor agents
+scripts/eval-reviewer.sh setup|inputs|score|teardown   # planted-bug eval of code reviewers (docs/agents.md)
 ```
 
 ## Workflow
@@ -38,12 +40,14 @@ scripts/agent-status.sh show             # the ticket's status record: each work
 | Start     | `/start-ticket [CMS-n]` | Every session. Syncs main, reads the ticket and its ADRs, creates the `cms-{n}/{slug}` branch, and moves the ticket to In Progress |
 | Plan      | Plan mode               | Tasks touching more than 2 files or making an architectural decision. The plan includes the learning deliverables                  |
 | Implement | Normal editing          | After the plan is approved. A hook lints each edited `.ts` file                                                                    |
-| Verify    | `/verify`               | After implementing. Proves the feature works in the running app (Pods on this build's image tag) and that the docs pass `scripts/check-docs.sh` |
-| Review    | `/code-review`          | Before opening a PR. Fix all findings                                                                                              |
+| Verify    | `/verify`               | After implementing. Proves the feature works in the running app (Pods on this build's image tag), that the docs pass `scripts/check-docs.sh`, and that the `docs-auditor` agent finds the learning deliverables |
+| Review    | `reviewer` agent        | Before opening a PR, usually in the background (below). Fix all findings                                                          |
 | Ship      | `/ship`                 | After review. Checks disk, opens the PR from the template, watches CI in the background, merges **only on the user's go-ahead**, watches Deploy in the background (never blocks on it), marks the ticket Done |
 | Status    | `/status`, or just ask  | Any time, including mid-step. Reads the status record (`scripts/agent-status.sh`), background tasks, agents, and live `gh` checks |
 
-**Keep the chat free.** Steps that wait (the cluster build, CI and Deploy watches) run in the background through `scripts/agent-status.sh run <stage> -- <cmd>`, and the turn ends; the completion notification resumes the work. When the user says "review in the background", start a forked agent that runs `/code-review`, record `scripts/agent-status.sh set review running`, and when it reports, set `review done "<n> findings"` and relay the findings. See study-guide §12.4.
+**Keep the chat free.** Steps that wait (the cluster build, CI and Deploy watches) run in the background through `scripts/agent-status.sh run <stage> -- <cmd>`, and the turn ends; the completion notification resumes the work. See study-guide §12.4.
+
+**Review with the `reviewer` agent** (`.claude/agents/`, ADR-0011), not a fork: a fork inherits this conversation and agrees with its author. `git add` new files, then run `scripts/review-input.sh .claude/state/<ticket>-review`, write the ticket text (from Linear) to `ticket.md` in that folder, and start the `reviewer` agent in the background with the three paths (diff, ticket, repo root). Record `scripts/agent-status.sh set review running`; when it reports, set `review done "<n> findings"` and relay the findings. The reviewer has Read/Grep/Glob only, so it can't fix anything: you do. A new or edited agent file is picked up after a delay; if it's "not found", wait or start a new session. See study-guide §12.5 and `docs/agents.md`.
 
 Never work directly on main. Scaffold new services with `/new-service`, and only for services marked Active below.
 
@@ -113,6 +117,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | One outbox relay batch at a time per service (advisory lock)          | One relay can't keep up, or polling latency/load matters                     | 0010        |
 | `MemberArchived`, `AttendanceRecorded` and a thin `MemberRegistered` cross the bus | A context needs another event, or a consumer needs `MemberRegistered` to carry more than `memberId` (adding fields is non-breaking) | 0010        |
 | Traces through an OTel Collector → Tempo (CMS-29), head-sampled 100%; metrics still pulled by Prometheus, logs via Alloy | Trace volume matters (→ ratio or tail sampling), or one pipeline for all signals is wanted | 0009        |
+| The working session orchestrates read-only subagents (`reviewer`, `docs-auditor`); review runs on request | The pipeline must survive the session (→ Agent SDK orchestrator, CMS-36), or every PR should be reviewed (→ advisory CI agent, CMS-37) | 0011        |
 
 ## ADR index
 
@@ -128,6 +133,7 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | 0008 | Database hosting strategy (Docker → minikube → managed cloud)        |
 | 0009 | Observability: OpenTelemetry instrumentation, Prometheus + Grafana   |
 | 0010 | Async messaging: NATS JetStream, transactional outbox, idempotent consumers |
+| 0011 | Agent orchestration: one orchestrator, read-only subagents, planted-bug evals |
 
 ## Docs index
 
@@ -142,3 +148,4 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `docs/observability.md`       | Runbook: Prometheus, Grafana, metrics, logs and traces, with hands-on exercises                               |
 | `docs/messaging.md`           | Runbook: NATS JetStream, following an event across services, replay and idempotency exercises                |
 | `docs/status-dashboards.md`   | Where to watch the pipeline and the cluster                                                                   |
+| `docs/agents.md`              | Runbook: the reviewer and docs-auditor agents, and the planted-bug eval, with exercises                       |
