@@ -1632,7 +1632,8 @@ in the roadmap table and git history). The workflow:
 3. Decisions that shape architecture are written down as **ADRs**, not left in chat.
 4. Code is heavily commented **for learning**, not just for shipping.
 5. Every ticket goes through the same **quality loop**: plan → implement → verify in the
-   running app → `/code-review` (fix every finding) → `/ship` (PR → CI green → merge). On CMS-16,
+   running app → review (fix every finding) → `/ship` (PR → CI green → merge). The review was
+   `/code-review` until CMS-35, and is now the `reviewer` agent (§12.5). On CMS-16,
    the review caught two real bugs: deploy didn't wait for CI, and typecheck ignored the
    Prisma types.
 
@@ -1682,14 +1683,14 @@ skipped. A gate that a script or the harness runs every time won't. So, wherever
 be decided by a machine, make it mechanical, and save human (and model) attention for what
 can't be.
 
-Here the loop is `/start-ticket` → plan → implement → `/verify` → `/code-review` → `/ship`,
+Here the loop is `/start-ticket` → plan → implement → `/verify` → review (`reviewer` agent) → `/ship`,
 and each step has a mechanical core:
 
 | Gate | Mechanical part | Still judgement |
 | --- | --- | --- |
 | Edit | `lint-file.sh` hook: ESLint on every edited `.ts` file | |
 | `/verify` | tests, typecheck, `helm lint`; Pods must run **this build's image tag**; `scripts/check-docs.sh` | does the feature do what the ticket asked? |
-| `/code-review` | | bugs, design, missing edge cases |
+| review (`reviewer` agent, §12.5) | the JSON findings shape; the agent has no tool that can edit | bugs, repo rules, the ticket's acceptance criteria |
 | CI | the three required checks, plus `check-docs.sh` inside `lint-typecheck` | |
 | `/ship` | disk check, PR from the template, CI and Deploy watches (in the background, §12.4) | **merge: always the user** |
 
@@ -1723,9 +1724,9 @@ follow-up "address code review" commit, and CMS-18 also had "fill learning-doc g
 review" and "fix code links whose line numbers moved". Review is the most expensive gate, so
 anything it catches that a script could have caught is wasted attention. The trade-off:
 every check adds a little friction, so only add the ones that have actually failed before.
-That's why `check-docs.sh` checks links and not, say, prose style. Deliberately not done: a
-subagent that reviews the learning docs before `/code-review`. Add it if doc gaps keep
-reaching review after this.
+That's why `check-docs.sh` checks links and not, say, prose style. A subagent that reviews the
+learning docs was deliberately left out here; CMS-35 added it as the `docs-auditor`, which
+`/verify` step 5 runs (§12.5).
 
 **Suggested, not automatic: the design skills.** Some skills only pay off on certain tickets.
 `grill-with-docs` and `domain-modeling` (from the `mattpocock-skills` plugin) stress-test a
@@ -1824,8 +1825,8 @@ The fix is the same one a web server uses for slow work: **don't wait in the for
   build ([`verify/SKILL.md:49`](../.claude/skills/verify/SKILL.md#L49)). The merge is still
   a gate: when CI is green, `/ship` records `merge waiting`
   ([`ship/SKILL.md:81`](../.claude/skills/ship/SKILL.md#L81)), notifies you, and merges only
-  on your yes. A background review is a forked agent that runs `/code-review` (CLAUDE.md
-  Workflow).
+  on your yes. A background review was a forked agent running `/code-review` until CMS-35;
+  it's now the read-only `reviewer` subagent (§12.5, CLAUDE.md Workflow).
 - [`.claude/skills/status/SKILL.md`](../.claude/skills/status/SKILL.md) answers progress
   questions. It reads the record, lists background tasks and agents, and runs a live `gh`
   check only for stages that are running or stale. The agent may invoke it on its own,
@@ -1900,7 +1901,7 @@ Three ideas carry over to any multi-agent system:
   [`bug-planter.md:7`](../.claude/agents/bug-planter.md#L7), the one writer, adds Edit, Write
   and Bash. The `model:` line ([`reviewer.md:14`](../.claude/agents/reviewer.md#L14)) pins opus
   so the reviewer matches the fork it replaces. The prompt treats every reviewed file as data
-  ([`reviewer.md:30`](../.claude/agents/reviewer.md#L30)).
+  ([`reviewer.md:31`](../.claude/agents/reviewer.md#L31)).
 - With no Bash, the reviewer can't run `git diff`, so the session writes it to a file first:
   [`scripts/review-input.sh`](../scripts/review-input.sh). It diffs from where the branch
   left `main` to the working tree, so uncommitted edits are included too
@@ -1944,7 +1945,7 @@ Reading it:
 - **Arm 3's "misses" were a line-number bug, not blindness.** Two of its runs named both
   use-case bugs correctly but reported lines 129 and 134 of a 22-line file. Those were positions
   in `diff.patch`: Read numbers the lines of whatever file it shows. One added sentence
-  ([`reviewer.md:79`](../.claude/agents/reviewer.md#L79)) took the next three runs to 5/5.
+  ([`reviewer.md:80`](../.claude/agents/reviewer.md#L80)) took the next three runs to 5/5.
   That is the eval loop working: measure, find the cause, change one thing, measure again.
 - **One false alarm in 12 runs.** It was an "I didn't check this" guess. Most unmatched findings
   were real but not planted (missing tests, missing learning docs, a design point for CMS-20),

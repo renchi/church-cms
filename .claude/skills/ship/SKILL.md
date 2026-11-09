@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Ship a verified, reviewed ticket branch — check disk, push, open the PR from the template, watch CI in the background, merge only after the user says so, watch Deploy in the background, mark the Linear ticket Done, and capture lessons. Use after /verify and /code-review.
+description: Ship a verified, reviewed ticket branch — check disk, push, open the PR from the template, watch CI in the background, merge only after the user says so, watch Deploy in the background, mark the Linear ticket Done, and capture lessons. Use after /verify and the review (the reviewer agent).
 argument-hint: "[CMS-<n>]  (omit to read it from the branch name)"
 disable-model-invocation: true
 ---

@@ -71,9 +71,11 @@ case "${1:-}" in
     for f in "${runs[@]}"; do
       # Reject a run whose findings don't have the shape we score. Better a loud
       # "rejected" than a silent 0 that looks like a reviewer that found nothing.
+      # `line` must be a whole number: the past-end-of-file check below is bash integer
+      # arithmetic, and 42.5 would stop the whole score with a syntax error.
       if ! jq -e '(.arm|type=="string") and (.findings|type=="array")
-                  and all(.findings[]; (.file|type=="string") and (.line|type=="number"))' "$f" >/dev/null 2>&1; then
-        echo "$(basename "$f" .json): REJECTED — not {arm, findings:[{file, line:number, …}]}"
+                  and all(.findings[]; (.file|type=="string") and (.line|type=="number") and (.line == (.line|floor)))' "$f" >/dev/null 2>&1; then
+        echo "$(basename "$f" .json): REJECTED — not {arm, findings:[{file, line:<whole number>, …}]}"
         continue
       fi
       # One jq pass per run. For each finding, the bugs it hits; then:
@@ -97,7 +99,7 @@ case "${1:-}" in
         .findings[]
         | select([$key[0][] as $k | select($k.file == .file
                    and .line >= ($k.line_start - $slack) and .line <= ($k.line_end + $slack))] == [])
-        | "\(.file)\u001f\(.line)\u001f\(.summary)"' "$f" |
+        | "\(.file)\u001f\(.line)\u001f\(.summary // "" | gsub("\n"; " "))"' "$f" |
       while IFS=$'\x1f' read -r ufile uline usummary; do
         # A line past the end of the file can't be a real location. Seen in CMS-35: a
         # reviewer took line numbers from diff.patch (positions in the patch), not the code.
@@ -109,6 +111,9 @@ case "${1:-}" in
       done
       rows+=("$arm $caught $unmatched $tokens")
     done
+    # With every run rejected, printf would still feed awk one empty line, and the table
+    # would show a made-up arm. Stop instead.
+    [[ ${#rows[@]} -gt 0 ]] || die "every run file was REJECTED; nothing to summarise"
     echo
     echo "per arm (mean, min–max over runs):"
     printf '%s\n' "${rows[@]}" | awk '
