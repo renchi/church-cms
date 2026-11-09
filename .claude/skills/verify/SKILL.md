@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Verify the current branch's change actually works — tests, typecheck, chart rendering, and the running app on minikube. Use after implementing a ticket and before /code-review.
+description: Verify the current branch's change actually works — tests, typecheck, chart rendering, the running app on minikube, and the learning docs. Use after implementing a ticket and before the review.
 ---
 
 # Verify the change
@@ -64,10 +64,18 @@ If the script reports the tunnel or `/etc/hosts` as wrong, ask the user to run `
 scripts/check-docs.sh    # errors: broken links / line links past the end of a file. Warnings: line links into files this branch changed
 ```
 
-Fix every error. For each warning, open the linked line and either confirm it still points at the right code or fix the link. Then check that the learning deliverables from `.claude/rules/docs-learning.md` exist for this ticket (study-guide section with all four parts, self-check questions, runbook with expected output and exercises). Follow the new runbook steps as written and check they produce the output the doc claims.
+Fix every error. For each warning, open the linked line and either confirm it still points at the right code or fix the link.
+
+Then let the **`docs-auditor` agent** check the learning deliverables (`.claude/agents/docs-auditor.md`, ADR-0011). It has a fresh context and can only read, so it judges the docs as a new reader would and can't paper over a gap:
+
+```bash
+scripts/review-input.sh .claude/state/<ticket>-review    # writes changed-files.txt (and diff.patch): every change since main, committed or not; git add new files first
+```
+
+Write the ticket text to `ticket.md` in that folder, then start the `docs-auditor` agent (foreground, it takes about a minute) with three paths: the ticket, `changed-files.txt` and the repo root. It returns a JSON checklist (`study-guide-section`, `four-parts`, `self-check`, `runbook`, `exercises`, …). Fix every `fail`, and check each `n/a` reason. Then do what it can't, because it has no Bash: follow the new runbook steps as written and check they produce the output the doc claims.
 
 ## Report
 
-End with a short table of each step, the result (pass, fail or skipped) and the evidence (a command output excerpt). Don't call the ticket verified if any step failed. Record the overall result, since step 4's `run` only covers the cluster build: `scripts/agent-status.sh set verify done "<n> steps pass, <n> skipped"` (or `failed "<which step>"`).
+End with a short table of each step, the result (pass, fail or skipped) and the evidence (a command output excerpt). Don't call the ticket verified if any step failed. Record the overall result, since step 4's `run` only covers the cluster build, with the auditor's score in the note: `scripts/agent-status.sh set verify done "<n> steps pass, <n> skipped · docs-audit <pass>/<total>"` (or `failed "<which step>"`).
 
-Next: `/code-review`, then `/ship`. The review can run in the background too: the user says "review in the background" (CLAUDE.md Workflow).
+Next: the review with the `reviewer` agent, usually in the background (CLAUDE.md Workflow), then `/ship`.

@@ -16,7 +16,7 @@ Runs the PR → CI → Merge → Done rows of the CLAUDE.md Workflow table, and 
 - On a `cms-<n>/…` (or `chore/…`) branch, never `main`. The ticket number comes from the argument or the branch name.
 - **No ticket** (a `chore/…` branch and no argument): leave `CMS-<n>` out of the PR title and body, and skip the Linear step in 7. Never guess a ticket number.
 - `git status --short` is clean and every commit is in.
-- This session has a `/verify` report with no failed step, and the `/code-review` findings are fixed. If either is missing, say so and stop. Don't run them yourself here.
+- This session has a `/verify` report with no failed step, and the review findings (the `reviewer` agent, CLAUDE.md Workflow) are fixed. If either is missing, say so and stop. Don't run them yourself here.
 
 ## 2. Disk (the self-hosted runner builds on this machine)
 

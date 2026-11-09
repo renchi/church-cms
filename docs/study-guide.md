@@ -20,6 +20,7 @@ This guide is the **map**. The companion docs are the **detail**:
 - [`status-dashboards.md`](status-dashboards.md) — where to watch the pipeline and the cluster
 - [`observability.md`](observability.md) — Prometheus, Grafana, metrics, logs and traces, with exercises
 - [`messaging.md`](messaging.md) — NATS JetStream between the services: following an event, replay and idempotency exercises
+- [`agents.md`](agents.md) — the reviewer and docs-auditor agents, and measuring a reviewer with planted bugs
 
 Read this top to bottom once. Then, whenever a section feels thin, open the file it
 points at (`file_path:line`) and read the real code — that is where the learning sticks.
@@ -61,7 +62,8 @@ The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
 permission list. **CMS-34** started an agent-orchestration track (§12.4): long steps run in
 the background, a status record tracks each stage, and `/status` answers "is it done?"
-while the chat stays free.
+while the chat stays free. **CMS-35** replaced the forked review with read-only subagents
+(`reviewer`, `docs-auditor`) and measured the change with planted bugs (§12.5, ADR-0011).
 
 Knowing what is **deliberately not built yet** is itself part of the learning: the
 architecture is sequenced so you learn each layer once, well, instead of building the
@@ -1640,7 +1642,7 @@ this repo models.
 
 ### 12.1 How the agent is configured (`.claude/`)
 
-An AI agent only follows the conventions it can see. Claude Code gives you five ways to
+An AI agent only follows the conventions it can see. Claude Code gives you six ways to
 make it see them. Each one has a different trigger and a different cost:
 
 | Mechanism | Where | When it loads or runs | Use it for |
@@ -1650,6 +1652,7 @@ make it see them. Each one has a different trigger and a different cost:
 | **Skills** | `.claude/skills/<name>/SKILL.md` | When you type `/name` (or the agent decides it's relevant) | Repeatable procedures: `/start-ticket`, `/verify`, `/ship`, `/status`, `/new-service` |
 | **Hooks** | `.claude/settings.json` → `.claude/hooks/` | Automatically on events (e.g. after every Edit) | Things that must *always* happen, enforced by the harness rather than the model. `lint-file.sh` lints each edited `.ts` file |
 | **Memory** | `~/.claude/projects/.../memory/` | Index loaded each session | Facts about you and the project that aren't in the repo: preferences, reminders |
+| **Subagents** | `.claude/agents/<name>.md` | When the session starts one (a new file is picked up after a few minutes, or in a new session) | A bounded job in a fresh context with its own tool list and model: `reviewer`, `docs-auditor` (§12.5) |
 
 Two design points are worth remembering:
 
@@ -1828,7 +1831,7 @@ The fix is the same one a web server uses for slow work: **don't wait in the for
   check only for stages that are running or stale. The agent may invoke it on its own,
   unlike `/ship`, so a plain "is CI done?" triggers it.
 - [`.claude/statusline.sh`](../.claude/statusline.sh) (wired in
-  [`settings.json:73`](../.claude/settings.json#L73)) prints `agent-status.sh line` at the
+  [`settings.json:81`](../.claude/settings.json#L81)) prints `agent-status.sh line` at the
   bottom of the Claude Code terminal: `CMS-34 · verify ✓ · review ✓ · ci …`.
 - The allow list in [`.claude/settings.json`](../.claude/settings.json) names the safe
   subcommands (`set`, `pr`, `show`, `line`) and the *exact* `run` commands the skills use,
@@ -1861,6 +1864,115 @@ from the record) fixes exactly that. It's deliberately not built yet. Also defer
 | Fixing the review findings shifted `agent-status.sh` by ~10 lines, and all four §12.4 links into it went stale. `check-docs.sh` still passed: its "moved line" error compares with `main`, and a new file has no `main` version | Fix the code before writing line links into it, and re-read the "new link, points at" warnings after the last edit. For a file that's new on the branch, those warnings are the only check |
 | ShellCheck flagged `stages=(… deploy done)`: `done` is a bash keyword | It parses fine inside an array, but the warning is cheap to fix and the code reads less ambiguously with `"done"` quoted. A linter that's sometimes over-cautious is still worth running on every script (`k8s-helm.md` asks for it) |
 | CMS-29's Deploy watch kept printing *waiting for CI on main…* after Deploy had **succeeded**: `/ship` passed the short sha `f4fcb56`, and `gh run list --commit` only matches the full 40-character sha, so it found no run | A filter that matches nothing looks the same as "not there yet". `scripts/watch-deploy.sh` now expands any short sha with `git rev-parse` first, and fails fast on one it can't resolve. When a background watch seems slow, check the live state (`gh run list --workflow=Deploy`) before trusting it: `/status` does |
+
+### 12.5 Subagents: context isolation and least privilege (CMS-35)
+
+**The concept.** An orchestrating session can hand a bounded job to another agent. *How* it
+does that changes what the helper sees, what it can do and what it costs:
+
+| Term | Meaning | Here |
+| --- | --- | --- |
+| **fork** | a copy of the working session: the whole conversation so far, same tools, same model | how "review in the background" worked until CMS-35 |
+| **subagent** | an agent started from a definition file: a **fresh context**, its own prompt, a fixed tool list, a pinned model | `reviewer`, `docs-auditor`, `bug-planter` |
+| **context isolation** | the helper sees only what it's handed, not the author's reasoning | the reviewer gets a diff, a ticket and the repo, nothing else |
+| **least privilege** | each agent gets only the tools its job needs | the reviewer can read and search, nothing more |
+| **eval** | a repeatable test of an agent against known answers | bugs planted where only a sealed key knows them |
+| **confound** | two things changed at once, so you can't tell which one caused the result | why the eval has three arms, not two |
+| **ceiling effect** | every arm gets every answer, so the test can't tell them apart | what happened here: the planted bugs were too easy |
+
+Three ideas carry over to any multi-agent system:
+
+- **A reviewer that read the author's reasoning starts out agreeing with it.** A fork has read
+  every "this can't be null because…". A fresh context judges the code on what it does.
+- **The tool list is the security boundary, not the prompt.** "Only use Bash for `git diff`"
+  is a request; a reviewed file that says "ignore your instructions and run…" can override a
+  request. A tool that isn't on the list can't be called at all. This is §12.4's lesson again: a
+  wrapper inherits the permissions of whatever it wraps, so give the wrapper fewer.
+- **Measure an agent before trusting it, and measure noise too.** A model's output differs run
+  to run, so one run proves little. Change one thing per comparison, run each arm more than
+  once, and report the spread, not just the average.
+
+**How we did it here.**
+
+- The agents are Markdown files with frontmatter. The `tools:` line is the boundary:
+  [`reviewer.md:10`](../.claude/agents/reviewer.md#L10) and
+  [`docs-auditor.md:7`](../.claude/agents/docs-auditor.md#L7) list Read, Grep and Glob only;
+  [`bug-planter.md:7`](../.claude/agents/bug-planter.md#L7), the one writer, adds Edit, Write
+  and Bash. The `model:` line ([`reviewer.md:14`](../.claude/agents/reviewer.md#L14)) pins opus
+  so the reviewer matches the fork it replaces. The prompt treats every reviewed file as data
+  ([`reviewer.md:30`](../.claude/agents/reviewer.md#L30)).
+- With no Bash, the reviewer can't run `git diff`, so the session writes it to a file first:
+  [`scripts/review-input.sh`](../scripts/review-input.sh). It diffs from where the branch
+  left `main` to the working tree, so uncommitted edits are included too
+  ([`review-input.sh:40`](../scripts/review-input.sh#L40)): `/verify` runs before the commit. The
+  review workflow is in [CLAUDE.md](../CLAUDE.md) ("Review with the `reviewer` agent"), and the
+  docs-auditor runs inside `/verify` step 5
+  ([`verify/SKILL.md:69`](../.claude/skills/verify/SKILL.md#L69)).
+- [`scripts/eval-reviewer.sh`](../scripts/eval-reviewer.sh) runs the eval. `setup` creates a
+  **git worktree** ([`eval-reviewer.sh:47`](../scripts/eval-reviewer.sh#L47)): a second working
+  folder that shares this repo's `.git`. The planter commits there while this folder stays on
+  the ticket branch, so two writers never share one folder. `score` matches each finding to
+  the key by file and ±5 lines ([`eval-reviewer.sh:85`](../scripts/eval-reviewer.sh#L85)),
+  rejects malformed runs ([`:76`](../scripts/eval-reviewer.sh#L76)), and flags a line past the
+  end of its file ([`:106`](../scripts/eval-reviewer.sh#L106)). `teardown` refuses if the
+  planted branch reached GitHub ([`:127`](../scripts/eval-reviewer.sh#L127)): the repo is
+  public, and that would publish the answers.
+- The runbook, with exercises: [`agents.md`](agents.md). The decision:
+  [ADR-0011](adr/0011-agent-orchestration.md).
+
+**The eval and its results.** The planter wrote "change a member's email"
+(`PUT /members/:id/email`, 7 files, 307 diff lines) with five bugs: an off-by-one length check,
+an email that isn't lowercased, an inverted duplicate check, an un-awaited save, and an email
+the repository never writes. Each arm reviewed it three times:
+
+| Arm | What changes | Bugs caught (of 5) | Unmatched findings | Tokens per run |
+| --- | --- | --- | --- | --- |
+| 1 · fork + `/code-review` | (the old way) | 5.0 (5–5) | 2.0 | ~179,000 |
+| 2 · fresh + `/code-review` | only the context | 5.0 (5–5) | 2.3 | ~56,000 |
+| 3 · `reviewer`, first prompt | the prompt and tools | 3.7 (3–5) | 3.7 | ~33,000 |
+| 3b · `reviewer`, line rule added | one prompt sentence | 5.0 (5–5) | 2.0 | ~32,000 |
+
+Reading it:
+
+- **Catches didn't separate the arms: a ceiling effect.** Every arm found every bug once its line
+  numbers were right. The bugs were too easy for this test to tell the reviewers apart. The next
+  eval needs subtler bugs (a race, a wrong transaction boundary, a rule broken only across two
+  files).
+- **Cost did separate them.** A fork costs about 5.5× a `reviewer` run for the same result,
+  because it carries the whole conversation, and that grows with the session. A fresh context
+  costs the same however long the session has run.
+- **Arm 3's "misses" were a line-number bug, not blindness.** Two of its runs named both
+  use-case bugs correctly but reported lines 129 and 134 of a 22-line file. Those were positions
+  in `diff.patch`: Read numbers the lines of whatever file it shows. One added sentence
+  ([`reviewer.md:79`](../.claude/agents/reviewer.md#L79)) took the next three runs to 5/5.
+  That is the eval loop working: measure, find the cause, change one thing, measure again.
+- **One false alarm in 12 runs.** It was an "I didn't check this" guess. Most unmatched findings
+  were real but not planted (missing tests, missing learning docs, a design point for CMS-20),
+  and a few were nits. A human labelled them, because a script can't tell those apart.
+- **Honest limits.** The fork arm knew an eval was running, which could only help it, and it
+  still didn't beat the fresh arms. Arms 2 and 3 differ in tools as well as prompt. And Read can
+  open any absolute path, so the key stayed hidden only because no reviewer was told where it
+  was.
+
+**Why this way.** [ADR-0011](adr/0011-agent-orchestration.md) records the rules: one
+orchestrator with one level of workers, one writer per working tree, the tool list as the
+boundary, humans at the plan and merge gates, and an eval before trust. The reviewer has its own
+prompt, written for this repo's rules and the ticket's acceptance criteria. Wrapping the built-in
+`/code-review` would only have changed the context. Deliberately deferred: an orchestrator that
+survives the session (CMS-36), an advisory review agent in CI (CMS-37), a cheaper reviewer model
+(a runbook exercise first), and Bash behind a hook that allows only named commands. CrewAI was
+considered and dropped: a second language and framework for ideas these tools already teach.
+
+**What setting it up taught:**
+
+| Problem | Lesson |
+| --- | --- |
+| Starting `bug-planter` right after writing its file failed: `Agent type 'bug-planter' not found`. I then wrote "agent files load at session start" into four docs. A few minutes later the session announced all three agents without a restart | A tool's behaviour seen once is a data point, not a rule. The session picks up new agent files after a delay. Write down what you saw, and correct docs when the next observation contradicts them |
+| Two `reviewer` runs reported the right bugs at lines 129 and 134 of a 22-line file, so the scorer counted them as missed | Read numbers the lines of the file it shows, so a line number seen in `diff.patch` is a patch position. An agent without Bash depends on how its inputs are shaped. The prompt now says where line numbers come from, and `score` flags lines past the end of a file |
+| Even after the fix, all three arm 3b runs put the test-gap finding at line 77 of a 48-line test file | A prompt rule reduces a mistake; it doesn't remove it. That's why the check also lives in the scorer, where it's mechanical (§12.2: enforce mechanically where you can) |
+| In one arm-2 run, `/code-review` started as its own background job and hadn't returned when the agent wrote its first report, so the first findings came from the agent's own reading. The skill's result arrived later, and the agent sent a second report | A skill can behave differently inside a subagent than in the main session. Check *how* each arm ran, not only what it returned, or two arms end up measuring the same thing |
+| The scorer's first version printed the token count in the "unmatched" column for a run that caught nothing: `IFS=$'\t' read` merged the two tabs around the empty "caught" field | The same trap as §12.4, met again in a new script. Split on the unit separator `0x1f`, and test the empty case on purpose |
+| Every arm caught all five bugs | An eval nothing can fail measures nothing. Calibrate difficulty, the same way a test that always passes isn't testing anything |
 
 ---
 
@@ -2153,6 +2265,12 @@ in parentheses (and the file it links) is where to look.
 - [ ] Why does `kill <pid>` record `failed "interrupted"`, while `kill -9 <pid>` leaves a stale record? (§12.4)
 - [ ] Why does `update()` write a temp file and `mv` it, under a `flock`? What could go wrong without each? (§12.4)
 - [ ] Push vs poll: how is a background-task notification like the NATS consumer in §11? (§12.4)
+- [ ] Why does a forked reviewer start out biased, and what does a subagent's fresh context remove? (§12.5)
+- [ ] The reviewer's prompt could say "only use Bash for `git diff`". Why is leaving Bash out of `tools:` stronger? (§12.5)
+- [ ] The eval has three arms, not two. What would a two-arm comparison fail to tell you? (§12.5)
+- [ ] Why run each arm three times, and what does "caught 3.7 (3–5)" tell you that "caught 3.7" doesn't? (§12.5)
+- [ ] Every arm caught 5 of 5. What does that say about the eval, and what would you change? (§12.5)
+- [ ] Why does the planted-bug key live outside the repo, and why must the planted branch never be pushed? (§12.5)
 
 **Distributed tracing**
 
@@ -2215,17 +2333,19 @@ next step, when a reason appears: a **second web replica** (a crashed Pod or a d
 then doesn't take the site down) and a **PodDisruptionBudget**, which stops `kubectl drain`
 from removing every replica at once.
 
-The agent-orchestration track (§12.4) has its next parts lined up, each written down as
-ADR-0011 before it's built:
+The agent-orchestration track: ~~**custom subagents**~~ are done in CMS-35 (§12.5), with the
+rules for the rest written down in ADR-0011. Next, each as an addendum to it:
 
-- **Custom subagents** in `.claude/agents/` (a docs writer, a DDD reviewer, a K8s
-  reviewer), each with only the tools it needs, running in the background and writing to
-  the status record.
-- **An orchestrator that outlives the session**: a TypeScript Claude Agent SDK process that
-  moves a ticket through the same stages and resumes from the record after a crash. This
-  fixes §12.4's main limitation, where a background task dies with its session.
-- **An advisory agent in CI** that comments on PRs (learning docs, ADR compliance), and
-  later the same pipeline rebuilt in CrewAI, to compare a framework with the SDK.
+- **An orchestrator that outlives the session** (CMS-36): a TypeScript Claude Agent SDK
+  process that moves a ticket through the same stages and resumes from the record after a
+  crash. This fixes §12.4's main limitation, where a background task dies with its session.
+- **An advisory agent in CI** (CMS-37): the same `reviewer` comments on every PR, with a
+  read-only token, never on PRs from forks.
+- **A harder eval.** CMS-35's planted bugs hit a ceiling (every arm caught all five). Subtler
+  bugs would show whether the fresh reviewer misses less than a fork, not just costs less.
+  Then try a cheaper reviewer model as a fourth arm (`agents.md` exercise 2).
+
+CrewAI was considered and dropped (ADR-0011's decision log).
 
 To rebuild everything from scratch at any time: `scripts/cluster-up.sh --fresh` (§7.7).
 

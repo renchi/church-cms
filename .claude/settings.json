@@ -59,7 +59,10 @@
       "Bash(scripts/agent-status.sh show*)",
       "Bash(scripts/agent-status.sh line*)",
       "Bash(scripts/agent-status.sh run ci -- gh pr checks --watch)",
-      "Bash(scripts/agent-status.sh run verify -- scripts/cluster-up.sh --no-sudo)"
+      "Bash(scripts/agent-status.sh run verify -- scripts/cluster-up.sh --no-sudo)",
+      "Bash(scripts/review-input.sh .claude/state/*)",
+      "Bash(scripts/eval-reviewer.sh inputs)",
+      "Bash(scripts/eval-reviewer.sh score)"
     ]
   },
   "hooks": {

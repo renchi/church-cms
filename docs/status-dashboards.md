@@ -127,6 +127,8 @@ run in the background, so the chat stays free and you can ask questions while th
 Their progress lives in a status record per ticket, `.claude/state/<ticket>.json`, written
 only by [`scripts/agent-status.sh`](../scripts/agent-status.sh). The concepts behind it are
 in [study-guide §12.4](study-guide.md#124-working-asynchronously-with-an-agent-cms-34).
+A background review is the `reviewer` agent; how to run it and read its findings is in
+[`agents.md`](agents.md).
 
 Three ways to read it, from least to most effort:
 

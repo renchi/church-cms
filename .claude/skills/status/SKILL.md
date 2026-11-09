@@ -19,7 +19,7 @@ One row per stage that has started: `start plan implement verify review ci merge
 ## 2. What's working right now
 
 - **Background tasks you started in this session** (a CI or Deploy watch, a `cluster-up.sh` build): you get a notification when each one finishes. If one hasn't notified yet, it's still running; say how long it's been.
-- **Agents:** the ListAgents tool lists subagents you started (a background code review, for example), plus other Claude Code sessions on this machine and whether each is busy or idle.
+- **Agents:** the ListAgents tool lists subagents you started (a background review is the `reviewer` agent; a `docs-auditor` may be running inside `/verify`), plus other Claude Code sessions on this machine and whether each is busy or idle.
 
 ## 3. Live checks (only for stages that are running or stale)
 
