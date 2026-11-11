@@ -18,9 +18,15 @@
 // span, see outboxRelay.ts). The handler runs inside that span, so the use
 // case's database spans nest under it: one trace from the browser's request to
 // this side effect. A message without the header starts a new trace.
+//
+// METRICS (CMS-31): every answer is counted in `messages.consumed`, by subject
+// and outcome (metrics.ts). The handler returns its own outcome ("applied",
+// "duplicate", ...), because only the use case knows whether the message changed
+// anything; a redelivered message that changed nothing is "duplicate", not an error.
 import { SpanKind } from "@opentelemetry/api";
 import type { JetStreamClient } from "@nats-io/jetstream";
 import { InvalidMessageError } from "./contract.js";
+import { messagingInstruments } from "./metrics.js";
 import type { Logger } from "./outboxRelay.js";
 import { contextFromHeaders, inMessagingSpan, markFailed } from "./tracing.js";
 
@@ -44,10 +50,15 @@ export function nakDelayMs(deliveryCount: number): number {
   return Math.min(1000 * 2 ** (deliveryCount - 1), 30_000);
 }
 
+// What a handler reports back: a short, fixed word such as "applied" or
+// "duplicate". It becomes a metric label, so never a value like an id (metrics.ts).
+// A handler that returns nothing counts as "applied".
+export type HandleOutcome = string | void;
+
 export async function handleMessage<T extends { id: string }>(
   msg: AckableMessage,
   parse: (raw: unknown) => T,
-  handle: (event: T) => Promise<void>,
+  handle: (event: T) => Promise<HandleOutcome>,
   log: Logger
 ): Promise<void> {
   // MsgHdrs.get returns "" for a missing header; treat that as absent.
@@ -63,11 +74,12 @@ export async function handleMessage<T extends { id: string }>(
 async function ackOrRetry<T extends { id: string }>(
   msg: AckableMessage,
   parse: (raw: unknown) => T,
-  handle: (event: T) => Promise<void>,
+  handle: (event: T) => Promise<HandleOutcome>,
   log: Logger,
   failed: (err: unknown) => void
 ): Promise<void> {
   const where = { subject: msg.subject, seq: msg.info.streamSequence, delivery: msg.info.deliveryCount };
+  const count = (outcome: string) => messagingInstruments().consumed.add(1, { subject: msg.subject, outcome });
 
   let event: T;
   try {
@@ -78,24 +90,28 @@ async function ackOrRetry<T extends { id: string }>(
     log.error({ ...where, err }, "invalid message; terminating");
     failed(err);
     msg.term(err instanceof Error ? err.message : "invalid message");
+    count("rejected");
     return;
   }
 
   try {
-    await handle(event);
+    const outcome = await handle(event);
     msg.ack();
+    count(outcome || "applied");
     log.info({ ...where, messageId: event.id }, "message processed");
   } catch (err) {
     if (err instanceof InvalidMessageError) {
       log.error({ ...where, messageId: event.id, err }, "message rejected by handler; terminating");
       failed(err);
       msg.term(err.message);
+      count("rejected");
       return;
     }
     const delay = nakDelayMs(msg.info.deliveryCount);
     log.warn({ ...where, messageId: event.id, err, retryInMs: delay }, "message failed; will retry");
     failed(err);
     msg.nak(delay);
+    count("retried");
   }
 }
 
@@ -116,7 +132,7 @@ export async function runConsumer<T extends { id: string }>(opts: {
   stream: string;
   durable: string;
   parse: (raw: unknown) => T;
-  handle: (event: T) => Promise<void>;
+  handle: (event: T) => Promise<HandleOutcome>;
   log: Logger;
   onFailure: (err: Error) => void;
 }): Promise<RunningConsumer> {

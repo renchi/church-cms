@@ -30,7 +30,12 @@
 // request's span, and sends the producer span's context as message headers.
 // So the trace continues across the gap between "saved" and "published"
 // (see tracing.ts for why the context has to be stored).
-import { SpanKind } from "@opentelemetry/api";
+//
+// METRICS (CMS-31): every publish is counted, with how long the row waited, and
+// on each Prometheus scrape the relay reads the table's totals (store.stats()).
+// The instruments and their names are in metrics.ts.
+import { SpanKind, type BatchObservableCallback } from "@opentelemetry/api";
+import { messagingInstruments } from "./metrics.js";
 import { contextFromTraceparent, currentTraceHeaders, inMessagingSpan, type TraceHeaders } from "./tracing.js";
 
 export interface OutboxRow {
@@ -38,6 +43,14 @@ export interface OutboxRow {
   subject: string;
   payload: unknown; // the wire event (see contract.ts), stored as JSON
   traceparent: string | null; // the writing request's trace context; null = tracing was off
+  createdAt: Date; // when the use case saved it; publish delay = published - created
+}
+
+// What the table holds right now. Read on each metrics scrape, outside the
+// relay's lock: it's a read, and it must answer even while a batch runs.
+export interface OutboxStats {
+  rows: { subject: string; state: "pending" | "published"; count: number }[];
+  oldestPendingAt: Date | null; // null = nothing waiting
 }
 
 // What one relay batch can do, while it holds the lock.
@@ -52,6 +65,7 @@ export interface OutboxStore {
   // hold at a time. Returns null, without running `work`, if another relay
   // has it right now.
   runExclusive<T>(work: (batch: OutboxBatch) => Promise<T>): Promise<T | null>;
+  stats(): Promise<OutboxStats>;
 }
 
 // Publishes one message and resolves once JetStream has stored it.
@@ -87,6 +101,35 @@ export function startOutboxRelay(opts: {
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
   let inFlight: Promise<number> = Promise.resolve(0);
+  const m = messagingInstruments();
+
+  // Called by the SDK on every scrape. Every Pod's relay reports the same table,
+  // so two Pods report the same numbers twice: dashboards and rules take max()
+  // over Pods, never sum(). A failed read (database down) reports nothing,
+  // which Prometheus shows as a gap, rather than a misleading 0.
+  const observeTable: BatchObservableCallback = async (result) => {
+    let stats: OutboxStats;
+    try {
+      stats = await opts.store.stats();
+    } catch (err) {
+      opts.log.warn({ err }, "outbox stats unavailable");
+      return;
+    }
+    // Both states for every subject, 0 when the table has none. The SDK keeps
+    // reporting the LAST value of an attribute set we stop observing, so when the
+    // last pending row was published (no "pending" group any more), the gauge
+    // stuck at 1 instead of dropping to 0 (found in CMS-31).
+    const subjects = new Set(stats.rows.map((r) => r.subject));
+    for (const subject of subjects) {
+      for (const state of ["published", "pending"] as const) {
+        const count = stats.rows.find((r) => r.subject === subject && r.state === state)?.count ?? 0;
+        result.observe(m.outboxRows, count, { subject, state });
+      }
+    }
+    const age = stats.oldestPendingAt ? (Date.now() - stats.oldestPendingAt.getTime()) / 1000 : 0;
+    result.observe(m.oldestPendingAge, Math.max(0, age));
+  };
+  m.meter.addBatchObservableCallback(observeTable, [m.outboxRows, m.oldestPendingAge]);
 
   async function runOnce(): Promise<number> {
     const published = await opts.store.runExclusive(async (batch) => {
@@ -111,7 +154,10 @@ export function startOutboxRelay(opts: {
           opts.log.warn({ err, outboxId: row.id, subject: row.subject }, "outbox publish failed; will retry");
           break;
         }
-        await batch.markPublished(row.id, new Date());
+        const publishedAt = new Date();
+        await batch.markPublished(row.id, publishedAt);
+        m.published.add(1, { subject: row.subject });
+        m.publishDelay.record((publishedAt.getTime() - row.createdAt.getTime()) / 1000, { subject: row.subject });
         count++;
       }
       return count;
@@ -142,6 +188,7 @@ export function startOutboxRelay(opts: {
     async stop() {
       stopped = true;
       if (timer) clearTimeout(timer);
+      m.meter.removeBatchObservableCallback(observeTable, [m.outboxRows, m.oldestPendingAge]);
       await inFlight;
     },
   };

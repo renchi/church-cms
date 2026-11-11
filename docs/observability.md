@@ -27,7 +27,7 @@ members-service Pod                         monitoring namespace
 Prerequisites: the cluster from [`k8s-local-dev.md`](k8s-local-dev.md) is running
 (minikube, Traefik, members-service), and `minikube tunnel` is open.
 
-> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs steps 1–3, 7–8 and 10–11 below (and the
+> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs steps 1–3, 7–8, 10–11 and 14 below (and the
 > whole k8s runbook), keeps `grafana.cms.local` in `/etc/hosts` up to date for step 4, and checks
 > steps 5, 8 and 11 for you. Read on to learn what it does.
 
@@ -453,6 +453,169 @@ hidden).
 
 In Tempo: `{ resource.service.name = "web-browser" }` finds traces that start in a browser.
 
+## 14. SLOs and the registration journey
+
+Metrics in the domain's words, three SLOs with burn-rate alerts, and one dashboard that
+follows a registration from the browser down to Kubernetes (CMS-31). Concepts (SLI, SLO,
+error budget, burn rate): [study-guide §15](study-guide.md#15-slos-and-business-observability-cms-31).
+
+### The SLOs
+
+| SLO | SLI (what's measured) | Target, over 30 days | Error budget | Recording rules |
+| --- | --- | --- | --- | --- |
+| Registration availability | share of `POST /members` at members-service that are **not** 5xx (a 409 or 400 is the user's to fix: the system worked) | 99% | 1% may fail | `sli:registration_errors:ratio_rate{5m,30m,1h,6h}` |
+| Registration latency | share of `POST /members` answered in **≤ 500 ms** | 95% | 5% may be slower | `sli:registration_slow:ratio_rate{…}` |
+| Event leaves the outbox | share of `MemberRegistered` published to NATS **≤ 30 s** after being saved | 99% | 1% may be later | `sli:event_publish_slow:ratio_rate{…}` |
+
+All in [`k8s/monitoring/slo-rules.yaml`](../k8s/monitoring/slo-rules.yaml), with the
+alerts and `slo:*:error_budget_remaining`. Prometheus keeps 2 days, so "30 days" means
+"what it has" here.
+
+> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) does steps 1–3, and adds
+> `alertmanager.cms.local` to `/etc/hosts`. Step 4 is how you check it.
+
+**1. NATS metrics.** The NATS chart's exporter sidecar and a PodMonitor
+([`k8s/nats-values.yaml`](../k8s/nats-values.yaml), `promExporter`):
+
+```bash
+helm upgrade --install nats nats/nats --version 2.15.0 -n nats -f k8s/nats-values.yaml --wait
+kubectl -n nats get pod nats-0
+# NAME     READY   STATUS    RESTARTS   AGE
+# nats-0   3/3     Running   0          30s       ← nats, reloader, and now prom-exporter
+kubectl -n nats get podmonitor
+# NAME   AGE
+# nats   30s
+```
+
+**2. Alertmanager's Ingress.** Re-run the kube-prometheus-stack install from §2 (the values
+file now has `alertmanager.ingress`), then add `alertmanager.cms.local` to `/etc/hosts` like
+`grafana.cms.local` (§4).
+
+**3. The rules and the dashboard:**
+
+```bash
+kubectl apply -f k8s/monitoring/slo-rules.yaml -f k8s/monitoring/registration-journey-dashboard.yaml
+# prometheusrule.monitoring.coreos.com/cms-slo-rules created
+# configmap/cms-registration-journey-dashboard created
+```
+
+The Operator checks every PromQL expression when the rule is applied: a syntax error is
+refused right here, not later in Prometheus.
+
+**4. Check it.** Register a few members (through the browser, or from inside the cluster
+without the tunnel), then read the new metrics:
+
+```bash
+kubectl run regtest --rm -i --restart=Never --image=curlimages/curl:8.11.1 --quiet -- sh -c '
+  for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code} " -X POST \
+    http://members-service-members-service:3001/members -H "content-type: application/json" \
+    -d "{\"name\":\"Check $i\",\"email\":\"check-$i-$(date +%s)@example.org\"}"; done; echo'
+# 201 201 201
+
+kubectl port-forward deploy/members-service-members-service 9464 &
+curl -s localhost:9464/metrics | grep -E '^(members_|outbox_rows|outbox_oldest|outbox_published)'
+# members_registered_total{otel_scope_name="members-service"} 2      ← this Pod's share
+# members_registration_failures_total{reason="duplicate_email",otel_scope_name="members-service"} 1
+# outbox_published_total{subject="cms.members.registered",otel_scope_name="@cms/events"} 3
+# outbox_rows{subject="cms.members.registered",state="published",otel_scope_name="@cms/events"} 187
+# outbox_rows{subject="cms.members.archived",state="published",otel_scope_name="@cms/events"} 16
+# outbox_oldest_pending_age{otel_scope_name="@cms/events"} 0
+# (your numbers differ; a failures line appears only after the first refusal)
+kill %1
+```
+
+`members_registered_total` is per Pod (in memory); `outbox_rows` is the same on every Pod,
+because it's read from the table. In Prometheus → Status → Rules, the groups `cms-slo-sli`,
+`cms-slo-budget` and `cms-slo-alerts` are listed with health **ok**; Prometheus → Alerts lists
+the four alerts as *inactive*.
+
+**5. Look at it.** Grafana → Dashboards → **CMS — Registration journey**
+(<http://grafana.cms.local/d/cms-registration-journey>), and Alertmanager at
+<http://alertmanager.cms.local>.
+
+### Reading the journey dashboard during an incident
+
+Top to bottom, the same way a registration travels. Stop at the first row that looks wrong:
+it's usually the layer closest to the cause.
+
+1. **Top: alerts, budgets, burn rate.** Which alert is firing, and which SLO is burning?
+   Availability burning = users get errors; latency = they wait; event publish = other
+   contexts don't hear about new members. A burn rate line above the dashed 14.4 is a
+   "drop everything" incident.
+2. **Client.** Did the browsers notice? `registration_submitted` without
+   `registration_completed`, JS errors on `/members/new`, a rising LCP. If the client row is
+   fine but the alert fires, few users are affected (or they're bots).
+3. **Edge.** Traefik's statuses for `/members/new`: a `502`/`503` here and nothing in the
+   backend row = web or members-service has no ready Pods (Traefik has nowhere to send it).
+4. **Backend.** `POST /members by status`: a 5xx band = members-service is failing. Refusals
+   by reason rising (`duplicate_email`) is a *business* change, not an outage. Slow p95: click an
+   exemplar dot → View trace, and see which span is long (a database call?).
+5. **Async.** Outbox rows waiting and a growing oldest age = the relay can't reach NATS.
+   NATS lag rising = a consumer isn't consuming (check its Pods in the next row).
+   `retried` in *Messages consumed* = a consumer's database is failing.
+6. **Kubernetes.** A workload at 0 ready Pods, restarts climbing, memory at 100% of the limit
+   (OOM kills), and the Kubernetes events that say why (`Unhealthy`, `BackOff`, `Killing`).
+7. **Logs.** The error lines themselves. Open one: its `trace_id` links to the trace.
+
+### Alert runbooks
+
+Each alert's `runbook_url` points here. For every one: what it means, then the first three
+commands.
+
+#### RegistrationAvailabilityBurnRate
+
+**Means:** too many registrations end in a 5xx. `critical`: over 14.4% failing for the last
+hour and the last 5 minutes (a month's budget in ~2 days). `warning`: over 6% for 6 hours.
+The usual causes: members-service can't reach its database, or it crashes.
+
+```bash
+kubectl get pods -l app.kubernetes.io/name=members-service; kubectl get deploy members-postgres
+#   → is everything Running and ready? members-postgres 0/1 = every registration is a 500
+kubectl logs deploy/members-service-members-service --since=10m | grep -E '"level":"(error|fatal)"' | tail -5
+#   → the error itself: "Can't reach database server" = Postgres; anything else = a bug
+kubectl get events --sort-by=.lastTimestamp | tail -15
+#   → Killing / BackOff / Unhealthy / FailedScheduling: why a Pod is down
+```
+
+#### RegistrationLatencyBurnRate
+
+**Means:** too many registrations take over 500 ms. Usually a slow database (a lock, a
+missing index, a starved Postgres), CPU throttling, or a cold start after a deploy.
+
+```bash
+kubectl top pods                                             # CPU near the 500m limit = throttled
+kubectl get hpa                                              # at max replicas and still busy?
+# Grafana → the dashboard's "POST /members p95, with exemplars" → click a dot → View trace:
+# the longest span in the waterfall is where the time goes.
+```
+
+#### EventPublishBurnRate
+
+**Means:** `MemberRegistered` events wait over 30 s in the outbox: the relay can't publish
+to NATS (NATS down, unreachable, or the relay's database lock is held).
+
+```bash
+kubectl -n nats get pods                                     # nats-0 3/3 Running?
+kubectl logs deploy/members-service-members-service --since=10m | grep -i "outbox publish failed" | tail -3
+kubectl exec -n nats deploy/nats-box -- nats stream info MEMBERS   # does NATS answer at all?
+```
+
+#### EventDeliveryStalled
+
+**Means:** a durable consumer has had messages waiting for 2 minutes. The publishing side
+works, but nobody is consuming: the consuming service has no Pods, or its consumer loop died.
+The other context is falling behind (its view of members is stale).
+
+```bash
+kubectl get deploy events-service-events-service members-service-members-service   # 0 ready?
+kubectl exec -n nats deploy/nats-box -- nats consumer ls MEMBERS                    # Unprocessed > 0
+kubectl logs deploy/events-service-events-service --since=10m | grep -iE "consumer|ended|failed" | tail -5
+```
+
+Once the consumer is back, the lag drains within seconds and the alert resolves on the
+next evaluation.
+
+
 ---
 
 ## Troubleshooting
@@ -492,6 +655,13 @@ In Tempo: `{ resource.service.name = "web-browser" }` finds traces that start in
 | The trace starts at web, not in the browser | The form was submitted **before the page's JavaScript loaded** (a native POST has no `traceparent`), or the request went to another origin (Faro only adds `traceparent` same-origin). Reload and wait for the page to finish loading |
 | Browser stack traces in Loki are **minified** (`page-1a2b.js:1:28432`) | The receiver couldn't fetch the source map. Check `curl -sI http://cms.local/_next/static/chunks/<file>.js.map` (200?), and that the Alloy Pod resolves `cms.local` (step 1's `/etc/hosts` check) |
 | A Frontend panel says **SampleExtractionErr** | A line whose value isn't a number reached an `unwrap`. The dashboard's queries end with `\| __error__=""`; add it to your own |
+| A rule using `le="30"` (or `le="1"`) returns **nothing**, with no error | Prometheus 3 stores every histogram `le` as a float: the exporter's `le="30"` arrives as `le="30.0"`. Match the stored value: `count by (le) (outbox_publish_delay_bucket)` lists them. `le="0.5"` is the same either way, which hides the problem in some rules and not others (CMS-31) |
+| An `sli:*` series is **empty** or NaN right after you sent requests | Either no requests in the window (0/0 = NaN, nothing to measure), or all of them landed between two scrapes on brand-new series: the first sample already holds the full count, so `rate()` sees no increase (the same effect as the Errors panel, study-guide §9.8). Send steady traffic (`regloop`, exercise 22's setup) for a minute |
+| `kubectl scale … --replicas=0` on events-service, archive a member, and **NATS lag stays 0** | The Pods were still stopping: during the `preStop` sleep (§7.8) the process still runs, and so does its consumer, so it consumed the message on its way out. Wait for `No resources found` before archiving |
+| Outbox panels show a **gap** instead of a line | The outbox gauges read the table on each scrape; when the database can't be read, the relay reports nothing on purpose (a gap, not a misleading 0) and logs `outbox stats unavailable`. Check that service's Postgres |
+| <http://alertmanager.cms.local> doesn't load | The `/etc/hosts` entry is new in CMS-31: run `scripts/cluster-up.sh` once in your own terminal (it needs sudo). Meanwhile: `kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093` → <http://localhost:9093> |
+| An alert shows **pending** but never fires | `for:` hasn't elapsed, or the short window recovered first (the problem stopped). Prometheus → Alerts shows the current value of each condition |
+| **No Kubernetes events** in Loki (`{job="kubernetes-events"}` is empty), but Pod logs arrive | Alloy's event watcher gave up at boot: `kubectl -n monitoring logs ds/alloy -c alloy \| grep kubernetes_events` shows `event watcher exited with error … i/o timeout` (the API server wasn't reachable yet when the VM came up, CMS-31). It doesn't retry. Restart Alloy: `kubectl -n monitoring rollout restart ds/alloy`. Pod logs are read from files with saved positions, so nothing is lost |
 
 ---
 
@@ -817,3 +987,92 @@ seq 1 300 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" -X POST \
 *Expected:* a mix like `120 202` and `180 429` (measured, CMS-30). The 429s came from
 Traefik; Alloy never saw them, so log shipping carried on. Check: `kubectl -n monitoring logs
 ds/alloy -c alloy --since=1m | grep -c error` stays where it was.
+
+### SLOs and the registration journey (CMS-31)
+
+These use the *CMS — Registration journey* dashboard and Alertmanager
+(<http://alertmanager.cms.local>). Time each drill: from breaking something to the alert, and
+from the alert to finding the cause on the dashboard. The second number is the one that
+improves with practice.
+
+To create traffic without a browser, keep this running in a second terminal. It registers
+a new member every 3 seconds, and every fifth one is a duplicate:
+
+```bash
+kubectl run regloop --restart=Never --image=curlimages/curl:8.11.1 -- sh -c '
+  i=0; while true; do i=$((i+1))
+    email="loop-$i-$(date +%s)@example.org"; [ $((i % 5)) -eq 0 ] && email="loop-dup@example.org"
+    curl -s -o /dev/null -w "%{http_code}\n" -X POST http://members-service-members-service:3001/members \
+      -H "content-type: application/json" -d "{\"name\":\"Loop $i\",\"email\":\"$email\"}"
+    sleep 3; done'
+kubectl logs -f regloop          # 201 201 201 201 409 …
+# when done: kubectl delete pod regloop
+```
+
+**22. Register 20 members, 5 of them duplicates, and watch every row move.** Register 15
+new members at <http://cms.local/members/new>, then 5 more with an email you already used.
+
+*Expected:* within a minute, *Funnel* shows 20 `registration_submitted` and 15
+`registration_completed` (each 409 keeps the form open); Traefik shows 20 POSTs: 15 answered
+`303` (the redirect after a success, Post/Redirect/Get) and 5 answered `200` (the form again,
+with the error);
+*In the selected time range* shows registered 15 and duplicate email 5; *POST /members by
+status* has 201 and 409 bands; *Reconciliation* shows "MemberRegistered saved (outbox
+table)" up by 15, with "still waiting now" at 0; the Kubernetes and logs rows barely move
+(409s are logged at `warn` by web, so they do appear in the logs row). No alert fires: a
+409 isn't a failure of the system.
+
+**23. Drill: events-service down.**
+
+```bash
+kubectl scale deploy/events-service-events-service --replicas=0
+# The HPA doesn't scale a Deployment that's at 0 (it treats 0 as "switched off"),
+# so this sticks until you scale back.
+kubectl get pods -l app.kubernetes.io/name=events-service      # wait for: No resources found
+```
+
+Then archive two or three members at <http://cms.local/members>.
+
+*Expected:* the Async row's *NATS: consumer lag* line for `events-service ← MEMBERS` rises
+by the number you archived, and stays there. After 2 minutes, `EventDeliveryStalled` is
+*firing* in Alertmanager and in *Alerts firing*, with the summary "events-service isn't
+consuming MEMBERS: 3 messages waiting" (measured, CMS-31: about 2½ minutes from the archive to
+*firing*: the scrape, the rule's evaluation interval, then `for: 2m`). Registrations keep working, and the *event
+publish* SLO stays green: publishing to NATS is fine, it's consuming that stopped. Scale
+back with `kubectl scale deploy/events-service-events-service --replicas=2`: the lag drops
+to 0 within seconds of the Pods becoming ready, and the alert resolves at the next
+evaluation (measured: Pods ready in 14 s, alert gone 44 s after the scale-up, and *Messages
+consumed* shows the 3 waiting messages as `applied`). Archive *before* the Pods are gone and you may see no lag at all: a stopping
+Pod keeps consuming during its `preStop` sleep (study-guide §15.4).
+
+**24. Drill: Postgres down, and spend the error budget.** Start the `regloop` traffic
+above, then:
+
+```bash
+kubectl scale deploy/members-postgres --replicas=0
+```
+
+*Expected* (measured, CMS-31): *POST /members by status* turns into a `500` band (about
+11 a minute with `regloop`'s 1 request every 3 s, plus its duplicates), *Ready Pods* shows
+`members-postgres` at 0, the logs row fills with members-service errors ("Can't reach
+database server at `members-postgres:5432`"), and the Kubernetes events panel shows
+`Scaled down replica set members-postgres…` and `Killing`. The availability *burn rate*
+climbs far past the dashed 14.4 line: the error ratio was 35% one minute in and 50% after
+two. `RegistrationAvailabilityBurnRate` went *pending* (both severities) at +77 s and the
+**critical** one *fired* at +138 s. *Error budget remaining* goes red and deeply negative
+(−33 in our run): a few minutes of total outage spends the 1% budget of everything
+Prometheus remembers many times over. Scale back
+(`kubectl scale deploy/members-postgres --replicas=1`): within a few minutes the 5m window is
+back to 0, so the **critical** alert resolves, although the 1h window still remembers the
+outage. That's the job of the short window. The **warning** keeps firing for up to 30
+minutes, until its 30m window no longer contains the outage: a slow burn alert is meant to be
+looked at "today", not to page. The budget doesn't come back: it's spent.
+
+**25. Write a recording rule yourself.** Add a rule for the share of registrations refused
+as duplicates over 5 minutes, `business:registration_duplicates:ratio_rate5m`. Put it in a
+new group in your own copy of `slo-rules.yaml`, apply it, and graph it in Explore.
+
+*Expected:* something like
+`sum(rate(members_registration_failures_total{reason="duplicate_email"}[5m])) / (sum(rate(members_registered_total[5m])) + sum(rate(members_registration_failures_total[5m])))`.
+With `regloop` running, about 0.2. Why would this make a bad *alert* but a useful
+*dashboard* number? (Who can fix a rise in duplicates: you, or the users?)

@@ -4,7 +4,7 @@
 // @cms/events. The domain never sees the wire format: dates become ISO
 // strings, and the message gets its own id, separate from the attendance id.
 import { randomUUID } from "crypto";
-import { SUBJECTS, type AttendanceRecordedV1, type OutboxBatch, type OutboxRow, type OutboxStore } from "@cms/events";
+import { SUBJECTS, type AttendanceRecordedV1, type OutboxBatch, type OutboxRow, type OutboxStats, type OutboxStore } from "@cms/events";
 import type { AttendanceRecordedEvent } from "../domain/events.js";
 import type { Db, PrismaClient } from "./prisma.js";
 
@@ -63,6 +63,26 @@ export class PrismaOutboxStore implements OutboxStore {
       { timeout: 30_000 }
     );
   }
+
+  // The table's totals, for the outbox metrics (CMS-31, @cms/events metrics.ts).
+  // Runs on every Prometheus scrape (every 30 s), on every Pod. Both queries use
+  // the (publishedAt, createdAt) index or a full count of a small table; if the
+  // outbox grows large, published rows should be pruned (they're kept today as
+  // the durable record that each event left, which the reconciliation panel reads).
+  async stats(): Promise<OutboxStats> {
+    // Raw SQL because Prisma's groupBy can group by a column, not by "is it null".
+    const groups = await this.prisma.$queryRaw<{ subject: string; pending: boolean; count: number }[]>`
+      SELECT subject, ("publishedAt" IS NULL) AS pending, count(*)::int AS count
+      FROM "OutboxMessage" GROUP BY 1, 2`;
+    const oldest = await this.prisma.outboxMessage.aggregate({
+      where: { publishedAt: null },
+      _min: { createdAt: true },
+    });
+    return {
+      rows: groups.map((g) => ({ subject: g.subject, state: g.pending ? "pending" : "published", count: g.count })),
+      oldestPendingAt: oldest._min.createdAt,
+    };
+  }
 }
 
 class PrismaOutboxBatch implements OutboxBatch {
@@ -74,7 +94,7 @@ class PrismaOutboxBatch implements OutboxBatch {
       orderBy: { createdAt: "asc" },
       take: limit,
     });
-    return rows.map((r) => ({ id: r.id, subject: r.subject, payload: r.payload, traceparent: r.traceparent }));
+    return rows.map((r) => ({ id: r.id, subject: r.subject, payload: r.payload, traceparent: r.traceparent, createdAt: r.createdAt }));
   }
 
   async markPublished(id: string, publishedAt: Date): Promise<void> {

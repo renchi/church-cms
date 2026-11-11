@@ -76,6 +76,9 @@ export async function startMessaging(opts: {
       if (outcome !== "applied") {
         log.warn({ messageId: msg.id, memberId: msg.data.memberId, outcome }, "attendance not applied");
       }
+      // Becomes the `outcome` label of messages_consumed_total (CMS-31):
+      // applied | duplicate | member-not-found.
+      return outcome;
     },
     log,
     onFailure,

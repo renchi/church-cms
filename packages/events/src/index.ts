@@ -8,9 +8,11 @@
 //   consumer.ts    — receiving messages and answering ack / nak / term
 //   tracing.ts     — carrying the trace context through the outbox and NATS
 //   sampling.ts    — which traces the services keep
+//   metrics.ts     — business metrics for the outbox and consumers (CMS-31)
 export * from "./contract.js";
 export * from "./nats.js";
 export * from "./outboxRelay.js";
 export * from "./consumer.js";
 export * from "./tracing.js";
 export * from "./sampling.js";
+export * from "./metrics.js";

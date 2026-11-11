@@ -6,6 +6,7 @@ import { UpdateMemberUseCase } from "../application/UpdateMemberUseCase.js";
 import { ConflictError, DomainError, NotFoundError } from "../domain/errors.js";
 import type { MemberRepository } from "../domain/MemberRepository.js";
 import { PrismaMemberRepository } from "../infrastructure/PrismaMemberRepository.js";
+import { memberMetrics, type RegistrationFailureReason } from "./metrics.js";
 
 export interface MemberRoutesOptions {
   // Injectable so integration tests can supply a repository backed by a
@@ -36,6 +37,7 @@ export async function memberRoutes(
   const registerMember = new RegisterMemberUseCase(repo);
   const updateMember = new UpdateMemberUseCase(repo);
   const archiveMember = new ArchiveMemberUseCase(repo);
+  const counters = memberMetrics();
 
   app.post<{ Body: { name: string; email: string; phone?: string } }>(
     "/members",
@@ -62,8 +64,15 @@ export async function memberRoutes(
         // stamps the request's `reqId` on the line, and the application layer
         // has no logging port (study-guide §9.9).
         req.log.info({ memberId: result.id }, "member registered");
+        counters.registered.add(1);
         return reply.status(201).send(result);
       } catch (err) {
+        // The two refusals the domain makes. Anything else (database down) is
+        // not a business outcome: it's a 5xx, counted by the HTTP metrics and
+        // the registration-success SLO (k8s/monitoring/slo-rules.yaml).
+        const reason: RegistrationFailureReason | null =
+          err instanceof ConflictError ? "duplicate_email" : err instanceof DomainError ? "invalid_input" : null;
+        if (reason) counters.registrationFailures.add(1, { reason });
         return handleError(reply, err);
       }
     }
@@ -125,6 +134,7 @@ export async function memberRoutes(
   app.delete<{ Params: { id: string } }>("/members/:id", async (req, reply) => {
     try {
       await traced("ArchiveMemberUseCase", () => archiveMember.execute(req.params.id));
+      counters.archived.add(1);
       return reply.status(204).send();
     } catch (err) {
       return handleError(reply, err);

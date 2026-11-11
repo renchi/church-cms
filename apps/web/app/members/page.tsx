@@ -4,6 +4,7 @@
 import { logEvent } from "@/lib/log";
 import Link from "next/link";
 import { ArchiveButton } from "./ArchiveButton";
+import { RegistrationCompleted } from "./RegistrationCompleted";
 import {
   fetchMember,
   fetchMembers,
@@ -65,6 +66,7 @@ export default async function MembersPage({ searchParams }: MembersPageProps) {
           className="rounded border border-green-200 bg-green-50 p-4 text-sm text-green-700"
         >
           Registered {registered.name}
+          <RegistrationCompleted />
         </div>
       )}
 

@@ -41,7 +41,7 @@ MINIKUBE_CPUS=4
 # daemon (`minikube docker-env`, §4), which only exists with the docker runtime.
 # minikube v1.39+ defaults to containerd, which would break that step.
 MINIKUBE_RUNTIME=docker
-HOSTNAMES=(cms.local traefik.cms.local grafana.cms.local)
+HOSTNAMES=(cms.local traefik.cms.local grafana.cms.local alertmanager.cms.local)
 HOSTS_FILE=/etc/hosts
 TUNNEL_LOG=/tmp/minikube-tunnel.log
 
@@ -202,6 +202,13 @@ helm_quiet upgrade --install otel-collector open-telemetry/opentelemetry-collect
   -f k8s/monitoring/otel-collector-values.yaml \
   --wait --timeout 3m
 ok "OTel Collector ready"
+
+# --- SLOs and the registration journey (CMS-31) -------------------------------
+# Recording rules + burn-rate alerts (a PrometheusRule, loaded by the Operator
+# installed in §2) and the dashboard that reads them. Both only read metrics, so
+# they can go in before the apps and NATS: the panels fill once those report.
+step "observability §14" "SLO rules, burn-rate alerts and the Registration journey dashboard"
+kubectl apply -f k8s/monitoring/slo-rules.yaml -f k8s/monitoring/registration-journey-dashboard.yaml
 
 # --- 5. Postgres -------------------------------------------------------------
 step "k8s-local-dev §5" "Postgres for members-service and events-service (one each, ADR-0008)"
@@ -380,7 +387,11 @@ if ! traefik_reachable; then
     warn "minikube tunnel is not running; starting it in the background (needs sudo)."
     sudo -v
     # nohup + & = keeps running after this script ends. Log: $TUNNEL_LOG
-    sudo -E bash -c 'nohup minikube tunnel >"$1" 2>&1 &' _ "$TUNNEL_LOG"
+    # `env HOME=… PATH=…`, not `sudo -E`: minikube finds the cluster through
+    # $HOME/.minikube, and root's HOME has none ("Profile minikube not found").
+    # sudo -E used to keep HOME, but sudo-rs (Ubuntu's sudo since 25.10) ignores
+    # -E, so the tunnel exited at once (found in CMS-31). env works with both.
+    sudo env HOME="$HOME" PATH="$PATH" bash -c 'nohup minikube tunnel >"$1" 2>&1 &' _ "$TUNNEL_LOG"
     if wait_for 60 "Traefik reachable through minikube tunnel" traefik_reachable; then
       ok "minikube tunnel started (log: $TUNNEL_LOG; stop it with: sudo pkill -f 'minikube tunnel')"
     fi
@@ -393,7 +404,7 @@ if ! traefik_reachable; then
   # Without a terminal (an agent, CI, Claude Code's "!" prefix) sudo can't ask for
   # a password, so the script didn't even try. Say so, or it looks like a bug.
   $USE_SUDO && ! can_sudo && warn "No terminal to type a sudo password into, so the tunnel wasn't started."
-  warn "Start it in another terminal and leave it open:  sudo -E minikube tunnel"
+  warn "Start it in another terminal and leave it open:  sudo env HOME=\"\$HOME\" PATH=\"\$PATH\" minikube tunnel"
   warn "Then run this script again (with --skip-build) to finish the checks."
 else
   ok "Traefik reachable at $ip"

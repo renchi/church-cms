@@ -57,6 +57,34 @@ container:
       limits:
         memory: 256Mi
 
+# METRICS (CMS-31). NATS itself only serves JSON on its monitoring port (8222).
+# The exporter is a sidecar container in the NATS Pod that reads that JSON and
+# serves it as Prometheus metrics on :7777. The chart already starts it with
+# `-jsz=all`, so it includes JetStream: per stream (`nats_stream_total_messages`,
+# `nats_stream_total_bytes`) and per durable consumer:
+#   nats_consumer_num_pending      messages in the stream the consumer hasn't been
+#                                  sent yet: its LAG. Rises when a consumer is down
+#                                  or slow (the EventDeliveryStalled alert).
+#   nats_consumer_num_ack_pending  sent, but not acknowledged yet (in flight)
+#   nats_consumer_num_redelivered  sent more than once (a nak, or no ack in time)
+# Labels: stream_name (MEMBERS, EVENTS), consumer_name (the durable, named after the
+# service that reads: events-service reads MEMBERS, members-service reads EVENTS).
+promExporter:
+  enabled: true
+  merge:
+    resources:
+      requests: { cpu: 10m, memory: 16Mi }
+      limits: { memory: 64Mi }
+  # A PodMonitor is the ServiceMonitor's sibling: it selects Pods directly,
+  # without a Service in front (the exporter's port isn't in NATS's Service).
+  # Prometheus only picks up monitors with this label, like our charts' ServiceMonitors.
+  podMonitor:
+    enabled: true
+    merge:
+      metadata:
+        labels:
+          release: kube-prometheus-stack
+
 # nats-box: a small Pod with the `nats` CLI, already configured to reach the
 # server. docs/messaging.md uses it to inspect streams and consumers:
 #   kubectl exec -n nats deploy/nats-box -- nats stream ls
