@@ -1765,6 +1765,7 @@ that fires on everything.
 | CMS-31 retro: fixing moved line links by hand took four rounds, and one `sed` with an empty variable wrote a broken link (`#L)`) | When a check already computes the fix, let it apply the fix: `check-docs.sh --fix` |
 | CMS-31 retro: a dead tunnel and a dead event watcher each looked like "nothing there", and each took a separate investigation | A background process's error must reach the person running the script. `cluster-up.sh` now prints the tunnel's log when it fails, and warns when Loki has had no Kubernetes events for an hour |
 | CMS-31 retro: the agent queried Prometheus and Loki ~40 times through helpers it rewrote in a scratch folder | A tool used that often belongs in the repo, where the next session finds it: `scripts/obs-query.sh` |
+| CMS-31 retro: CLAUDE.md's "Evolution paths" table gained a row per infrastructure ticket, each repeating its ADR's own evolution table, and all of it loads into every agent turn | Keep always-loaded steering for what changes most turns' work (the domain and messaging rows); point to the ADRs for the rest. A copy in CLAUDE.md is a second place to keep up to date |
 
 ### 12.3 Least privilege for agents
 
