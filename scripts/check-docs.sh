@@ -2,6 +2,8 @@
 # check-docs.sh — catch the documentation mistakes a reviewer would otherwise find.
 #
 #   scripts/check-docs.sh            check every Markdown file under docs/ (plus CLAUDE.md)
+#   scripts/check-docs.sh --fix      also rewrite every link whose line MOVED (the error
+#                                    below that names the new line), then check again
 #
 # Errors (exit 1) — things that are wrong right now:
 #   - a relative link points to a file that doesn't exist        [text](../apps/x.ts)
@@ -24,6 +26,15 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+FIX=false
+[[ "${1:-}" == "--fix" ]] && FIX=true
+# --fix collects "doc<TAB>line<TAB>old target<TAB>new anchor" here and applies them at
+# the end. Only moves: there the right answer is certain (the same text, on exactly
+# one new line). A label that disagrees with its link, or a line whose text changed,
+# needs a human to say which side is right. (CMS-31 retro: fixing moved links by
+# hand took four rounds and once produced a broken link.)
+fixes=()
 
 errors=0
 warnings=0
@@ -85,6 +96,7 @@ check_moved_line() {
       # A range moves as a whole: suggest the end too, shifted by the same amount.
       [[ -n "$end" ]] && fix="L$matches-L$(( end + matches - n ))"
       err "$doc:$lineno → $target: the line it pointed at moved; use #$fix (${old:0:60})"
+      fixes+=("$doc"$'\t'"$lineno"$'\t'"$target"$'\t'"$fix")
       return
     fi
   fi
@@ -153,6 +165,34 @@ done
 if grep -qE '^(apps|packages|charts|k8s|scripts)/' <<<"$changed" \
   && ! grep -qxF 'docs/study-guide.md' <<<"$changed"; then
   warn "code changed on this branch but docs/study-guide.md did not (every ticket updates it)"
+fi
+
+# --- --fix: rewrite the moved links, then check again ------------------------
+# On the link's own line: `](path#L52)` becomes `](path#L60)`, and a `:52` in that
+# link's label becomes `:60`, so label and link keep agreeing. Then the script runs
+# again without --fix, so what's printed last is the state of the docs after the fix.
+if $FIX && ((${#fixes[@]} > 0)); then
+  printf '%s\n' "${fixes[@]}" | python3 -c '
+import re, sys
+from collections import defaultdict
+edits = defaultdict(list)
+for row in sys.stdin.read().splitlines():
+    doc, lineno, target, anchor = row.split("\t")
+    edits[doc].append((int(lineno), target, anchor))
+for doc, items in edits.items():
+    lines = open(doc).read().split("\n")
+    for lineno, target, anchor in items:
+        path, old = target.split("#", 1)
+        old_first, new_first = old.split("-")[0][1:], anchor.split("-")[0][1:]
+        link = re.compile(r"\[([^\]]*)\]\(" + re.escape(target) + r"\)")
+        def swap(m):
+            label = re.sub(r":" + old_first + r"\b", ":" + new_first, m.group(1))
+            return "[" + label + "](" + path + "#" + anchor + ")"
+        lines[lineno - 1] = link.sub(swap, lines[lineno - 1])
+    open(doc, "w").write("\n".join(lines))
+'
+  printf '\nFixed %d moved link(s). Checking again:\n\n' "${#fixes[@]}"
+  exec "$0"
 fi
 
 # --- Summary -----------------------------------------------------------------

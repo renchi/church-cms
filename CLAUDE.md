@@ -25,7 +25,8 @@ pnpm --filter members-service test       # unit + integration
 scripts/cluster-up.sh                    # bring up / update the whole minikube stack, then smoke-test it
 scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postgres data)
 scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, only check tunnel + /etc/hosts
-scripts/check-docs.sh                    # broken doc links, moved line links, missing study-guide update (also runs in CI)
+scripts/check-docs.sh [--fix]            # broken doc links, moved line links (--fix rewrites them), missing study-guide update (also runs in CI)
+scripts/obs-query.sh prom|loki|tempo '<query>'   # ask Prometheus/Loki/Tempo from the terminal, no tunnel needed
 scripts/check-env.sh                     # every env var an app reads is set by its Helm chart (also runs in CI)
 scripts/watch-deploy.sh [sha]            # watch the Deploy run for main's newest commit (or <sha>)
 scripts/agent-status.sh show             # the ticket's status record: each workflow stage and whether it's running/done/stale

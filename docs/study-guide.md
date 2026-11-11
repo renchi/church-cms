@@ -560,7 +560,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:24`](../charts/web/values.yaml#L24)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:476`](../scripts/cluster-up.sh#L476)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:482`](../scripts/cluster-up.sh#L482)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -1708,10 +1708,17 @@ and each step has a mechanical core:
   itself changed, a warning printing both versions, because only a person can tell
   whether the doc's sentence is still true. CI runs it in
   [`ci.yml`](../.github/workflows/ci.yml) (`lint-typecheck`), with full git history so
-  the comparison with `main` happens there too.
+  the comparison with `main` happens there too. `check-docs.sh --fix` rewrites the moved
+  links itself (anchor and label), then checks again; the other errors stay for a person.
 - [`scripts/check-env.sh`](../scripts/check-env.sh) fails when an app reads an env var
   (`process.env.X`, Prisma's `env("X")`, or a read in a workspace package it uses) that
   its chart, rendered with Deploy's flags, never sets. CI runs it next to `check-docs.sh`.
+- **Tests are typechecked too.** `@cms/events` keeps its tests out of `tsconfig.json` (so
+  they stay out of `dist/`), and [`tsconfig.test.json`](../packages/events/tsconfig.test.json)
+  adds them back for `pnpm typecheck` only. The apps' configs already include their tests.
+- [`scripts/obs-query.sh`](../scripts/obs-query.sh) asks Prometheus, Loki or Tempo a question
+  from the terminal through the API server's service proxy: no tunnel, port-forward or
+  browser needed. Agents use it to check a metric or a log line during `/verify`.
 - [`.claude/rules/web.md`](../.claude/rules/web.md) holds the web app's conventions, loaded
   whenever the agent works under `apps/web`. Services have had `ddd.md` from the start; the
   web app had nothing, so CMS-26's review had to catch what a rule could have prevented.
@@ -1754,6 +1761,10 @@ that fires on everything.
 | `check-docs.sh` passed locally but failed on its first CI run: `docker-local-dev.md` linked to `apps/members-service/.env`, which exists on this machine but is gitignored | A check that reads the working tree sees files nobody else has. It now rejects links to gitignored files, so the local run and CI give the same answer. Run new checks in CI before trusting a local green |
 | Running `scripts/cluster-up.sh --skip-build` with Claude Code's `!` prefix still didn't start the tunnel, and printed no reason | `!` runs the command with no terminal, so sudo can't ask for a password and the script quietly stays check-only. Steps that need a human (a password, a browser login) must run in the human's own terminal, and the script now says so when it can't ask |
 | Two full rebuilds while testing this took the disk from 11 GB to 4.9 GB free (92%), mostly build cache | Every rebuild leaves cache behind. The script now deletes superseded `local-*` tags. Build cache still needs a `docker builder prune -af` (host and minikube), which is why `/ship` checks the disk before pushing |
+| CMS-31 retro: a wrong field in a test fixture passed lint, typecheck and CI; only the reviewer agent caught it. `@cms/events` excluded its tests from typechecking | The review found what a compiler could have. Mechanical mistakes get a deterministic check (`tsconfig.test.json`); the reviewer's attention is for judgement calls |
+| CMS-31 retro: fixing moved line links by hand took four rounds, and one `sed` with an empty variable wrote a broken link (`#L)`) | When a check already computes the fix, let it apply the fix: `check-docs.sh --fix` |
+| CMS-31 retro: a dead tunnel and a dead event watcher each looked like "nothing there", and each took a separate investigation | A background process's error must reach the person running the script. `cluster-up.sh` now prints the tunnel's log when it fails, and warns when Loki has had no Kubernetes events for an hour |
+| CMS-31 retro: the agent queried Prometheus and Loki ~40 times through helpers it rewrote in a scratch folder | A tool used that often belongs in the repo, where the next session finds it: `scripts/obs-query.sh` |
 
 ### 12.3 Least privilege for agents
 
