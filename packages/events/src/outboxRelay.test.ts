@@ -19,13 +19,14 @@ function makeStore(
     published,
     ...batch,
     runExclusive: vi.fn(async (work) => (opts.locked ? null : work(batch))),
+    stats: vi.fn(async () => ({ rows: [], oldestPendingAt: null })),
   };
 }
 
 const rows: OutboxRow[] = [
-  { id: "1", subject: "cms.members.archived", payload: { n: 1 }, traceparent: null },
-  { id: "2", subject: "cms.members.archived", payload: { n: 2 }, traceparent: null },
-  { id: "3", subject: "cms.members.archived", payload: { n: 3 }, traceparent: null },
+  { id: "1", subject: "cms.members.archived", payload: { n: 1 }, traceparent: null, createdAt: new Date() },
+  { id: "2", subject: "cms.members.archived", payload: { n: 2 }, traceparent: null, createdAt: new Date() },
+  { id: "3", subject: "cms.members.archived", payload: { n: 3 }, traceparent: null, createdAt: new Date() },
 ];
 
 describe("startOutboxRelay", () => {

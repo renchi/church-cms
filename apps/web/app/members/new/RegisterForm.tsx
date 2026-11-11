@@ -5,6 +5,7 @@
 // Everything else (the page around it, the action, the API call) runs on the server.
 
 import { useActionState } from "react";
+import { trackRegistration } from "@/lib/rum/funnel";
 import { registerMemberAction } from "./actions";
 import { initialRegisterFormState } from "./formState";
 
@@ -19,7 +20,10 @@ export function RegisterForm() {
   );
 
   return (
-    <form action={formAction} className="space-y-4">
+    // onSubmit runs in the browser just before the action's request is sent: the
+    // "submitted" step of the registration funnel (lib/rum/funnel.ts, CMS-31). It
+    // fires on every press, so a refused attempt followed by a fixed one counts twice.
+    <form action={formAction} onSubmit={() => trackRegistration("submitted")} className="space-y-4">
       {state.error && (
         <div
           role="alert"

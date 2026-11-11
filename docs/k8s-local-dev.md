@@ -102,9 +102,14 @@ Minikube's Docker driver does not expose port 80 directly from the host. You nee
 **Step A — start the tunnel** (keep this terminal open the entire session):
 
 ```bash
-sudo -E minikube tunnel
+sudo env HOME="$HOME" PATH="$PATH" minikube tunnel
 # Prompts for sudo password, then sits running — leave it open
 ```
+
+`env HOME=… PATH=…` runs minikube as root but with *your* home directory, where it keeps
+the cluster's config (`~/.minikube`); as root's own HOME it would say "Profile minikube not
+found". (Older docs said `sudo -E`, which does the same with classic sudo, but sudo-rs,
+Ubuntu's sudo since 25.10, ignores `-E`.)
 
 `minikube tunnel` assigns `127.0.0.1` as the external IP for LoadBalancer services (including Traefik), making port 80 accessible from the host.
 

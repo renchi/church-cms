@@ -60,7 +60,7 @@ it opens the browser for you.
 First start the tunnel in its own terminal and leave it running:
 
 ```bash
-sudo -E minikube tunnel
+sudo env HOME="$HOME" PATH="$PATH" minikube tunnel
 ```
 
 | What | URL |
@@ -74,6 +74,9 @@ sudo -E minikube tunnel
 | Logs from every Pod (deleted ones too), Kubernetes events | <http://grafana.cms.local> → Explore → *Loki* → e.g. `{app="members-service"} \| json` ([LogQL cheat sheet](observability.md#9-logql-cheat-sheet-our-fields)) |
 | What real visitors' browsers see: Web Vitals (LCP, INP, CLS) and JS errors per page, by browser and device | <http://grafana.cms.local/d/cms-frontend> → *CMS — Frontend (browser monitoring)*; raw lines: Explore → *Loki* → `{app="web-browser"}` ([RUM runbook](observability.md#13-browser-monitoring-rum)) |
 | One request across every service (web → members → NATS → events), as a waterfall | <http://grafana.cms.local> → Explore → *Tempo* → TraceQL, e.g. `{ resource.service.name = "members-service" && status = error }` ([TraceQL cheat sheet](observability.md#12-following-a-trace-traceql-cheat-sheet)) |
+| **Registration journey**: what the system is doing in business terms, one row per layer (browser, Traefik, members-service, outbox/NATS, Kubernetes, logs), with SLO error budgets and the alerts firing on top | <http://grafana.cms.local/d/cms-registration-journey> → *CMS — Registration journey* ([runbook](observability.md#14-slos-and-the-registration-journey)) |
+| Alertmanager: the SLO and delivery alerts firing now, grouped, with silences | <http://alertmanager.cms.local> (needs the `/etc/hosts` entry: `scripts/cluster-up.sh` adds it) |
+| Prometheus: alert rules (inactive / pending / firing) and recording rules | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` → <http://localhost:9090/alerts>, <http://localhost:9090/rules> |
 | Prometheus: scrape targets (is each Pod `up`?) | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` → <http://localhost:9090/targets> |
 | NATS: streams and consumers as JSON (messages stored, pending per consumer) | `kubectl -n nats port-forward pod/nats-0 8222` → <http://localhost:8222/jsz?consumers=true> ([runbook](messaging.md)) |
 

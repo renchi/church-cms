@@ -9,7 +9,7 @@
 #     Prometheus scrape config (our chart ships one: charts/members-service).
 #   - Prometheus: pulls (scrapes) /metrics endpoints and stores time series.
 #   - Grafana: dashboards on top of Prometheus (preconfigured as a data source).
-#   - Alertmanager: routes alerts. Installed but not used yet.
+#   - Alertmanager: routes alerts. Receives the SLO alerts since CMS-31.
 #   - node-exporter + kube-state-metrics: node and Kubernetes-object metrics,
 #     which power the built-in "Kubernetes / Compute Resources" dashboards.
 
@@ -113,6 +113,19 @@ prometheus:
       limits: { memory: 1Gi }
 
 alertmanager:
+  # Alertmanager receives the alerts Prometheus fires (k8s/monitoring/slo-rules.yaml,
+  # CMS-31), groups duplicates, and would send them on to a receiver (Slack,
+  # PagerDuty, email). We configure none, which is out of scope: alerts stay visible
+  # in its UI, at http://alertmanager.cms.local (same /etc/hosts + tunnel as Grafana;
+  # scripts/cluster-up.sh adds the entry). Prometheus → Alerts shows the same alerts
+  # from the rule side: pending (waiting out `for:`) and firing.
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hosts:
+      - alertmanager.cms.local
+    paths:
+      - /
   alertmanagerSpec:
     resources:
       requests: { cpu: 10m, memory: 32Mi }

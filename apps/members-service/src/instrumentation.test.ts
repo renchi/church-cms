@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
+import type { Member } from "./domain/Member.js";
 import type { MemberRepository } from "./domain/MemberRepository.js";
 
 // Exercises the real OTel SDK end to end: start it the way production does
@@ -8,9 +9,12 @@ import type { MemberRepository } from "./domain/MemberRepository.js";
 // server on 9464.
 const METRICS_PORT = 9465;
 
+const TAKEN_EMAIL = "taken@example.com";
+
 const repo: MemberRepository = {
   findById: async () => null,
-  findByEmail: async () => null,
+  // Any non-null answer means "someone already has this email" to the use case.
+  findByEmail: async (email) => (email === TAKEN_EMAIL ? ({} as Member) : null),
   list: async () => ({ members: [], total: 0 }),
   save: async () => undefined,
 };
@@ -51,6 +55,27 @@ describe("OpenTelemetry metrics", () => {
       /http_server_request_duration_count\{[^}]*http_route="\/members\/:id"[^}]*http_response_status_code="404"[^}]*\} 2/
     );
     expect(metrics).not.toContain("/members/abc");
+  });
+
+  // Business metrics (CMS-31, src/api/metrics.ts): counted by outcome, in the
+  // domain's words, with no email or name anywhere in the output.
+  it("counts registrations, and refusals by reason", async () => {
+    const register = (email: string, name = "Ana") =>
+      fetch(`${baseUrl}/members`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, email }),
+      });
+    expect((await register("new@example.com")).status).toBe(201);
+    expect((await register(TAKEN_EMAIL)).status).toBe(409);
+    expect((await register("not-an-email")).status).toBe(400);
+
+    const metrics = await scrape();
+
+    expect(metrics).toMatch(/^members_registered_total(\{[^}]*\})? 1$/m);
+    expect(metrics).toMatch(/^members_registration_failures_total\{[^}]*reason="duplicate_email"[^}]*\} 1$/m);
+    expect(metrics).toMatch(/^members_registration_failures_total\{[^}]*reason="invalid_input"[^}]*\} 1$/m);
+    expect(metrics).not.toContain("example.com");
   });
 
   it("does not count Kubernetes health probes", async () => {

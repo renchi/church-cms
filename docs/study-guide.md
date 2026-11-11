@@ -5,7 +5,7 @@ exercised, mapped to the **five learning goals** in
 [ADR-0007](adr/0007-learning-scope-and-roadmap.md):
 
 1. **Docker & containers**
-2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability; logs in Loki since CMS-28, traces in Tempo since CMS-29)_
+2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability; logs in Loki since CMS-28, traces in Tempo since CMS-29, SLOs and burn-rate alerts since CMS-31)_
 3. **System design** _(stage 9 done: async events between services; the contract evolved in CMS-27)_
 4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
 5. **Using AI tools** — issue-driven development _(agent orchestration track started: §12.4)_
@@ -58,7 +58,9 @@ one registration is now one trace in Tempo, from web's Server Action through the
 NATS to events-service, with log lines and graph points linking to it (§13). **CMS-30**
 moved the start of that trace into the browser: real visitors' phones now report JS errors,
 Web Vitals and their own spans, with no personal data, through a rate-limited public
-endpoint (§14). Next are SLOs (CMS-31) and CMS-20 (Communications, the welcome email).
+endpoint (§14). **CMS-31** added metrics in the domain's words, a "Registration journey"
+dashboard from the browser down to Kubernetes, and SLOs with burn-rate alerts (§15). Next is
+CMS-20 (Communications, the welcome email).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -525,15 +527,15 @@ Browser ◀── 303 /members?registered=<id>  or  the form + error banner
   ([line 40](../apps/web/app/members/new/actions.ts#L40)); on success it calls
   `redirect()` with the new id ([line 51](../apps/web/app/members/new/actions.ts#L51)),
   outside any try/catch because `redirect()` works by throwing.
-- [`app/members/new/RegisterForm.tsx:16`](../apps/web/app/members/new/RegisterForm.tsx#L16):
+- [`app/members/new/RegisterForm.tsx:17`](../apps/web/app/members/new/RegisterForm.tsx#L17):
   the one Client Component: `useActionState`, the error banner, `defaultValue` from the
   returned values, and a button disabled while pending
-  ([line 75](../apps/web/app/members/new/RegisterForm.tsx#L75)).
-- [`app/members/page.tsx:22`](../apps/web/app/members/page.tsx#L22): `?registered=<id>`
+  ([line 75](../apps/web/app/members/new/RegisterForm.tsx#L79)).
+- [`app/members/page.tsx:23`](../apps/web/app/members/page.tsx#L23): `?registered=<id>`
   is looked up with `GET /members/:id`, and the banner shows the name members-service
   has. An unknown id, a repeated parameter (an array) or a failed lookup shows no banner.
   If the list can't load, the visitor sees a generic message; the details, including the
-  internal URL, go to the server log as one JSON line at level `error` ([line 46](../apps/web/app/members/page.tsx#L46), §9.9).
+  internal URL, go to the server log as one JSON line at level `error` ([line 46](../apps/web/app/members/page.tsx#L47), §9.9).
 - [`charts/web/values.yaml:24`](../charts/web/values.yaml#L24): `config.membersApiUrl`
   becomes the Pod's `MEMBERS_API_URL`. Compose sets `http://members-service:3001` instead.
 - Tests: [`lib/membersApi.test.ts`](../apps/web/lib/membersApi.test.ts) stubs `fetch`
@@ -558,7 +560,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:24`](../charts/web/values.yaml#L24)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:465`](../scripts/cluster-up.sh#L465)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:476`](../scripts/cluster-up.sh#L476)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -790,7 +792,7 @@ then gets SIGTERM once no new requests are arriving.
   the sleep, their SIGTERM handler ([`index.ts:63`](../apps/members-service/src/index.ts#L63))
   lets the NATS consumer finish its current message and drains the connection, all inside
   the same 30 s.
-- [`scripts/cluster-up.sh:315`](../scripts/cluster-up.sh#L315): the script deletes old
+- [`scripts/cluster-up.sh:322`](../scripts/cluster-up.sh#L322): the script deletes old
   `local-*` images after a deploy. `helm --wait` returns when the *new* Pods are Ready, but
   the old ones are now still sleeping, and Docker won't remove an image a container is
   using. So the script first waits until every Pod running one of our images runs this
@@ -1407,9 +1409,9 @@ the only code both services may import:
 - Idempotent setup: `ensureStream` and `ensureConsumer`, "create, or update to this
   config" ([`nats.ts:52`](../packages/events/src/nats.ts#L52),
   [`nats.ts:79`](../packages/events/src/nats.ts#L79)).
-- The outbox relay ([`outboxRelay.ts:76`](../packages/events/src/outboxRelay.ts#L76)) and
+- The outbox relay ([`outboxRelay.ts:90`](../packages/events/src/outboxRelay.ts#L90)) and
   the ack/nak/term decision for each message
-  ([`consumer.ts:47`](../packages/events/src/consumer.ts#L47)). Neither knows about
+  ([`consumer.ts:58`](../packages/events/src/consumer.ts#L58)). Neither knows about
   Prisma: each service passes in functions over its own tables.
 
 **Publishing (the outbox), using archive as the example:**
@@ -1579,7 +1581,7 @@ really needs it.
 - Tests: a unit test for the mapping that checks `data` is *exactly* `{ memberId }`
   ([`outbox.test.ts`](../apps/members-service/src/infrastructure/outbox.test.ts)), and
   integration tests for register → outbox row → published to the stream
-  ([`messaging.integration.test.ts:131`](../apps/members-service/src/infrastructure/messaging.integration.test.ts#L131)).
+  ([`messaging.integration.test.ts:153`](../apps/members-service/src/infrastructure/messaging.integration.test.ts#L153)).
 - To watch it in the cluster, see [`messaging.md`](messaging.md), exercise 6.
 
 #### Why this way
@@ -2056,12 +2058,12 @@ request that produced it.
 | Query spans | [`prisma.ts:22`](../apps/members-service/src/infrastructure/prisma.ts#L22) (same in events-service), built by `inDbSpan` ([`tracing.ts:127`](../packages/events/src/tracing.ts#L127)) | a Prisma middleware: one CLIENT span per query, `prisma:<Model>.<action>`, tagged `db.system.name` (what the sampler looks for) |
 | Web SDK | [`apps/web/instrumentation.ts:34`](../apps/web/instrumentation.ts#L34) | `@vercel/otel`; the Server Action is the root span; `fetch` sends `traceparent` to `MEMBERS_API_URL` only |
 | Web log lines | [`lib/log.ts:45`](../apps/web/lib/log.ts#L45) | the active span's ids on every `logEvent` line |
-| Use-case span | [`memberRoutes.ts:22`](../apps/members-service/src/api/memberRoutes.ts#L22), [`eventRoutes.ts:39`](../apps/events-service/src/api/eventRoutes.ts#L39) | every use case as a span (`RegisterMemberUseCase`, `ScheduleEventUseCase`, ...), marked ERROR when a rule rejects (409); the consumer's use case too ([`messaging.ts:74`](../apps/events-service/src/infrastructure/messaging.ts#L74)) |
+| Use-case span | [`memberRoutes.ts:23`](../apps/members-service/src/api/memberRoutes.ts#L23), [`eventRoutes.ts:39`](../apps/events-service/src/api/eventRoutes.ts#L39) | every use case as a span (`RegisterMemberUseCase`, `ScheduleEventUseCase`, ...), marked ERROR when a rule rejects (409); the consumer's use case too ([`messaging.ts:74`](../apps/events-service/src/infrastructure/messaging.ts#L74)) |
 | The longest trace | [`app/members/actions.ts:16`](../apps/web/app/members/actions.ts#L16) | the Archive button's Server Action: one click, one trace through web, members-service, the outbox, NATS and events-service |
 | Store the context | [`PrismaMemberRepository.ts:116`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L116), migration `20261029120000_outbox_traceparent` | `traceparent` column, written with the outbox row |
 | Shared helpers | [`packages/events/src/tracing.ts:56`](../packages/events/src/tracing.ts#L56) | `captureTraceContext`, `contextFromHeaders` ([`:64`](../packages/events/src/tracing.ts#L64)), `inMessagingSpan` ([`:102`](../packages/events/src/tracing.ts#L102)), `flushTraces` ([`:153`](../packages/events/src/tracing.ts#L153)) |
-| Relay → NATS | [`outboxRelay.ts:98`](../packages/events/src/outboxRelay.ts#L98), [`nats.ts:122`](../packages/events/src/nats.ts#L122) | PRODUCER span, child of the stored context; its own context goes out as a NATS header |
-| NATS → consumer | [`consumer.ts:54`](../packages/events/src/consumer.ts#L54) | CONSUMER span, child of the header; the handler runs inside it |
+| Relay → NATS | [`outboxRelay.ts:133`](../packages/events/src/outboxRelay.ts#L133), [`nats.ts:122`](../packages/events/src/nats.ts#L122) | PRODUCER span, child of the stored context; its own context goes out as a NATS header |
+| NATS → consumer | [`consumer.ts:65`](../packages/events/src/consumer.ts#L65) | CONSUMER span, child of the header; the handler runs inside it |
 | Charts | `charts/*/values.yaml` `tracing.otlpEndpoint` | `""` = off; on: `OTEL_TRACES_EXPORTER=otlp` + `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | Collector | [`otel-collector-values.yaml`](../k8s/monitoring/otel-collector-values.yaml) | `otlp` receiver → `memory_limiter`, `batch` → Tempo + `span_metrics` → Prometheus |
 | Tempo | [`tempo-values.yaml`](../k8s/monitoring/tempo-values.yaml) | single binary, 2 Gi PVC, 24h |
@@ -2245,7 +2247,133 @@ layered, because one rule always misses something.
 
 ---
 
-## 15. Self-check — can you explain each of these?
+## 15. SLOs and business observability (CMS-31)
+
+§9 to §14 measured the *machinery*: requests per second, error ratios, traces, Web Vitals.
+None of it said "12 members registered in the last hour, all events delivered, none stuck",
+and nothing told anyone when users were hurting. CMS-31 adds metrics in the domain's words,
+one dashboard that follows a registration from the browser down to Kubernetes, and alerts
+on what users feel, not on CPU.
+
+Runbook (install, reading the dashboard in an incident, one entry per alert, drills):
+[`observability.md` §14](observability.md#14-slos-and-the-registration-journey).
+The decision record: [ADR-0009 addendum (CMS-31)](adr/0009-observability-opentelemetry.md).
+
+### 15.1 The concept
+
+| Term | Meaning | Here |
+| --- | --- | --- |
+| **SLI** (indicator) | a measured ratio of good events to all events | share of `POST /members` that weren't a 5xx |
+| **SLO** (objective) | the target for an SLI, over a period | 99% over 30 days |
+| **SLA** (agreement) | an SLO written into a contract, with a penalty if missed | none: we have no customers to pay |
+| **error budget** | what the SLO allows to fail: 1 − SLO | 1% of registrations may fail |
+| **burn rate** | how fast the budget is being spent: error ratio ÷ budget | 1 = runs out exactly at day 30; 14.4 = in ~2 days |
+| **recording rule** | a query Prometheus runs on a schedule and stores as a new series | `sli:registration_errors:ratio_rate5m` |
+
+**Why an SLO at all.** "As reliable as possible" can't be measured or traded off. An SLO says
+how reliable is *enough*. The error budget turns that into a decision rule: budget left means
+ship features, budget gone means work on reliability. 100% is never the target: it would
+forbid every deploy, and users can't tell 99.99% from 100% through their own network anyway.
+
+**Why alert on burn rate, not on errors.** A 99% SLO *allows* 1 failure in 100. An alert on
+"any 5xx" pages someone for failures the SLO says are fine, and people soon learn to ignore
+it. An alert on "5xx ratio above 1% for 5 minutes" is better, but fires on a two-minute blip
+that spends almost nothing, and is slow for a total outage. The burn rate asks the real
+question: *at this pace, when does the budget run out?* Each alert checks two windows. A
+**long** one (1 h) says the problem is significant, and a **short** one (5 min) says it's
+still happening, so the alert also stops soon after the fix. The Google SRE workbook's
+thresholds: **14.4× over 1 h** (2% of the month's budget in an hour: act now), and **6× over
+6 h** (5% in six hours: look today).
+
+**Business metrics vs technical metrics.** `http_server_request_duration_count{status="409"}`
+is technical: it's about HTTP. `members_registration_failures_total{reason="duplicate_email"}`
+says the same in the domain's words, survives an API redesign, and is what a product owner
+asks about. Technical metrics say *whether the machine works*, business metrics say *whether
+it does its job*. You need both, and the dashboard puts them side by side.
+
+**Observability vs the audit trail.** Metrics and logs are *observations*: sampled, kept for
+days, counters reset when a Pod restarts, a log line can be dropped. They're for seeing and
+debugging, not for proving. The **outbox row** is different: it's written in the *same
+transaction* as the member (ADR-0010), so it exists if and only if the registration happened.
+The dashboard's reconciliation panel shows the counter next to the table's count. When they
+disagree, the table is right. If something must be provable (a donation, a consent), it
+belongs in a durable store, not in telemetry.
+
+**Label cardinality.** Each distinct combination of label values is a separate time series
+that Prometheus keeps in memory and on disk. `reason` with 2 values is 2 series; a `memberId`
+label would be one series per member, forever, and would eventually exhaust Prometheus.
+The rule: **labels describe categories with a small, fixed set of values; ids go in logs and
+traces**. The same rule kept Loki's labels to four (§9.9) and the browser's page ids to route
+templates (§14).
+
+### 15.2 How we did it here
+
+- **Business counters in the API layer** ([`api/metrics.ts`](../apps/members-service/src/api/metrics.ts)):
+  `members_registered_total`, `members_archived_total` and
+  `members_registration_failures_total{reason}`, recorded next to the business log line
+  ([`memberRoutes.ts:67`](../apps/members-service/src/api/memberRoutes.ts#L67)). The application
+  layer stays free of telemetry, as it stayed free of spans in CMS-29.
+- **Messaging metrics in the shared plumbing** ([`metrics.ts`](../packages/events/src/metrics.ts)), so
+  both services report them the same way. The relay counts each publish and records how long the
+  row waited ([`outboxRelay.ts:151`](../packages/events/src/outboxRelay.ts#L151)). On each scrape
+  it reads the **table's** totals: rows by state and the oldest pending row's age
+  ([`outboxRelay.ts:110`](../packages/events/src/outboxRelay.ts#L110)). Every Pod reports the
+  same table, so queries take `max()`, never `sum()`. The consumer counts every answer by
+  outcome; the handler returns its own (`applied`, `duplicate`, …), because only the use case
+  knows whether a message changed anything ([`consumer.ts:100`](../packages/events/src/consumer.ts#L100)).
+- **NATS's own view**: the chart's exporter sidecar and a PodMonitor
+  ([`nats-values.yaml:72`](../k8s/nats-values.yaml#L72)) give `nats_consumer_num_pending`,
+  each durable consumer's lag.
+- **The browser funnel**: two Faro custom events with no data, `registration_submitted`
+  ([`RegisterForm.tsx:26`](../apps/web/app/members/new/RegisterForm.tsx#L26)) and
+  `registration_completed` ([`funnel.ts`](../apps/web/lib/rum/funnel.ts)).
+- **SLOs as recording rules and alerts** ([`slo-rules.yaml`](../k8s/monitoring/slo-rules.yaml)):
+  three SLIs at four windows each, the budget left, and multi-window burn-rate alerts
+  ([`slo-rules.yaml:193`](../k8s/monitoring/slo-rules.yaml#L193)), each with a `runbook_url`.
+  Plus `EventDeliveryStalled` ([`:284`](../k8s/monitoring/slo-rules.yaml#L284)), a "stuck work"
+  alert for what the outbox SLO can't see: messages published but nobody consuming.
+- **One dashboard** ([`registration-journey-dashboard.yaml`](../k8s/monitoring/registration-journey-dashboard.yaml)):
+  alerts and budgets on top, then one row per layer: client, edge, backend, async, Kubernetes, logs.
+- **Alertmanager in the browser** at `alertmanager.cms.local` (an Ingress in the
+  kube-prometheus-stack values). Alerts go nowhere else: paging is out of scope.
+
+### 15.3 Why this way
+
+- **Hand-written rules, not an SLO tool** (Sloth, Pyrra generate the same rules from a short
+  spec). Writing them once by hand is how you learn what the tools generate; the ticket says so.
+- **Availability measured at members-service**, not at Traefik or in the browser. It's where
+  "registration" is defined, and the HTTP metric already exists. The cost: if members-service is
+  completely down, it records nothing, so the SLI says "no data", not "100% failing". Measuring
+  at the edge (Traefik) would catch that; the Postgres drill shows the case it does catch.
+- **The event SLO stops at NATS.** "Left the outbox" is what members-service controls. Delivery to
+  a consumer depends on the consumer, so it gets its own alert (`EventDeliveryStalled`) instead of
+  an SLO, until a consumer's delay matters to users (CMS-20's welcome email might make it one).
+- **Edge numbers from Traefik's access log**, not its metrics: Traefik's metrics are per router,
+  and the dashboard needs one path, `/members/new`.
+- **Deliberately not done:** paging (Slack, PagerDuty), a minimum-traffic guard on the alerts,
+  30-day retention (Prometheus keeps 2 days, so "budget left" covers 2 days), and SLOs for
+  events-service. Each is in ADR-0009's evolution table with its trigger.
+
+### 15.4 What setting it up taught
+
+| Problem | Lesson |
+| --- | --- |
+| The event SLO's rules returned nothing, with no error. The rule matched `le="30"`, but Prometheus 3 stores every histogram `le` as a float: `le="30.0"`. The latency rule's `le="0.5"` worked, which hid it | An empty result is not an error in PromQL, so a typo in a label value fails silently. Check what's stored (`count by (le) (…_bucket)`) before writing a rule, and test each rule on real data |
+| Names I assumed from docs were wrong twice: the OTel exporter here adds no unit suffix (`outbox_publish_delay_bucket`, not `…_seconds_bucket`), and the NATS exporter's metrics start with `nats_consumer_`, not `jetstream_consumer_` | Read the names off the real `/metrics` output (or `count by (__name__)` in Prometheus) before writing queries. Versions change naming |
+| First drill: events-service scaled to 0, 3 members archived, and the NATS lag stayed 0. The Pods were still in their `preStop` sleep (§7.8), and their consumers handled the messages on the way out | "Scaled to 0" isn't "stopped". Wait for `No resources found` before testing what happens without the service. The graceful-shutdown work from CMS-32 did exactly its job |
+| Right after 21 registrations, every SLI was empty or NaN | All the requests hit brand-new series between two scrapes, so `rate()` saw no increase (§9.8 again). SLIs need steady traffic; the drills use a registration loop |
+| The *Error budget remaining* panel kept flickering to "No data" | The budget rules ran every 5 minutes, and a query only looks back 5 minutes for a sample. A recording rule's interval must be well under the lookback: now 1 minute |
+| Alloy had silently stopped shipping Kubernetes events since the VM booted: its watcher timed out reaching the API server once and never retried. Pod logs were fine | A dashboard row can be empty because the *pipeline* broke, not because nothing happened. Check each source works before trusting "nothing to see" (and restart Alloy; observability.md troubleshooting) |
+| After the Postgres drill, the critical alert resolved within minutes, but the warning kept firing for half an hour | That's the design: the short window ends the critical alert quickly; the slow-burn warning remembers 30 minutes, because "this keeps happening" is its question |
+| `cluster-up.sh` started `minikube tunnel` and it exited at once: "Profile minikube not found". The VM's sudo is now sudo-rs, which ignores `sudo -E`, so minikube ran with root's HOME and found no cluster there | Don't rely on a flag to carry the environment through sudo; pass exactly what's needed (`sudo env HOME="$HOME" PATH="$PATH" …`). An OS upgrade can change a tool you never think about |
+| The reconciliation panel kept saying "1 still waiting" though the table had none. The OTel SDK keeps reporting the last value of an attribute set a gauge callback stops observing: once the last pending row was published, the `GROUP BY` had no "pending" group, so that series froze at 1 | A gauge must report 0 explicitly, not stop reporting. The relay now observes both states for every subject ([`outboxRelay.ts`](../packages/events/src/outboxRelay.ts)), with a test that reproduces the freeze |
+| *CPU used / limit* and *Memory used / limit* said "No data". On this minikube (Docker runtime), cAdvisor reports Pod-level cgroups only, without a `container` label, and the queries filtered on `container!=""` | Look at a metric's real labels before joining on them. The panels now divide per Pod |
+| A Loki *stat* panel showed "Value #A 40": submitted and completed added into one unnamed number | An instant Loki query returns a table, and the legend is lost. One range query per value over `[$__range]` keeps each name |
+| The first registrations after a deploy took ~930 ms (a cold Prisma connection) | A latency SLO sees cold starts. A few are fine (that's the 5% budget); every deploy burning budget would be a reason to warm up before Ready |
+
+---
+
+## 16. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -2424,15 +2552,27 @@ in parentheses (and the file it links) is where to look.
 - [ ] The scrubber once made every span batch fail. What did it redact, and what's the general lesson? (§14.4)
 - [ ] Why does every `unwrap` in the Frontend dashboard end with `| __error__=""`? (§14.4)
 
+**SLOs and business observability**
+
+- [ ] What's the difference between an SLI, an SLO and an SLA? Give our registration example of each. (§15.1)
+- [ ] The availability SLO is 99%. What is the error budget, and what does a burn rate of 14.4 mean in days? (§15.1)
+- [ ] Why alert on burn rate with two windows, and not on "any 5xx" or "5xx ratio above 1%"? (§15.1)
+- [ ] `members_registration_failures_total{reason}` and the HTTP 409 count say the same thing. Why keep both? (§15.1)
+- [ ] The registration counter and the outbox table disagree. Which do you trust, and why? (§15.1, §15.2)
+- [ ] Why may `reason` be a label, but `memberId` may not? (§15.1)
+- [ ] Every Pod reports the outbox gauges. Why `max()` and not `sum()` in the queries? (§15.2)
+- [ ] events-service is down: which alert fires, and why does the event SLO stay green? And if members-service is completely down, what does the availability SLI show? (§15.2, §15.3)
+
 ---
 
-## 16. Where to go next
+## 17. Where to go next
 
 All nine roadmap stages are done, and the member registration workflow is now usable from
 the browser (§5). **CMS-28** made logs from every Pod searchable in Grafana (§9.9), and **CMS-27**
 published `MemberRegistered` (§11.5). **CMS-29** followed one registration end to end as a
-trace (§13), and **CMS-30** started that trace in the visitor's browser (§14). The committed
-queue is SLOs (CMS-31), then **CMS-20** (Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
+trace (§13), and **CMS-30** started that trace in the visitor's browser (§14). **CMS-31** added
+business metrics, SLOs and burn-rate alerts (§15). The committed queue is **CMS-20**
+(Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
 contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
 Each one is now mostly a matter of applying patterns already learned. The most
 interesting next contexts are the ones that add a new kind of message flow:
@@ -2458,8 +2598,12 @@ Observability has natural next steps that wait for a real need (ADR-0009):
   a **click span** as the root (needs zone.js), **not trusting the browser's sampled flag**,
   **Web Vitals as Prometheus metrics** for long retention and alerts, private source-map
   upload for a closed-source app.
-- **Alerting**: `PrometheusRule`s (e.g. 5xx ratio > 1% for 5 min) routed by Alertmanager,
-  which is already installed. Then **SLOs**: "99% of requests under 100 ms", with error budgets.
+- ~~**Alerting and SLOs**~~: done in CMS-31 (§15). Next, each when a reason appears:
+  **paging** (an Alertmanager receiver: Slack, email) once someone is on call; a
+  **minimum-traffic guard** or synthetic registrations, so a quiet hour can't fire an alert
+  on 1 failure out of 3; **30-day retention** (or recording the long windows in a
+  long-term store) so "budget left" means the real period; an **end-to-end delivery SLO**
+  once a consumer's delay matters to users (CMS-20's welcome email).
 - ~~**Log aggregation**~~: done in CMS-28 (§9.9). Next for logs, when a reason appears:
   ~~`trace_id` in every log line~~ (done in CMS-29); alerts on log queries (Loki's ruler); and a separate one-replica Alloy for Kubernetes events
   once there's more than one node.

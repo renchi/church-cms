@@ -82,7 +82,7 @@ more components to run.
 | ---------------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | ~~Prometheus exporter only~~ Traces done (CMS-29, addendum below); metrics still pulled | Traces wanted / Events service + NATS live | OTLP → an OTel Collector → Tempo (done); metrics onto the Collector still deferred |
 | ~~Logs only via `kubectl logs`~~ Done (CMS-28, addendum below) | Need to search logs across Pods/services   | Loki + Grafana (done); trace IDs in log lines still deferred to tracing                        |
-| Dashboard only, no alert rules                 | Something must page or notify              | PrometheusRule alerts, routed by Alertmanager (already installed)                             |
+| ~~Dashboard only, no alert rules~~ Done (CMS-31, addendum below) | Something must page or notify              | PrometheusRule alerts, routed by Alertmanager (done: SLO burn-rate alerts; no paging receiver yet) |
 
 ---
 
@@ -298,3 +298,62 @@ controls the sampled flag.
 | Source maps served publicly | A closed-source frontend | Upload maps to the receiver at build time; stop serving them |
 | Web Vitals as Loki log lines, queried with `unwrap` | Long retention, or alerting on vitals | Convert to Prometheus histograms in Alloy |
 | One Alloy for logs and the receiver | Receiver load affects log shipping | A separate one-replica Alloy Deployment for Faro |
+
+---
+
+## Addendum (CMS-31, November 2026): business metrics, SLOs and burn-rate alerts
+
+**Status:** Accepted
+
+The row "Dashboard only, no alert rules → something must notify" has fired. The dashboards
+show HTTP and infrastructure numbers, but nothing says what the system is *doing*
+("12 registered, none stuck"), and nothing tells anyone when users are hurting. This addendum
+adds metrics in the domain's words, three SLOs, and alerts on their burn rate.
+
+### Decision
+
+- **Business metrics through the same OTel SDK and Prometheus exporter** as the RED metrics:
+  `members_registered_total`, `members_archived_total`,
+  `members_registration_failures_total{reason}` (recorded in members-service's API layer,
+  `src/api/metrics.ts`, keeping the application layer free of telemetry), and the messaging
+  metrics in `@cms/events` (`metrics.ts`): `outbox_published_total{subject}`,
+  `outbox_publish_delay` (histogram), `outbox_rows{subject,state}` and
+  `outbox_oldest_pending_age` (read from the outbox table on each scrape, so durable), and
+  `messages_consumed_total{subject,outcome}`. Labels have small fixed value sets only.
+- **NATS metrics** from the chart's `prometheus-nats-exporter` sidecar (`-jsz=all`) and a
+  PodMonitor: consumer lag (`nats_consumer_num_pending`), redeliveries, stream sizes.
+- **Three SLOs on registration**, measured at members-service: 99% not 5xx, 95% under
+  500 ms, 99% of `MemberRegistered` published from the outbox within 30 s; each over 30 days.
+- **Hand-written recording rules and multi-window burn-rate alerts** in one PrometheusRule
+  (`k8s/monitoring/slo-rules.yaml`): fast burn 14.4× over 1 h and 5 m (critical), slow burn
+  6× over 6 h and 30 m (warning), the Google SRE workbook's thresholds. Every alert has a
+  `runbook_url` into `docs/observability.md`. No SLO tool (Sloth, Pyrra): writing them by
+  hand is the learning goal.
+- **`EventDeliveryStalled`**, a non-SLO alert on consumer lag, because the event SLO stops at
+  NATS and can't see a consumer that has stopped.
+- **Alertmanager without a receiver**, reachable at `alertmanager.cms.local`. Paging is out
+  of scope.
+- **One "Registration journey" dashboard**, one row per layer (client, edge, backend, async,
+  Kubernetes, logs), with the alerts and error budgets on top.
+
+### Consequences
+
+**Good:** the system can say what it did, in business terms, and how much unreliability is
+left to spend. Alerts fire on user pain, quickly for outages and slowly for smouldering
+problems, and stop soon after a fix. The reconciliation panel shows the outbox (durable)
+next to the counters (observational).
+
+**Costs:** the outbox gauges query the database on every scrape, from every Pod. Prometheus
+keeps 2 days, so "budget remaining" covers 2 days, not 30. Low traffic makes ratios jumpy:
+1 failure in 3 registrations is a 33% error ratio. The availability SLI is blind to a
+members-service that is completely down (no requests are recorded at all).
+
+| Now (after this addendum) | Trigger | Then |
+| --- | --- | --- |
+| Alerts visible in Alertmanager only | Someone is on call | An Alertmanager receiver (email, Slack, PagerDuty) and routing by `severity` |
+| No minimum-traffic condition on the alerts | False alerts from a quiet period | `and` a minimum request rate, or synthetic registrations (a probe) |
+| 2-day retention, budget over 2 days | The 30-day budget must be real | Longer retention, or record the long windows into a long-term store |
+| SLI measured at members-service | An outage of members-service itself must count | Measure at the edge (Traefik), or add a synthetic probe |
+| Event SLO stops at NATS; consumer lag is a plain alert | A consumer's delay matters to users (CMS-20's welcome email) | An end-to-end delivery SLO, from `occurredAt` to the consumer's ack |
+| Outbox gauges query the table on each scrape | The outbox table grows large | Prune published rows (keep a summary), or keep counts in a small table |
+

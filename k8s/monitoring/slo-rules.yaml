@@ -1,0 +1,292 @@
+# SLOs for member registration, as Prometheus rules (CMS-31). Concepts: study-guide
+# §15; runbook: docs/observability.md §14; decision: ADR-0009 addendum (CMS-31).
+#
+#   kubectl apply -f k8s/monitoring/slo-rules.yaml      (scripts/cluster-up.sh does it)
+#
+# A PrometheusRule is a Prometheus Operator custom resource, like a ServiceMonitor:
+# the Operator finds it by the `release` label and loads it into Prometheus.
+# Check it arrived: Prometheus → Status → Rules, or Alerts.
+#
+# THE THREE SLOs (written down in docs/observability.md §14):
+#   1. availability  99% of registrations succeed: not a 5xx. A 409 duplicate or a
+#                    400 is the user's to fix, the system worked.
+#   2. latency       95% of registrations answer in under 500 ms.
+#   3. event         99% of MemberRegistered events leave the outbox in under 30 s.
+# Each is measured over 30 days. Prometheus here keeps only 2 days (retention in
+# kube-prometheus-stack-values.yaml), so the "budget remaining" numbers below cover
+# what it has; a real setup keeps 30+ days or records the long windows elsewhere.
+#
+# TWO KINDS OF RULE:
+#   - RECORDING rules compute a query every 30 s and store the answer as a new
+#     series (`record:` is its name). Alerts and dashboards then read a cheap,
+#     precomputed series instead of re-running the full query. Naming convention:
+#     level:metric:operations, e.g. sli:registration_errors:ratio_rate5m.
+#   - ALERTING rules fire when their `expr` returns anything, for at least `for`.
+#
+# WHY BURN RATE, NOT "ANY ERROR": a 99% SLO *allows* 1% failures, its ERROR BUDGET.
+# Alerting on every error pages someone for failures the SLO says are fine. The
+# BURN RATE says how fast the budget is being spent: 1 = exactly on budget (it
+# runs out at the end of the 30 days), 14.4 = 30 days' budget gone in ~2 days.
+#   burn rate = error ratio / (1 - SLO)        e.g. 0.144 / 0.01 = 14.4
+# Each alert checks a LONG window (is it significant?) AND a SHORT one (is it
+# still happening?), so it fires quickly and stops quickly once fixed. The
+# thresholds are the Google SRE workbook's ("Alerting on SLOs"):
+#   fast burn: 1h and 5m above 14.4×  → 2% of the 30-day budget in one hour
+#   slow burn: 6h and 30m above 6×    → 5% of the budget in six hours
+#
+# LOW TRAFFIC: a ratio of very few requests jumps around (1 failure out of 3 is
+# 33%). Real systems add a minimum-traffic condition or synthetic requests; here
+# the drills generate enough traffic on purpose (docs/observability.md exercises).
+#
+# Every alert carries `runbook_url`: what it means and the first three commands.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cms-slo-rules
+  namespace: monitoring
+  labels:
+    # The Operator only loads rules with this label (the chart's default ruleSelector).
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # ---- SLI recording rules -------------------------------------------------
+    # One series per window. The SLI (service level INDICATOR) is the measured
+    # ratio; the SLO (objective) is the target it's compared with.
+    - name: cms-slo-sli
+      interval: 30s
+      rules:
+        # SLI 1, availability: the share of POST /members that returned a 5xx.
+        # Measured at members-service (the HTTP histogram's _count is a request
+        # counter). `or vector(0)`: with no 5xx at all the numerator has no series,
+        # and "no data" divided by anything is no data, not 0.
+        # With no registrations at all, 0/0 = NaN: no alert, no budget spent.
+        - record: sli:registration_errors:ratio_rate5m
+          expr: |
+            (sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST", http_response_status_code=~"5.."}[5m])) or vector(0))
+            /
+            sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[5m]))
+        - record: sli:registration_errors:ratio_rate30m
+          expr: |
+            (sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST", http_response_status_code=~"5.."}[30m])) or vector(0))
+            /
+            sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[30m]))
+        - record: sli:registration_errors:ratio_rate1h
+          expr: |
+            (sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST", http_response_status_code=~"5.."}[1h])) or vector(0))
+            /
+            sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[1h]))
+        - record: sli:registration_errors:ratio_rate6h
+          expr: |
+            (sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST", http_response_status_code=~"5.."}[6h])) or vector(0))
+            /
+            sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[6h]))
+
+        # SLI 2, latency: the share of registrations SLOWER than 500 ms. A
+        # histogram bucket counts requests AT MOST that slow (le = "less or
+        # equal"), so fast = bucket{le="0.5"}, slow = 1 - fast/all. 0.5 must be
+        # one of the histogram's bucket edges (it is in the OTel default set).
+        - record: sli:registration_slow:ratio_rate5m
+          expr: |
+            1 - (
+              sum(rate(http_server_request_duration_bucket{job="members-service", http_route="/members", http_request_method="POST", le="0.5"}[5m]))
+              /
+              sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[5m]))
+            )
+        - record: sli:registration_slow:ratio_rate30m
+          expr: |
+            1 - (
+              sum(rate(http_server_request_duration_bucket{job="members-service", http_route="/members", http_request_method="POST", le="0.5"}[30m]))
+              /
+              sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[30m]))
+            )
+        - record: sli:registration_slow:ratio_rate1h
+          expr: |
+            1 - (
+              sum(rate(http_server_request_duration_bucket{job="members-service", http_route="/members", http_request_method="POST", le="0.5"}[1h]))
+              /
+              sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[1h]))
+            )
+        - record: sli:registration_slow:ratio_rate6h
+          expr: |
+            1 - (
+              sum(rate(http_server_request_duration_bucket{job="members-service", http_route="/members", http_request_method="POST", le="0.5"}[6h]))
+              /
+              sum(rate(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[6h]))
+            )
+
+        # SLI 3, event leaves the outbox: the share of MemberRegistered events that
+        # waited more than 30 s between being saved and being published
+        # (outbox_publish_delay, packages/events/src/metrics.ts; 30 is a bucket edge).
+        # Written le="30.0", not "30": Prometheus 3 stores every `le` as a float, so
+        # the exporter's le="30" arrives as le="30.0", and le="30" matches nothing,
+        # silently (found in CMS-31). le="0.5" above is the same either way.
+        # It measures the relay and NATS, not the consumers: a stopped consumer
+        # doesn't slow publishing. EventDeliveryStalled (below) watches that side.
+        - record: sli:event_publish_slow:ratio_rate5m
+          expr: |
+            1 - (
+              sum(rate(outbox_publish_delay_bucket{subject="cms.members.registered", le="30.0"}[5m]))
+              /
+              sum(rate(outbox_publish_delay_count{subject="cms.members.registered"}[5m]))
+            )
+        - record: sli:event_publish_slow:ratio_rate30m
+          expr: |
+            1 - (
+              sum(rate(outbox_publish_delay_bucket{subject="cms.members.registered", le="30.0"}[30m]))
+              /
+              sum(rate(outbox_publish_delay_count{subject="cms.members.registered"}[30m]))
+            )
+        - record: sli:event_publish_slow:ratio_rate1h
+          expr: |
+            1 - (
+              sum(rate(outbox_publish_delay_bucket{subject="cms.members.registered", le="30.0"}[1h]))
+              /
+              sum(rate(outbox_publish_delay_count{subject="cms.members.registered"}[1h]))
+            )
+        - record: sli:event_publish_slow:ratio_rate6h
+          expr: |
+            1 - (
+              sum(rate(outbox_publish_delay_bucket{subject="cms.members.registered", le="30.0"}[6h]))
+              /
+              sum(rate(outbox_publish_delay_count{subject="cms.members.registered"}[6h]))
+            )
+
+    # ---- Error budget remaining ----------------------------------------------
+    # 1 = untouched, 0 = spent, below 0 = the SLO is broken for this period.
+    #   remaining = 1 - (bad / all over the period) / (1 - SLO)
+    # Over [30d], which here means "over the 2 days Prometheus keeps" (see top).
+    # Evaluated every minute, not every 30 s: a 30-day range is the most expensive
+    # query here, and the answer barely moves. Not every 5 minutes either: a query
+    # only sees a sample from the last 5 minutes (Prometheus's lookback), so a
+    # series written every 5 minutes keeps disappearing from dashboards between
+    # evaluations (found in CMS-31: the budget panel flickered to "No data").
+    - name: cms-slo-budget
+      interval: 1m
+      rules:
+        - record: slo:registration_availability:error_budget_remaining
+          expr: |
+            1 - (
+              (sum(increase(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST", http_response_status_code=~"5.."}[30d])) or vector(0))
+              /
+              sum(increase(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[30d]))
+            ) / 0.01
+        - record: slo:registration_latency:error_budget_remaining
+          expr: |
+            1 - (
+              1 - sum(increase(http_server_request_duration_bucket{job="members-service", http_route="/members", http_request_method="POST", le="0.5"}[30d]))
+                  / sum(increase(http_server_request_duration_count{job="members-service", http_route="/members", http_request_method="POST"}[30d]))
+            ) / 0.05
+        - record: slo:event_publish:error_budget_remaining
+          expr: |
+            1 - (
+              1 - sum(increase(outbox_publish_delay_bucket{subject="cms.members.registered", le="30.0"}[30d]))
+                  / sum(increase(outbox_publish_delay_count{subject="cms.members.registered"}[30d]))
+            ) / 0.01
+
+    # ---- Alerts ---------------------------------------------------------------
+    # Two rules per SLO with the same alert name: `severity` tells them apart.
+    # critical = fast burn (act now), warning = slow burn (look today).
+    # Without a paging integration (out of scope) both just show in Alertmanager
+    # (http://alertmanager.cms.local) and on the Registration journey dashboard.
+    - name: cms-slo-alerts
+      rules:
+        - alert: RegistrationAvailabilityBurnRate
+          # 14.4 × the 1% budget = 14.4% of registrations failing, in both windows.
+          expr: |
+            sli:registration_errors:ratio_rate1h > (14.4 * 0.01)
+            and
+            sli:registration_errors:ratio_rate5m > (14.4 * 0.01)
+          # Must hold for 1 minute: ignores one unlucky evaluation.
+          for: 1m
+          labels:
+            severity: critical
+            slo: registration-availability
+          annotations:
+            summary: "Registrations are failing (5xx) fast enough to spend the month's error budget in ~2 days"
+            description: "{{ $value | humanizePercentage }} of POST /members returned 5xx over the last 5 minutes (SLO: 99% succeed)."
+            runbook_url: https://github.com/renchi/church-cms/blob/main/docs/observability.md#registrationavailabilityburnrate
+        - alert: RegistrationAvailabilityBurnRate
+          expr: |
+            sli:registration_errors:ratio_rate6h > (6 * 0.01)
+            and
+            sli:registration_errors:ratio_rate30m > (6 * 0.01)
+          for: 5m
+          labels:
+            severity: warning
+            slo: registration-availability
+          annotations:
+            summary: "Registrations are failing (5xx) slowly but steadily: 5% of the month's error budget in 6 hours"
+            description: "{{ $value | humanizePercentage }} of POST /members returned 5xx over the last 30 minutes (SLO: 99% succeed)."
+            runbook_url: https://github.com/renchi/church-cms/blob/main/docs/observability.md#registrationavailabilityburnrate
+
+        - alert: RegistrationLatencyBurnRate
+          # The budget is 5% slow requests, so 14.4× = 72% of registrations slow.
+          expr: |
+            sli:registration_slow:ratio_rate1h > (14.4 * 0.05)
+            and
+            sli:registration_slow:ratio_rate5m > (14.4 * 0.05)
+          for: 1m
+          labels:
+            severity: critical
+            slo: registration-latency
+          annotations:
+            summary: "Most registrations take longer than 500 ms"
+            description: "{{ $value | humanizePercentage }} of POST /members took over 500 ms in the last 5 minutes (SLO: 95% under 500 ms)."
+            runbook_url: https://github.com/renchi/church-cms/blob/main/docs/observability.md#registrationlatencyburnrate
+        - alert: RegistrationLatencyBurnRate
+          expr: |
+            sli:registration_slow:ratio_rate6h > (6 * 0.05)
+            and
+            sli:registration_slow:ratio_rate30m > (6 * 0.05)
+          for: 5m
+          labels:
+            severity: warning
+            slo: registration-latency
+          annotations:
+            summary: "Registrations are steadily slower than 500 ms"
+            description: "{{ $value | humanizePercentage }} of POST /members took over 500 ms in the last 30 minutes (SLO: 95% under 500 ms)."
+            runbook_url: https://github.com/renchi/church-cms/blob/main/docs/observability.md#registrationlatencyburnrate
+
+        - alert: EventPublishBurnRate
+          expr: |
+            sli:event_publish_slow:ratio_rate1h > (14.4 * 0.01)
+            and
+            sli:event_publish_slow:ratio_rate5m > (14.4 * 0.01)
+          for: 1m
+          labels:
+            severity: critical
+            slo: event-publish
+          annotations:
+            summary: "MemberRegistered events wait more than 30 s in the outbox"
+            description: "{{ $value | humanizePercentage }} of MemberRegistered events took over 30 s to leave the outbox in the last 5 minutes (SLO: 99% under 30 s)."
+            runbook_url: https://github.com/renchi/church-cms/blob/main/docs/observability.md#eventpublishburnrate
+        - alert: EventPublishBurnRate
+          expr: |
+            sli:event_publish_slow:ratio_rate6h > (6 * 0.01)
+            and
+            sli:event_publish_slow:ratio_rate30m > (6 * 0.01)
+          for: 5m
+          labels:
+            severity: warning
+            slo: event-publish
+          annotations:
+            summary: "MemberRegistered events are steadily slow to leave the outbox"
+            description: "{{ $value | humanizePercentage }} of MemberRegistered events took over 30 s to leave the outbox in the last 30 minutes (SLO: 99% under 30 s)."
+            runbook_url: https://github.com/renchi/church-cms/blob/main/docs/observability.md#eventpublishburnrate
+
+        # Not an SLO alert: a "stuck work" alert. Messages are waiting in a stream
+        # and the consumer that should read them isn't getting them. It catches
+        # what the outbox SLO can't see: publishing works, but nobody is
+        # consuming (the Pods are down, or the consumer loop died).
+        # nats_consumer_num_pending comes from the NATS exporter (k8s/nats-values.yaml).
+        # A consumer handles a message in milliseconds, so pending > 0 for
+        # 2 minutes means it isn't moving at all.
+        - alert: EventDeliveryStalled
+          expr: max by (stream_name, consumer_name) (nats_consumer_num_pending) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.consumer_name }} isn't consuming {{ $labels.stream_name }}: {{ $value }} messages waiting"
+            description: "The durable consumer {{ $labels.consumer_name }} has had undelivered messages on stream {{ $labels.stream_name }} for 2 minutes. The other context's view is falling behind (eventual consistency is not converging)."
+            runbook_url: https://github.com/renchi/church-cms/blob/main/docs/observability.md#eventdeliverystalled

@@ -45,7 +45,7 @@ function storeWith(row: OutboxRow): OutboxStore {
     fetchPending: async () => [row],
     markPublished: async () => {},
   };
-  return { runExclusive: async (work) => work(batch) };
+  return { runExclusive: async (work) => work(batch), stats: async () => ({ rows: [], oldestPendingAt: null }) };
 }
 
 function fakeMessage(headers: TraceHeaders): AckableMessage {
@@ -78,7 +78,7 @@ describe("outbox relay", () => {
   it("publishes inside a PRODUCER span that is a child of the stored traceparent, and sends its own context", async () => {
     const publish = vi.fn().mockResolvedValue(undefined);
     const relay = startOutboxRelay({
-      store: storeWith({ id: "row-1", subject: "cms.members.archived", payload: {}, traceparent: TRACEPARENT }),
+      store: storeWith({ id: "row-1", subject: "cms.members.archived", payload: {}, traceparent: TRACEPARENT, createdAt: new Date() }),
       publish,
       log,
       autoStart: false,
@@ -98,7 +98,7 @@ describe("outbox relay", () => {
 
   it("starts a new trace for a row written without tracing", async () => {
     const relay = startOutboxRelay({
-      store: storeWith({ id: "row-2", subject: "cms.members.archived", payload: {}, traceparent: null }),
+      store: storeWith({ id: "row-2", subject: "cms.members.archived", payload: {}, traceparent: null, createdAt: new Date() }),
       publish: vi.fn().mockResolvedValue(undefined),
       log,
       autoStart: false,

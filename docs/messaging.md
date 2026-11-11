@@ -100,6 +100,15 @@ kubectl exec -n nats deploy/nats-box -- nats consumer ls MEMBERS
 Both at 0 = the consumer is caught up. The same as JSON, for scripts:
 `nats consumer info MEMBERS events-service --json | jq '{num_pending, num_ack_pending}'`.
 
+**The same numbers over time, in Prometheus** (CMS-31): the NATS Pod runs an exporter
+sidecar ([`nats-values.yaml`](../k8s/nats-values.yaml), `promExporter`), so *Unprocessed*
+is `nats_consumer_num_pending{consumer_name="events-service", stream_name="MEMBERS"}` and
+*Ack Pending* is `nats_consumer_num_ack_pending`. They're graphed on the *Registration
+journey* dashboard (Async row), and `EventDeliveryStalled` fires when one stays above 0 for
+2 minutes ([observability.md §14](observability.md#14-slos-and-the-registration-journey)).
+The services add their own side: `outbox_rows`, `outbox_oldest_pending_age` and
+`messages_consumed_total{outcome}` on each Pod's `:9464/metrics`.
+
 Both services run **2 replicas**, and both replicas use the **same** durable consumer.
 JetStream then hands each message to **one** of them, like a work queue. That's why
 "two Pods" doesn't mean "handled twice".

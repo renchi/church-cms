@@ -1,0 +1,1505 @@
+# Grafana dashboard: one member registration, from the browser down to Kubernetes
+# (CMS-31). "What is the software doing right now?", in business terms.
+#
+# Rows, top to bottom, follow the request:
+#   (top)  alerts firing, error budgets left, burn rates (k8s/monitoring/slo-rules.yaml)
+#   1 Client      the browser: funnel events, JS errors, LCP (Faro → Loki, CMS-30)
+#   2 Edge        Traefik's access log for /members/new (Loki)
+#   3 Backend     members-service's business counters and latency with exemplars
+#   4 Async       outbox (from the table: durable) and NATS consumer lag; reconciliation
+#   5 Kubernetes  ready Pods, restarts, HPA, CPU/memory vs limits, Kubernetes events
+#   6 Logs        warnings and errors from every app
+# Reading it during an incident: docs/observability.md §14. Concepts: study-guide §15.
+#
+# Two data sources: Prometheus (metrics) and Loki (logs, browser data). Loki panels use
+# fixed windows like [1m]; Prometheus panels use $__rate_interval, which Grafana
+# sizes to the zoom level (always at least 4 scrapes, so rate() has enough points).
+# [$__range] = "the whole time picker range": the stat panels count totals over it.
+# Each panel's description (the ⓘ in Grafana) says what it shows and where the
+# numbers come from.
+#
+# Loaded by the Grafana sidecar like the other dashboards (grafana_dashboard: "1").
+#   kubectl apply -f k8s/monitoring/registration-journey-dashboard.yaml   (cluster-up.sh does)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cms-registration-journey-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  cms-registration-journey.json: |
+    {
+      "uid": "cms-registration-journey",
+      "title": "CMS — Registration journey",
+      "tags": [
+        "cms",
+        "slo",
+        "business"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "text",
+          "title": "How to read this",
+          "description": "",
+          "datasource": null,
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 10,
+            "h": 6
+          },
+          "targets": [],
+          "options": {
+            "mode": "markdown",
+            "content": "One member registration, top to bottom: the **browser** → **Traefik** → **members-service** → the **outbox and NATS** → **Kubernetes** under it all → the **logs**. In an incident, start with *Alerts firing*, then read down the rows until a number looks wrong: the first wrong row is usually closest to the cause. Runbook: `docs/observability.md` §14. Concepts (SLOs, burn rate, error budgets): study guide §15. Counters reset when a Pod restarts; `rate()`/`increase()` handle that. Outbox numbers come from the database (durable)."
+          }
+        },
+        {
+          "id": 2,
+          "type": "table",
+          "title": "Alerts firing",
+          "description": "Every alert Prometheus is firing right now: ours from k8s/monitoring/slo-rules.yaml, and kube-prometheus-stack's built-in ones. ALERTS is a series Prometheus writes for each pending or firing alert. Watchdog is left out: it fires all the time on purpose, to prove the alert pipeline works. Each alert's runbook_url (Alertmanager, or Prometheus → Alerts) links to what to do. Empty = all good.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 10,
+            "y": 0,
+            "w": 7,
+            "h": 6
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "ALERTS{alertstate=\"firing\", alertname!=\"Watchdog\"}",
+              "instant": true,
+              "range": false
+            }
+          ],
+          "transformations": [
+            {
+              "id": "labelsToFields",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Value": true,
+                  "__name__": true,
+                  "alertstate": true
+                }
+              }
+            }
+          ],
+          "options": {
+            "showHeader": true
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Error budget remaining",
+          "description": "How much of each SLO's error budget is left: 100% untouched, 0% spent, negative = the SLO is broken. Computed over [30d], which here means the 2 days Prometheus keeps (slo-rules.yaml). Recording rules slo:*:error_budget_remaining, refreshed every minute.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 17,
+            "y": 0,
+            "w": 7,
+            "h": 6
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "slo:registration_availability:error_budget_remaining",
+              "legendFormat": "availability (99% not 5xx)"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "slo:registration_latency:error_budget_remaining",
+              "legendFormat": "latency (95% < 500 ms)"
+            },
+            {
+              "refId": "C",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "slo:event_publish:error_budget_remaining",
+              "legendFormat": "event leaves outbox (99% < 30 s)"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": -1,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.25
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.5
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "value_and_name",
+            "orientation": "vertical"
+          }
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Burn rate (1h window)",
+          "description": "How fast each error budget is being spent: SLI error ratio ÷ budget. 1 = on track to spend exactly the month's budget; above 14.4 for an hour (and the last 5 minutes) fires the critical alert, above 6 for 6 hours the warning. The dashed line is 14.4.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 6,
+            "w": 24,
+            "h": 6
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sli:registration_errors:ratio_rate1h / 0.01",
+              "legendFormat": "availability"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sli:registration_slow:ratio_rate1h / 0.05",
+              "legendFormat": "latency"
+            },
+            {
+              "refId": "C",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sli:event_publish_slow:ratio_rate1h / 0.01",
+              "legendFormat": "event publish"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "thresholdsStyle": {
+                  "mode": "dashed"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 14.4
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 5,
+          "type": "row",
+          "title": "1 · Client: what the visitor's browser saw (Faro, Loki)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Registration funnel: submitted vs completed",
+          "description": "Faro custom events from the browser (apps/web/lib/rum/funnel.ts): `registration_submitted` when the form is sent, `registration_completed` when the 'Registered …' banner appears. The gap is what users felt: a refused form (duplicate email), an error, or giving up. A refused attempt that is fixed and re-sent counts as two submits. Browsers with an ad blocker or without JavaScript are missing.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 13,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "sum by (event_name) (count_over_time({app=\"web-browser\", kind=\"event\"} | logfmt | event_name=~\"registration_.*\" [1m]))",
+              "legendFormat": "{{event_name}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "Funnel over the selected time range",
+          "description": "The same events, totalled over the whole time picker range. completed ÷ submitted is the browser-side success rate. Two range queries rather than one instant query by event_name: a Loki instant query comes back as a table, and the stat panel would add both steps into one unnamed number.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 13,
+            "w": 4,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "sum(count_over_time({app=\"web-browser\", kind=\"event\"} | logfmt | event_name=\"registration_submitted\" [$__range]))",
+              "legendFormat": "submitted"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "sum(count_over_time({app=\"web-browser\", kind=\"event\"} | logfmt | event_name=\"registration_completed\" [$__range]))",
+              "legendFormat": "completed"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 0,
+              "noValue": "0"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Web server: registration outcome",
+          "description": "What the web Pod's Server Action logged (apps/web/app/members/new/actions.ts): 'registration succeeded', or 'registration failed' at warn (400/409, the user's to fix) or error (5xx or no answer, ours). Server-side, so it also counts browsers that Faro can't see.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 13,
+            "w": 6,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "sum by (msg, level) (count_over_time({app=\"web\"} |= \"registration\" | json | msg=~\"registration (succeeded|failed)\" [1m]))",
+              "legendFormat": "{{msg}} ({{level}})"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "/members/new: JS errors and LCP p75",
+          "description": "Browser errors on the registration page (count per minute), and its Largest Contentful Paint at p75 (right axis). From CMS-30's RUM data.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 18,
+            "y": 13,
+            "w": 6,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "sum(count_over_time({app=\"web-browser\", kind=\"exception\"} | logfmt | page_id=\"/members/new\" [1m]))",
+              "legendFormat": "JS errors / min"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "quantile_over_time(0.75, {app=\"web-browser\", kind=\"measurement\"} | logfmt | type=\"web-vitals\" | page_id=\"/members/new\" | unwrap lcp | __error__=\"\" [5m]) by (page_id)",
+              "legendFormat": "LCP p75 (ms)"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "LCP p75 (ms)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "ms"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 10,
+          "type": "row",
+          "title": "2 · Edge: Traefik, the door every request comes through (access logs, Loki)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 21,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "/members/new by method and status",
+          "description": "Traefik's access log for the registration page: GET = page loads, POST = form submissions (the Server Action posts to the page's own URL). DownstreamStatus is what the browser got. From logs, not Traefik's metrics: those are per router, not per path. `|= \"RequestPath\"` first skips Traefik's own non-JSON lines before `| json`.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 22,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "sum by (RequestMethod, DownstreamStatus) (count_over_time({app=\"traefik\"} |= \"RequestPath\" | json | RequestPath=~\"/members/new.*\" [1m]))",
+              "legendFormat": "{{RequestMethod}} {{DownstreamStatus}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "/members/new POST duration p95 at the edge",
+          "description": "Time from Traefik receiving the form submission to sending the answer, at p95. It includes web and members-service; compare with the backend p95 below to see where the time goes. Duration is in nanoseconds in the log, hence ÷ 1e6.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 22,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "quantile_over_time(0.95, {app=\"traefik\"} |= \"RequestPath\" | json | RequestPath=~\"/members/new.*\" | RequestMethod=\"POST\" | unwrap Duration | __error__=\"\" [5m]) by (RequestMethod) / 1000000",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 13,
+          "type": "row",
+          "title": "3 · Backend: members-service, in business terms (Prometheus)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 29,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Registrations per minute, and refusals by reason",
+          "description": "Business counters from members-service (src/api/metrics.ts): members_registered_total and members_registration_failures_total{reason}. duplicate_email = 409, invalid_input = 400 from a domain rule. ×60 turns per second into per minute.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(members_registered_total[$__rate_interval])) * 60",
+              "legendFormat": "registered"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (reason) (rate(members_registration_failures_total[$__rate_interval])) * 60",
+              "legendFormat": "refused: {{reason}}"
+            },
+            {
+              "refId": "C",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(members_archived_total[$__rate_interval])) * 60",
+              "legendFormat": "archived"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "In the selected time range",
+          "description": "increase() over the time picker range: how many, not how fast. Counters are per Pod and reset on restart; increase() adds the Pods up and handles the resets.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 30,
+            "w": 4,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(increase(members_registered_total[$__range]))",
+              "legendFormat": "registered",
+              "instant": true,
+              "range": false
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(increase(members_registration_failures_total{reason=\"duplicate_email\"}[$__range]))",
+              "legendFormat": "duplicate email",
+              "instant": true,
+              "range": false
+            },
+            {
+              "refId": "C",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(increase(members_registration_failures_total{reason=\"invalid_input\"}[$__range]))",
+              "legendFormat": "invalid input",
+              "instant": true,
+              "range": false
+            },
+            {
+              "refId": "D",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(increase(members_archived_total[$__range]))",
+              "legendFormat": "archived",
+              "instant": true,
+              "range": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "POST /members by status",
+          "description": "The HTTP view of the same requests: 201 registered, 409 duplicate, 400 invalid, 5xx = our failure (the availability SLO counts only these as bad).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 30,
+            "w": 6,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (http_response_status_code) (rate(http_server_request_duration_count{job=\"members-service\", http_route=\"/members\", http_request_method=\"POST\"}[$__rate_interval])) * 60",
+              "legendFormat": "{{http_response_status_code}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "POST /members p95, with exemplars",
+          "description": "Latency from the OTel Collector's span metrics (CMS-29), because only they carry EXEMPLARS: each dot is one real request's trace id. Hover a dot → View trace opens it in Tempo. The latency SLO itself uses the service's own histogram (slo-rules.yaml); the two agree closely.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 18,
+            "y": 30,
+            "w": 6,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{service_name=\"members-service\", span_kind=\"SPAN_KIND_SERVER\", span_name=\"POST /members\"}[$__rate_interval])))",
+              "legendFormat": "p95",
+              "exemplar": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 18,
+          "type": "row",
+          "title": "4 · Async: the outbox and NATS (eventual consistency)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 38,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Outbox: rows waiting, and the oldest one's age",
+          "description": "From the outbox TABLE on each scrape (durable, @cms/events metrics.ts). Every Pod reports the same table, so max(), never sum(). Waiting rows and a growing age = the relay can't publish (NATS down?). Normally 0 and ~0 s.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 39,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (job, subject) (outbox_rows{state=\"pending\"})",
+              "legendFormat": "{{job}} pending: {{subject}}"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (job) (outbox_oldest_pending_age)",
+              "legendFormat": "{{job}} oldest age (s)"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*oldest age.*"
+                },
+                "properties": [
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Outbox publish delay p99",
+          "description": "How long events waited between being saved and being published (outbox_publish_delay). The event SLO: 99% of MemberRegistered under 30 s. About 1 s normally (the relay polls every second).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 39,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.99, sum by (le, subject) (rate(outbox_publish_delay_bucket[$__rate_interval])))",
+              "legendFormat": "{{subject}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "NATS: consumer lag and redeliveries",
+          "description": "From the NATS exporter (k8s/nats-values.yaml). num_pending = messages in the stream not yet sent to that durable consumer: its LAG. It rises when the consuming service is down (EventDeliveryStalled fires after 2 minutes) and drains when it's back. Redelivered = sent more than once (a retry).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 39,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (consumer_name, stream_name) (nats_consumer_num_pending)",
+              "legendFormat": "lag: {{consumer_name}} ← {{stream_name}}"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (consumer_name) (nats_consumer_num_redelivered)",
+              "legendFormat": "redelivered: {{consumer_name}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Messages consumed, by outcome",
+          "description": "messages_consumed_total{subject, outcome} from both services' consumers (@cms/events consumer.ts). applied = changed something; duplicate = seen before (idempotency at work); member-not-found = attendance for an unknown member; rejected = can never be processed; retried = failed this time, NATS redelivers later.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 47,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (job, subject, outcome) (rate(messages_consumed_total[$__rate_interval])) * 60",
+              "legendFormat": "{{job}} {{subject}}: {{outcome}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 23,
+          "type": "stat",
+          "title": "Reconciliation: registrations vs MemberRegistered events",
+          "description": "Two sources that should agree, over the selected range. 'registered (metric)' is members-service's in-memory counter: observability, approximate, reset on restart. 'MemberRegistered saved (outbox table)' is the durable record: a row written in the SAME transaction as the member, so it exists if and only if the member does. 'published to NATS' and 'still waiting' split those rows. If metric and table disagree, trust the table: the outbox, not a metric or a log line, is the proof that something happened (study guide §15).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 47,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(increase(members_registered_total[$__range]))",
+              "legendFormat": "registered (metric)",
+              "instant": true,
+              "range": false
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(max by (state) (outbox_rows{job=\"members-service\", subject=\"cms.members.registered\"})) - sum(max by (state) (outbox_rows{job=\"members-service\", subject=\"cms.members.registered\"} offset $__range))",
+              "legendFormat": "MemberRegistered saved (outbox table)",
+              "instant": true,
+              "range": false
+            },
+            {
+              "refId": "C",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(increase(outbox_published_total{subject=\"cms.members.registered\"}[$__range]))",
+              "legendFormat": "published to NATS",
+              "instant": true,
+              "range": false
+            },
+            {
+              "refId": "D",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(outbox_rows{job=\"members-service\", subject=\"cms.members.registered\", state=\"pending\"}) or vector(0)",
+              "legendFormat": "still waiting now",
+              "instant": true,
+              "range": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "id": 24,
+          "type": "row",
+          "title": "5 · Kubernetes: what everything runs on (kube-state-metrics, cAdvisor, events)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 55,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 25,
+          "type": "timeseries",
+          "title": "Ready Pods per workload",
+          "description": "Pods passing their readiness probe, per Deployment (default namespace) and for NATS. 0 for members-postgres = every registration fails with a 5xx; 0 for events-service = NATS lag grows. kube-state-metrics reads these from the Kubernetes API.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 56,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_deployment_status_replicas_available{namespace=\"default\"}",
+              "legendFormat": "{{deployment}}"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_statefulset_status_replicas_ready{namespace=\"nats\", statefulset=\"nats\"}",
+              "legendFormat": "nats"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 26,
+          "type": "timeseries",
+          "title": "Container restarts (last 10 min)",
+          "description": "Restarts per Pod: a crash, an OOM kill, or a failed liveness probe. One restart is noise; a climbing line is a crash loop.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 56,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=~\"default|nats\"}[10m])) > 0",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "0 restarts",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 27,
+          "type": "timeseries",
+          "title": "HPA replicas",
+          "description": "The HorizontalPodAutoscaler's current and desired replica counts for the two services (min 2, max 5, target 70% CPU of the request).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 56,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"default\"}",
+              "legendFormat": "{{horizontalpodautoscaler}} current"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"default\"}",
+              "legendFormat": "{{horizontalpodautoscaler}} desired"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 28,
+          "type": "timeseries",
+          "title": "CPU used / limit",
+          "description": "Each Pod's CPU use as a share of its limit. At 100% the kernel throttles it: requests slow down but nothing crashes. The services' limit is 500m; Pods without a CPU limit (web, Postgres) don't appear. Per Pod, not per container: on this minikube (Docker runtime) cAdvisor only reports Pod-level cgroups, with no `container` label. Our Pods run one container each, so it's the same number.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 64,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"default\"}[5m])) / sum by (pod) (kube_pod_container_resource_limits{namespace=\"default\", resource=\"cpu\"})",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 29,
+          "type": "timeseries",
+          "title": "Memory used / limit",
+          "description": "Each Pod's working-set memory as a share of its limit. At 100% the container is OOM-killed and restarts (see the restarts panel). The working set is what the kernel counts against the limit. Per Pod, for the same cAdvisor reason as the CPU panel.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 64,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"default\"}) / sum by (pod) (kube_pod_container_resource_limits{namespace=\"default\", resource=\"memory\"})",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "id": 30,
+          "type": "logs",
+          "title": "Kubernetes events (warnings, kills, scaling)",
+          "description": "Kubernetes events, shipped to Loki by Alloy (job=\"kubernetes-events\"): Pods scheduled, killed, failing probes (Unhealthy), BackOff, OOMKilled, HPA rescales. Everything except routine Normal events like Pulled/Created/Started.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 64,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{job=\"kubernetes-events\"} | json | type=\"Warning\" or reason=~\"Killing|ScalingReplicaSet|SuccessfulRescale|SuccessfulDelete|SuccessfulCreate|OOMKilled\""
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending",
+            "enableLogDetails": true
+          }
+        },
+        {
+          "id": 31,
+          "type": "row",
+          "title": "6 · Logs: warnings and errors from every app",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 72,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 32,
+          "type": "logs",
+          "title": "Warnings and errors, all services",
+          "description": "Every warn/error/fatal line from web, members-service and events-service, newest first, plus any line that isn't JSON (a crash's stack trace). The cause of a 5xx above is usually here: open a line, and its trace_id links to the trace.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 73,
+            "w": 24,
+            "h": 10
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{app=~\"web|members-service|events-service\", container!=\"migrate\"} | json | level=~\"warn|error|fatal\" or __error__!=\"\""
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending",
+            "enableLogDetails": true
+          }
+        }
+      ]
+    }

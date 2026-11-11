@@ -75,6 +75,8 @@ export async function startMessaging(opts: {
         declineAssignments.execute({ messageId: msg.id, memberId: msg.data.memberId })
       );
       log.info({ messageId: msg.id, memberId: msg.data.memberId, ...result }, "member archived handled");
+      // Becomes the `outcome` label of messages_consumed_total (CMS-31): applied | duplicate.
+      return result.outcome;
     },
     log,
     onFailure,

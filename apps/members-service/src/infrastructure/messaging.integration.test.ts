@@ -128,6 +128,28 @@ describe("Messaging (integration)", () => {
       expect(published).toEqual(expectedOrder);
     });
 
+    // What the outbox metrics read on each scrape (CMS-31): the durable totals.
+    it("stats() counts rows by subject and state, and finds the oldest pending one", async () => {
+      const store = new PrismaOutboxStore(prisma);
+      expect(await store.stats()).toEqual({ rows: [], oldestPendingAt: null });
+
+      for (const name of ["A", "B", "C"]) {
+        await new RegisterMemberUseCase(repo).execute({ name, email: `${name}@example.com` });
+      }
+      const [first, second] = await prisma.outboxMessage.findMany({ orderBy: { createdAt: "asc" } });
+      await prisma.outboxMessage.update({ where: { id: first.id }, data: { publishedAt: new Date() } });
+
+      const stats = await store.stats();
+      expect(stats.rows).toEqual(
+        expect.arrayContaining([
+          { subject: "cms.members.registered", state: "published", count: 1 },
+          { subject: "cms.members.registered", state: "pending", count: 2 },
+        ])
+      );
+      expect(stats.rows).toHaveLength(2);
+      expect(stats.oldestPendingAt).toEqual(second.createdAt);
+    });
+
     it("registering a member writes exactly one thin MemberRegistered outbox row", async () => {
       const { id } = await new RegisterMemberUseCase(repo).execute({ name: "Alice", email: "alice@example.com" });
 
