@@ -1,0 +1,14 @@
+// Typechecks the test files too. tsconfig.json leaves them out on purpose, so
+// `tsc` (the build) doesn't put them in dist/, the package other services import.
+// But then nothing typechecked them: a wrong field in a test fixture passed lint,
+// typecheck and CI, and only the review caught it (CMS-31 retro). `pnpm typecheck`
+// runs both configs, and CI runs `pnpm -r typecheck`.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "exclude": ["node_modules", "dist"]
+}

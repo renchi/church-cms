@@ -25,7 +25,8 @@ pnpm --filter members-service test       # unit + integration
 scripts/cluster-up.sh                    # bring up / update the whole minikube stack, then smoke-test it
 scripts/cluster-up.sh --fresh            # delete the cluster first (wipes Postgres data)
 scripts/cluster-up.sh --no-sudo          # agents/CI: never prompt for sudo, only check tunnel + /etc/hosts
-scripts/check-docs.sh                    # broken doc links, moved line links, missing study-guide update (also runs in CI)
+scripts/check-docs.sh [--fix]            # broken doc links, moved line links (--fix rewrites them), missing study-guide update (also runs in CI)
+scripts/obs-query.sh prom|loki|tempo '<query>'   # ask Prometheus/Loki/Tempo from the terminal, no tunnel needed
 scripts/check-env.sh                     # every env var an app reads is set by its Helm chart (also runs in CI)
 scripts/watch-deploy.sh [sha]            # watch the Deploy run for main's newest commit (or <sha>)
 scripts/agent-status.sh show             # the ticket's status record: each workflow stage and whether it's running/done/stale
@@ -116,9 +117,8 @@ ADRs document deliberate "simple now, evolve later" decisions. When a business r
 | `RecurrenceRule` absent; recurring events are individual instances    | Recurrence scheduling is explicitly prioritised                              | 0004        |
 | One outbox relay batch at a time per service (advisory lock)          | One relay can't keep up, or polling latency/load matters                     | 0010        |
 | `MemberArchived`, `AttendanceRecorded` and a thin `MemberRegistered` cross the bus | A context needs another event, or a consumer needs `MemberRegistered` to carry more than `memberId` (adding fields is non-breaking) | 0010        |
-| Traces through an OTel Collector → Tempo (CMS-29), head-sampled 100%, starting in the browser (CMS-30, Faro → Alloy → Collector); metrics still pulled by Prometheus, logs via Alloy | Trace volume matters (→ ratio or tail sampling, and stop trusting the browser's sampled flag), or one pipeline for all signals is wanted | 0009        |
-| Three registration SLOs as hand-written recording rules + multi-window burn-rate alerts (CMS-31); Alertmanager has no receiver; Prometheus keeps 2 days | Someone is on call (→ a receiver), a 30-day budget must be real (→ retention), or a consumer's delay matters to users (→ an end-to-end delivery SLO, e.g. CMS-20) | 0009        |
-| The working session orchestrates read-only subagents (`reviewer`, `docs-auditor`); review runs on request | The pipeline must survive the session (→ Agent SDK orchestrator, CMS-36), or every PR should be reviewed (→ advisory CI agent, CMS-37) | 0011        |
+
+Infrastructure keeps the same kind of table in its ADR: observability (tracing, sampling, SLOs, alerting) in ADR-0009, agent orchestration in ADR-0011. Check it before changing either.
 
 ## ADR index
 

@@ -27,6 +27,12 @@ members-service Pod                         monitoring namespace
 Prerequisites: the cluster from [`k8s-local-dev.md`](k8s-local-dev.md) is running
 (minikube, Traefik, members-service), and `minikube tunnel` is open.
 
+> **From the terminal:** [`scripts/obs-query.sh`](../scripts/obs-query.sh) asks Prometheus, Loki
+> or Tempo directly, through the Kubernetes API server, so it works without the tunnel:
+> `scripts/obs-query.sh prom 'sum(members_registered_total)'`,
+> `scripts/obs-query.sh loki '{app="members-service"} | json | level="error"' 30m`,
+> `scripts/obs-query.sh tempo '{ status = error }'`, then `tempo-trace <id>` for one trace.
+
 > **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) runs steps 1–3, 7–8, 10–11 and 14 below (and the
 > whole k8s runbook), keeps `grafana.cms.local` in `/etc/hosts` up to date for step 4, and checks
 > steps 5, 8 and 11 for you. Read on to learn what it does.

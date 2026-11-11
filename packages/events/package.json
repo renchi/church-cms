@@ -19,7 +19,7 @@
     "build": "tsc",
     "prepare": "tsc",
     "lint": "eslint src",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:unit": "vitest run --exclude '**/*.integration.test.ts'"
   },

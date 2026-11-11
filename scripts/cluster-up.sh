@@ -394,6 +394,12 @@ if ! traefik_reachable; then
     sudo env HOME="$HOME" PATH="$PATH" bash -c 'nohup minikube tunnel >"$1" 2>&1 &' _ "$TUNNEL_LOG"
     if wait_for 60 "Traefik reachable through minikube tunnel" traefik_reachable; then
       ok "minikube tunnel started (log: $TUNNEL_LOG; stop it with: sudo pkill -f 'minikube tunnel')"
+    else
+      # The tunnel runs in the background, so its own error never reaches this
+      # terminal. Show it: in CMS-31 it was "Profile minikube not found" (sudo-rs
+      # ignoring -E), and the message below only said "not running".
+      warn "minikube tunnel didn't come up. The end of its log ($TUNNEL_LOG):"
+      tail -n 5 "$TUNNEL_LOG" 2>/dev/null | sed 's/^/        /' || true
     fi
   fi
 fi
@@ -538,6 +544,26 @@ if wait_for 60 "members-service logs in Loki" loki_has_logs; then
 else
   smoke_ok=false
   fail "no members-service logs in Loki: check kubectl -n monitoring logs ds/alloy (docs/observability.md troubleshooting)"
+fi
+
+# Kubernetes events take a second path through Alloy (an API watcher, not log
+# files), and it can die on its own: after a VM boot it timed out reaching the API
+# server once and never retried, while Pod logs kept flowing (CMS-31). Any cluster
+# has some events in an hour, and a deploy creates them, so none at all means the
+# watcher is dead. A warning, not a failure: a cluster left idle for an hour has none.
+loki_has_k8s_events() {
+  curl -s -G 'http://localhost:3100/loki/api/v1/query_range' \
+    --data-urlencode 'query={job="kubernetes-events"}' \
+    --data-urlencode "start=$(( $(date +%s) - 3600 ))000000000" \
+    --data-urlencode 'limit=1' \
+    | jq -e '[.data.result[].values[]] | length >= 1'
+}
+if loki_has_k8s_events >/dev/null 2>&1; then
+  ok "Loki has Kubernetes events (Alloy's event watcher works)"
+else
+  warn "no Kubernetes events in Loki for an hour: Alloy's event watcher may have died at boot."
+  warn "Check: kubectl -n monitoring logs ds/alloy -c alloy | grep kubernetes_events"
+  warn "Fix:   kubectl -n monitoring rollout restart ds/alloy   (docs/observability.md troubleshooting)"
 fi
 
 # The whole trace path in one check: send members-service one request carrying
