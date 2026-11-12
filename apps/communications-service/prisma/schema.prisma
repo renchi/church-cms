@@ -1,0 +1,37 @@
+generator client {
+  provider = "prisma-client-js"
+  // Into THIS service's folder, not the shared node_modules: pnpm keeps one
+  // @prisma/client for the whole monorepo, so with the default output each
+  // service's `prisma generate` would overwrite the others' client (see the same
+  // comment in apps/events-service/prisma/schema.prisma). Git-ignored.
+  output   = "../generated/client"
+}
+
+// The Communications context's OWN database (ADR-0008: one Postgres per service).
+// It holds no person data: no names, no email addresses. Communications asks
+// Members for those at the moment it sends (the recipient resolver, ADR-0005), so
+// `memberId` below is a plain string, with no foreign key into another database.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// The WelcomeEmail aggregate (src/domain/WelcomeEmail.ts): what Communications
+// decided for one member's welcome email.
+model WelcomeEmail {
+  // One row per member, EVER: the rule "at most one welcome email per member" is
+  // enforced here, by the database, and not only by message ids. A second
+  // MemberRegistered for the same member (a replay, an outbox bug) can't create a
+  // second row, so it can't lead to a second email (ADR-0005's CMS-20 addendum).
+  memberId  String   @id
+  status    String // "sent" | "skipped"
+  decidedAt DateTime
+}
+
+// Message ids this service has already processed (ADR-0010). JetStream delivers
+// at least once; UnitOfWork.runOnce records the id in the same transaction as the
+// WelcomeEmail row, so a redelivered message changes nothing.
+model ProcessedMessage {
+  id          String   @id
+  processedAt DateTime @default(now())
+}

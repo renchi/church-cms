@@ -18,6 +18,10 @@ import {
 } from "@nats-io/jetstream";
 import type { TraceHeaders } from "./tracing.js";
 
+// Re-exported so a service can pick a deliver policy (ensureConsumer below)
+// without depending on the NATS client itself: NATS stays this package's detail.
+export { DeliverPolicy };
+
 // The server answers a lookup for a missing stream or consumer with an API
 // error carrying a numeric code. Anything else (no connection, no permission)
 // is a real failure and must propagate.
@@ -78,7 +82,24 @@ export async function ensureStream(
 // one that was down receives everything it missed: that is replay.
 export async function ensureConsumer(
   jsm: JetStreamManager,
-  opts: { stream: string; durable: string; filterSubject: string }
+  opts: {
+    stream: string;
+    durable: string;
+    filterSubject: string;
+    // Where a NEW durable consumer starts reading (CMS-20):
+    //   All (default) — from the oldest message the stream still holds. The
+    //                   stream keeps 7 days (max_age), so a new consumer first
+    //                   works through up to a week of history.
+    //   New           — only messages published after the consumer is created.
+    //                   Communications uses it: members who registered before it
+    //                   existed get no (very) late welcome email.
+    // Only applied when the consumer is CREATED. On every later start the durable
+    // consumer resumes from where it stopped, whatever this says, so a restart
+    // or a deploy never skips or replays messages. (Delete the durable consumer
+    // and it's created again with this policy: whatever was published in between
+    // is then skipped by New, or replayed by All.)
+    deliverPolicy?: DeliverPolicy;
+  }
 ): Promise<void> {
   const config = {
     // Only messages on this subject. The stream may hold others.
@@ -101,9 +122,9 @@ export async function ensureConsumer(
     if (!isApiError(err, JetStreamApiCodes.ConsumerNotFound)) throw err;
     await jsm.consumers.add(opts.stream, {
       durable_name: opts.durable,
-      // A brand-new consumer starts from the first message in the stream.
-      // Fixed at creation, so it isn't in the update config above.
-      deliver_policy: DeliverPolicy.All,
+      // Where a brand-new consumer starts (see deliverPolicy above). Fixed at
+      // creation, so it isn't in the update config.
+      deliver_policy: opts.deliverPolicy ?? DeliverPolicy.All,
       ...config,
     });
   }

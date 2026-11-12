@@ -1,0 +1,7 @@
+apiVersion: v2
+name: communications-service
+description: Church CMS Communications Service (welcome emails)
+type: application
+version: 0.1.0        # chart version — bump this when you change the chart
+appVersion: "1.0.0"   # your app's version — informational only
+

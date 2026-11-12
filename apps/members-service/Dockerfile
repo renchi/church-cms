@@ -53,9 +53,10 @@ WORKDIR /repo
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 # pnpm validates the lockfile against every workspace package (apps/*), so every
 # app's manifest is copied, not just this one. SAME lines in the SAME order in all
-# three Dockerfiles (members-service, events-service, web), from FROM down to
+# four Dockerfiles (members, events, communications, web), from FROM down to
 # "pnpm install": identical steps make an identical install layer, which the three
-# builds then share as ONE cache entry (~930 MB) instead of three (CMS-33).
+# builds then share as ONE cache entry (~930 MB) instead of one per app (CMS-33).
+COPY apps/communications-service/package.json ./apps/communications-service/package.json
 COPY apps/events-service/package.json  ./apps/events-service/package.json
 COPY apps/members-service/package.json ./apps/members-service/package.json
 COPY apps/web/package.json             ./apps/web/package.json

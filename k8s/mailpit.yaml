@@ -1,0 +1,102 @@
+# Mailpit: a mail server for testing (CMS-20). It accepts every email that
+# communications-service sends over SMTP and keeps it in a web inbox, instead of
+# delivering it. Nobody real ever gets mail from this cluster.
+#
+#   kubectl apply -f k8s/mailpit.yaml          (scripts/cluster-up.sh does it)
+#   http://mail.cms.local                       the inbox (needs the tunnel + /etc/hosts entry)
+#   http://mail.cms.local/api/v1/messages       the same inbox as JSON
+#
+# A cluster add-on like NATS: installed once, in its own namespace, not by
+# deploy.yml. A plain manifest rather than a Helm chart, because it's one
+# container with nothing to configure. Runbook: docs/messaging.md §5.
+#
+# Emails live in memory: restarting the Pod empties the inbox. That's fine for a
+# test inbox, and keeps it from growing forever.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mailpit
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailpit
+  namespace: mailpit
+  labels:
+    app.kubernetes.io/name: mailpit
+spec:
+  replicas: 1 # one inbox; two Pods would each hold half of the emails
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mailpit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mailpit
+    spec:
+      containers:
+        - name: mailpit
+          # Pinned, and the same tag as docker-compose.yml and the integration
+          # test (apps/communications-service/src/infrastructure/SmtpEmailSender.integration.test.ts).
+          image: axllent/mailpit:v1.32.0
+          env:
+            # Keep at most this many emails; the oldest go first.
+            - name: MP_MAX_MESSAGES
+              value: "500"
+          ports:
+            - name: smtp
+              containerPort: 1025
+            - name: http
+              containerPort: 8025
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+---
+# communications-service sends to mailpit.mailpit.svc.cluster.local:1025
+# (charts/communications-service values: config.smtpHost / smtpPort).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  namespace: mailpit
+spec:
+  selector:
+    app.kubernetes.io/name: mailpit
+  ports:
+    - name: smtp
+      port: 1025
+      targetPort: smtp
+    - name: http
+      port: 8025
+      targetPort: http
+---
+# The inbox in your browser, through Traefik like cms.local and grafana.cms.local.
+# Only the web UI (8025): SMTP stays inside the cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mailpit
+  namespace: mailpit
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: mail.cms.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mailpit
+                port:
+                  name: http

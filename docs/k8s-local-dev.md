@@ -167,6 +167,9 @@ docker build -f apps/members-service/Dockerfile -t members-service:$TAG .
 # Build events-service
 docker build -f apps/events-service/Dockerfile -t events-service:$TAG .
 
+# Build communications-service (CMS-20)
+docker build -f apps/communications-service/Dockerfile -t communications-service:$TAG .
+
 # Build web frontend
 docker build -f apps/web/Dockerfile -t church-cms-web:$TAG .
 ```
@@ -193,21 +196,23 @@ docker images | grep -E "members-service|events-service|church-cms-web"
 ## 5. Deploy Postgres
 
 Postgres runs as a plain Kubernetes Deployment (not via Helm — it's infrastructure, not the app).
-There are **two**, one per service (ADR-0008): `members-postgres` and `events-postgres`.
-They are separate Pods with separate volumes, so neither service can read the other's
-tables, and one database going down doesn't take the other service with it.
+There is **one per service** (ADR-0008): `members-postgres`, `events-postgres` and, since
+CMS-20, `communications-postgres`. They are separate Pods with separate volumes, so no
+service can read another's tables, and one database going down doesn't take the other
+services with it.
 
 ```bash
-kubectl apply -f k8s/postgres.yaml -f k8s/events-postgres.yaml
+kubectl apply -f k8s/postgres.yaml -f k8s/events-postgres.yaml -f k8s/communications-postgres.yaml
 ```
 
-Wait for both Pods to reach Running:
+Wait for all three Pods to reach Running:
 
 ```bash
-kubectl get pods -l 'app in (members-postgres, events-postgres)' --watch
-# events-postgres-xxx    1/1   Running   0   30s
-# members-postgres-xxx   1/1   Running   0   30s
-# Press Ctrl+C when both are Running
+kubectl get pods -l 'app in (members-postgres, events-postgres, communications-postgres)' --watch
+# communications-postgres-xxx   1/1   Running   0   30s
+# events-postgres-xxx           1/1   Running   0   30s
+# members-postgres-xxx          1/1   Running   0   30s
+# Press Ctrl+C when all three are Running
 ```
 
 > **If the Pod stays Pending:** the PersistentVolumeClaim may still be provisioning. Run `kubectl get pvc` and wait for `STATUS` to show `Bound`, then the Pod will start automatically.
@@ -349,6 +354,34 @@ The full endpoint list is in [`events-service-ddd.md`](events-service-ddd.md) §
 > for the `/etc/hosts` entry.
 
 ---
+
+## 7c. Deploy Communications service
+
+communications-service (CMS-20) sends a welcome email when a member registers. Its chart
+is a copy of the events one (ports 3003 and 9466, Ingress path `/api/communications`),
+plus `config` keys for where it finds Members and where it sends email. It needs two
+things running first: its Postgres (§5) and Mailpit, the test mail server
+([`messaging.md` §5](messaging.md#5-following-a-registration-to-the-inbox-cms-20)).
+
+```bash
+kubectl apply -f k8s/mailpit.yaml
+helm upgrade --install communications-service ./charts/communications-service \
+  --set image.repository=communications-service \
+  --set image.tag="${TAG:?run the TAG= line from §4 first}" \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true \
+  --set metrics.serviceMonitor.enabled=true \
+  --wait --timeout 4m
+# STATUS: deployed
+
+curl -s http://cms.local/api/communications/health
+# {"status":"ok"}
+```
+
+It has no business API: its work starts from NATS, not HTTP. If a Pod is in
+CrashLoopBackOff, its log names the missing setting (`SMTP_HOST is not set`): every
+`config` key in `values.yaml` is required. To see it work, follow
+[`messaging.md` §5](messaging.md#5-following-a-registration-to-the-inbox-cms-20).
 
 ## 8. Deploy web frontend
 

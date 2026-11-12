@@ -1,0 +1,61 @@
+# Postgres for communications-service: its OWN database server (ADR-0008, one
+# Postgres per service), a copy of k8s/events-postgres.yaml with the names changed.
+# It stores welcome-email decisions and processed message ids, and no person data.
+#
+#   kubectl apply -f k8s/communications-postgres.yaml   (scripts/cluster-up.sh does it)
+#
+# Apply it BEFORE the first deploy of communications-service: the chart's migrate
+# init container needs the database to exist, and deploy.yml only runs Helm.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: communications-postgres-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: communications-postgres
+spec:
+  selector:
+    matchLabels:
+      app: communications-postgres
+  template:
+    metadata:
+      labels:
+        app: communications-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_DB
+              value: communications_db
+            - name: POSTGRES_USER
+              value: cms_user
+            - name: POSTGRES_PASSWORD
+              value: cms_password
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: communications-postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: communications-postgres
+spec:
+  selector:
+    app: communications-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

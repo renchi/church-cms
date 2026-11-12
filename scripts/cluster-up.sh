@@ -41,7 +41,7 @@ MINIKUBE_CPUS=4
 # daemon (`minikube docker-env`, §4), which only exists with the docker runtime.
 # minikube v1.39+ defaults to containerd, which would break that step.
 MINIKUBE_RUNTIME=docker
-HOSTNAMES=(cms.local traefik.cms.local grafana.cms.local alertmanager.cms.local)
+HOSTNAMES=(cms.local traefik.cms.local grafana.cms.local alertmanager.cms.local mail.cms.local)
 HOSTS_FILE=/etc/hosts
 TUNNEL_LOG=/tmp/minikube-tunnel.log
 
@@ -211,10 +211,11 @@ step "observability §14" "SLO rules, burn-rate alerts and the Registration jour
 kubectl apply -f k8s/monitoring/slo-rules.yaml -f k8s/monitoring/registration-journey-dashboard.yaml
 
 # --- 5. Postgres -------------------------------------------------------------
-step "k8s-local-dev §5" "Postgres for members-service and events-service (one each, ADR-0008)"
-kubectl apply -f k8s/postgres.yaml -f k8s/events-postgres.yaml
+step "k8s-local-dev §5" "Postgres for members-service, events-service and communications-service (one each, ADR-0008)"
+kubectl apply -f k8s/postgres.yaml -f k8s/events-postgres.yaml -f k8s/communications-postgres.yaml
 kubectl rollout status deployment/members-postgres --timeout=3m
 kubectl rollout status deployment/events-postgres --timeout=3m
+kubectl rollout status deployment/communications-postgres --timeout=3m
 
 # --- NATS --------------------------------------------------------------------
 # Before the apps, so they find it on their first connection attempt (they'd
@@ -227,6 +228,13 @@ helm_quiet upgrade --install nats nats/nats \
   --wait --timeout 4m
 ok "NATS ready"
 
+# --- Mailpit (CMS-20) -----------------------------------------------------------
+# The test mail server communications-service sends welcome emails to. Before the
+# apps, like NATS: a send that fails is retried, but there's no reason to make it.
+step "messaging §5" "Mailpit, the test inbox at http://mail.cms.local"
+kubectl apply -f k8s/mailpit.yaml
+kubectl -n mailpit rollout status deployment/mailpit --timeout=3m
+
 # --- 4. Images ---------------------------------------------------------------
 # Build straight into minikube's own Docker daemon, so the cluster can use the
 # images without a registry (that's why the charts get pullPolicy=Never below).
@@ -238,7 +246,7 @@ ok "NATS ready"
 # that changes whenever the code changes makes the spec change too, so Helm rolls
 # the Pods. Same code → same tag → nothing restarts (still idempotent).
 # The deploy pipeline does the same thing with ghcr.io/…:<sha> (docs/ci-cd.md).
-IMAGES=(members-service events-service church-cms-web)
+IMAGES=(members-service events-service communications-service church-cms-web)
 step "k8s-local-dev §4" "Docker images inside minikube"
 eval "$(minikube docker-env)"
 if $SKIP_BUILD; then
@@ -267,8 +275,9 @@ else
   fi
   docker build -f apps/members-service/Dockerfile -t "members-service:$IMAGE_TAG" .
   docker build -f apps/events-service/Dockerfile -t "events-service:$IMAGE_TAG" .
+  docker build -f apps/communications-service/Dockerfile -t "communications-service:$IMAGE_TAG" .
   docker build -f apps/web/Dockerfile -t "church-cms-web:$IMAGE_TAG" .
-  ok "built members-service, events-service and church-cms-web as :$IMAGE_TAG"
+  ok "built members-service, events-service, communications-service and church-cms-web as :$IMAGE_TAG"
 fi
 
 # --- 7–8. Apps ---------------------------------------------------------------
@@ -290,6 +299,18 @@ helm_quiet upgrade --install members-service ./charts/members-service \
 step "k8s-local-dev §7b" "events-service (Helm)"
 helm_quiet upgrade --install events-service ./charts/events-service \
   --set image.repository=events-service \
+  --set image.tag="$IMAGE_TAG" \
+  --set image.pullPolicy=Never \
+  --set ingress.enabled=true \
+  --set tracing.otlpEndpoint="$OTLP_ENDPOINT" \
+  --set metrics.serviceMonitor.enabled=true \
+  --wait --timeout 4m
+
+# communications-service (CMS-20): the same flags again. Its config (Members' URL,
+# the Mailpit address, the sender) has working defaults in its values.yaml.
+step "k8s-local-dev §7c" "communications-service (Helm)"
+helm_quiet upgrade --install communications-service ./charts/communications-service \
+  --set image.repository=communications-service \
   --set image.tag="$IMAGE_TAG" \
   --set image.pullPolicy=Never \
   --set ingress.enabled=true \
@@ -333,7 +354,7 @@ done
 [[ -z "$stale" ]] || warn "old Pods still running after 60s: $(cut -d' ' -f1 <<<"$stale" | xargs)"
 # Same script as Deploy's cleanup, keeping 1: only the build Helm just deployed.
 # (Locally a rollback is a rebuild, so there's no rollback image worth keeping.)
-releases=(members-service events-service web)   # same order as IMAGES
+releases=(members-service events-service communications-service web)   # same order as IMAGES
 for i in "${!IMAGES[@]}"; do
   scripts/prune-deploy-images.sh "${releases[$i]}" "${IMAGES[$i]}" 1 >/dev/null \
     || warn "couldn't clean up old ${IMAGES[$i]} images (disk may fill; see docs/ci-cd.md)"
@@ -449,7 +470,7 @@ step "smoke test" "Is everything actually working?"
 smoke_ok=true
 # Are the Pods running the images we just built? (The stale-image check, §4.)
 # Deployments are named <release>-<chart> by the charts (e.g. members-service-members-service).
-for deploy in members-service-members-service events-service-events-service web-web; do
+for deploy in members-service-members-service events-service-events-service communications-service-communications-service web-web; do
   running=$(kubectl get deploy "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null \
     || echo "nothing (Deployment not found)")
   if [[ "$running" == *":$IMAGE_TAG" ]]; then
@@ -459,14 +480,14 @@ for deploy in members-service-members-service events-service-events-service web-
   fi
 done
 if $network_ok; then
-  for svc in members events; do
+  for svc in members events communications; do
     if [[ "$(curl -s -m 5 "http://cms.local/api/$svc/health")" == '{"status":"ok"}' ]]; then
       ok "$svc API: http://cms.local/api/$svc/health → {\"status\":\"ok\"}"
     else
       smoke_ok=false; fail "$svc API health check failed"
     fi
   done
-  for url in http://cms.local/ http://grafana.cms.local/login; do
+  for url in http://cms.local/ http://grafana.cms.local/login http://mail.cms.local/; do
     code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$url" || true)
     if [[ "$code" == 200 ]]; then
       ok "$url → 200"
@@ -520,7 +541,7 @@ targets_up() {
     | jq -e --arg job "$1" '[.data.activeTargets[] | select(.labels.job == $job and .health == "up")] | length >= 2'
 }
 # A new ServiceMonitor takes the Operator ~1 minute to pick up (observability.md troubleshooting).
-for job in members-service events-service; do
+for job in members-service events-service communications-service; do
   if wait_for 180 "$job targets up in Prometheus" targets_up "$job"; then
     ok "Prometheus scrapes $job (2 pods up)"
   else
@@ -586,12 +607,12 @@ else
 fi
 
 # Each service creates its durable consumer on the OTHER service's stream when it
-# connects (ADR-0010). Both existing means both services reached NATS.
+# connects (ADR-0010). All three existing means all three services reached NATS.
 # consumer_exists <stream> <durable>
 consumer_exists() {
   kubectl exec -n nats deploy/nats-box -- nats consumer info "$1" "$2" >/dev/null 2>&1
 }
-for pair in "MEMBERS events-service" "EVENTS members-service"; do
+for pair in "MEMBERS events-service" "EVENTS members-service" "MEMBERS communications-service"; do
   read -r stream durable <<<"$pair"
   if wait_for 60 "consumer $durable on stream $stream" consumer_exists "$stream" "$durable"; then
     ok "NATS: $durable consumes from $stream"
@@ -606,6 +627,7 @@ cat <<EOF
     App                http://cms.local
     Members API        http://cms.local/api/members/members
     Events API         http://cms.local/api/events/events
+    Mail inbox         http://mail.cms.local   (welcome emails, Mailpit)
     Traefik dashboard  http://traefik.cms.local/dashboard/
     Grafana            http://grafana.cms.local/d/cms-service-red   (user: admin)
     Grafana password   kubectl get secret -n monitoring -l app.kubernetes.io/component=admin-secret \\

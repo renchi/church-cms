@@ -48,6 +48,15 @@ They are not cancelled — they remain valuable, but building them now is mostly
 **repetition** that does not advance the learning goals. They are tagged `deferred`
 in Linear.
 
+> **Update (CMS-20, November 2026):** Communications is now Active, as a single
+> slice: the welcome email a member gets on registering. The Members + Events slice
+> runs on Kubernetes with events flowing through NATS, which was the condition above,
+> and the slice teaches new things rather than repeating: the first consumer of
+> `MemberRegistered` (a thin event, so a lookup at send time), a deliver policy, and
+> a side effect that can't be rolled back (an email). Its announcements, prayer
+> requests and campaigns stay deferred: they need Identity (roles) and Groups
+> (recipient groups). Finance, Groups and Identity remain deferred.
+
 ### 3. Add observability (new requirement)
 
 The original plan had no observability, which leaves a hole in the Kubernetes and

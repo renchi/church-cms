@@ -50,6 +50,7 @@ jobs:
       # a custom `output`), so they don't overwrite each other.
       - run: pnpm --filter members-service exec prisma generate
       - run: pnpm --filter events-service exec prisma generate
+      - run: pnpm --filter communications-service exec prisma generate
       - run: pnpm lint
       # Broken doc links (missing files, line links past the end of a file) fail
       # the build like a lint error. The learning docs are a deliverable here.
@@ -111,6 +112,9 @@ jobs:
       # the 70% thresholds in vitest.config.ts.
       - run: pnpm --filter members-service test:coverage
       - run: pnpm --filter events-service test:coverage
+      # communications-service's integration tests also start Mailpit (the test
+      # mail server) in Docker, next to Postgres.
+      - run: pnpm --filter communications-service test:coverage
       # The shared @cms/events package: its integration test runs a real NATS
       # server in Docker (ADR-0010: dedupe, durable consumers, replay).
       - run: pnpm --filter @cms/events test
