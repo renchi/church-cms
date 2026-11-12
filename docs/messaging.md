@@ -5,8 +5,9 @@ on minikube, and how to watch a message travel from one database to the other.
 **Concepts first?** Read [study-guide §11](study-guide.md#11-async-messaging-with-nats-roadmap-stage-9).
 **Why this design?** See [ADR-0010](adr/0010-async-messaging-nats.md).
 
-Two flows, one in each direction. A third event, `MemberRegistered` (CMS-27), is also
-published to `MEMBERS` but has no consumer until Communications exists (CMS-20, exercise 6):
+Two flows between members-service and events-service, one in each direction. A third,
+`MemberRegistered` (CMS-27), goes to communications-service, which sends a welcome email
+(CMS-20, §5):
 
 ```
 members-service                         NATS (namespace nats)                   events-service
@@ -185,6 +186,72 @@ curl -s -H "$H" $B/members/members/$M2 | jq '{name, attendanceCount, lastAttende
 # { "name": "Attie Attender", "attendanceCount": 1, "lastAttendedAt": "2026-10-15T20:11:49.014Z" }
 ```
 
+## 5. Following a registration to the inbox (CMS-20)
+
+The third flow: a member registers, and Communications sends them a welcome email. The
+event is thin (`{ memberId }`), so Communications asks Members for the name and email
+before it sends. Concepts: [study-guide §16](study-guide.md#16-a-third-context-communications-and-the-welcome-email-cms-20);
+the service: [`communications-service-ddd.md`](communications-service-ddd.md).
+
+```
+members-service ──MemberRegistered──► NATS MEMBERS ──► communications-service ──SMTP──► Mailpit
+      ▲                                                     │                        (mail.cms.local)
+      └──────────── GET /members/:id (name, email) ─────────┘
+```
+
+> **Shortcut:** [`scripts/cluster-up.sh`](../scripts/cluster-up.sh) does steps 1–2 and checks
+> the consumer ("NATS: communications-service consumes from MEMBERS").
+
+**1. Install Mailpit**, the test mail server: it accepts every email and keeps it in a web
+inbox instead of delivering it.
+
+```bash
+kubectl apply -f k8s/mailpit.yaml
+# namespace/mailpit created · deployment.apps/mailpit created · service/mailpit created · ingress…/mailpit created
+kubectl -n mailpit get pods
+# NAME                       READY   STATUS    RESTARTS   AGE
+# mailpit-7c9b…              1/1     Running   0          20s
+```
+
+Add `mail.cms.local` to `/etc/hosts` next to `cms.local` (`cluster-up.sh` does it), then
+open <http://mail.cms.local>: an empty inbox.
+
+**2. Deploy communications-service**, with its own Postgres first (the chart's migrate
+init container needs it):
+
+```bash
+kubectl apply -f k8s/communications-postgres.yaml
+kubectl rollout status deployment/communications-postgres
+# k8s-local-dev.md §7c builds the image and runs the helm upgrade --install
+kubectl exec -n nats deploy/nats-box -- nats consumer ls MEMBERS
+# │ Name                   │ … │ Ack Pending │ Unprocessed │
+# │ communications-service │ … │           0 │           0 │   ← new: created with DeliverPolicy.New
+# │ events-service         │ … │           0 │           0 │
+```
+
+`Unprocessed` is 0 even though the stream holds a week of `MemberRegistered`: the consumer
+was created at "now", so earlier registrations get no welcome email.
+
+**3. Register someone and find their email.** No tunnel? Read the inbox through a
+port-forward (`localhost:8025`); with the tunnel, use `http://mail.cms.local`.
+
+```bash
+kubectl -n mailpit port-forward svc/mailpit 8025 &
+M=$(curl -s -H "$H" -H 'content-type: application/json' \
+  -d '{"name":"Wendy Welcome","email":"wendy@example.org"}' $B/members/members | jq -r .id)
+sleep 3
+curl -s localhost:8025/api/v1/messages | jq '.messages[] | {to: .To[0].Address, subject: .Subject}'
+# { "to": "wendy@example.org", "subject": "Welcome to Grace Community Church, Wendy Welcome!" }
+kubectl logs deploy/communications-service-communications-service --since=1m | grep 'welcome email handled'
+# {"level":"info",…,"memberId":"…","outcome":"sent","msg":"welcome email handled"}
+```
+
+The log line has the member's id and the outcome, never the email address (personal data
+stays out of logs). In Grafana, *CMS — Registration journey* → *Messages consumed, by
+outcome* shows a `communications-service cms.members.registered: sent` line, and Tempo has
+one trace from the registration through NATS to the lookup (`GET /members/:id`, answered
+by members-service inside the same trace) and the `smtp send`.
+
 ---
 
 ## Troubleshooting
@@ -199,6 +266,11 @@ curl -s -H "$H" $B/members/members/$M2 | jq '{name, attendanceCount, lastAttende
 | `attendance not applied` with `outcome: member-not-found` | Events recorded a check-in for a `memberId` that Members doesn't have. Events doesn't validate ids (a known gap). The message is acked; it can never succeed |
 | `nats-0` Pending with `unbound immediate PersistentVolumeClaims` | The volume is still being created. Wait a few seconds. If it lasts: `kubectl get pvc -n nats` and `minikube addons list | grep storage-provisioner` |
 | `nats stream ls` says `No Streams defined` (and `nats stream info MEMBERS` complains it `could not pick a Stream`) | No service has connected yet: the streams are created by the services, not by the Helm chart. Check step 2 |
+| No welcome email, and the Communications log says `message failed; will retry` with `members-service didn't answer` | Members is down or unreachable from Communications. The message waits and is retried with backoff (up to 30 s apart); the email goes out once Members answers (exercise 8). If Members is up, check `MEMBERS_API_URL` in `kubectl get cm communications-service-communications-service-config -o yaml` |
+| `message rejected by handler; terminating` with `Members has no member …` | Members answered 404 for the id in the message. Members never deletes, so the message came from somewhere else (a hand-written publish, another environment's data, a restored database). It's not retried; nothing to fix in Communications |
+| A communications-service Pod is in CrashLoopBackOff, and its log says `SMTP_HOST is not set` (or another name) | A `config` key is empty in the chart's values. Every key under `config` in `charts/communications-service/values.yaml` is required: set it, `helm upgrade`, and the Pods roll |
+| The email went out, but the inbox at `mail.cms.local` doesn't show it | The Mailpit Pod restarted: its inbox lives in memory. Or the browser can't reach it: check the `/etc/hosts` entry for `mail.cms.local`, or use `kubectl -n mailpit port-forward svc/mailpit 8025` |
+| `message failed; will retry` with `connect ECONNREFUSED …:1025` or a timeout | Mailpit is down: `kubectl -n mailpit get pods`. The welcome email waits and is retried; nothing is recorded until the send succeeds |
 
 ---
 
@@ -319,13 +391,95 @@ kubectl exec -n nats deploy/nats-box -- nats consumer info MEMBERS events-servic
 The stream counts the new subject, but events-service's `num_pending` stays `0`: its
 **filter subject** means it never sees registrations, which is why publishing a new event
 needed no change in events-service. The messages simply wait in the stream for its 7-day
-retention. When CMS-20 adds a durable consumer filtered to `cms.members.registered`, it
-starts from what's still in the stream.
+retention. CMS-20 added that consumer (§5), created with `DeliverPolicy.New`: it starts at
+"now", so the registrations already in the stream never get a (late) welcome email.
 
 Two things to think about (study-guide §11.5):
 
 - The key order in hop 2 differs from the code that built the message (`data` comes before
   `type`). The outbox stores the payload as Postgres `jsonb`, which doesn't keep key order.
   That's harmless: a JSON object has no order, and the parsers look fields up by name.
-- The welcome email will need Reggie's email address, and it isn't in the message. Where
-  will CMS-20 get it, and what should its consumer do if Members is down at that moment?
+- The welcome email needs Reggie's email address, and it isn't in the message. Where does
+  communications-service get it, and what does it do if Members is down at that moment?
+  (§5, exercise 8)
+
+### Communications and the welcome email (CMS-20)
+
+Use step 4's setup (`$H`, `$B`) and §5's Mailpit port-forward (`localhost:8025`). The
+inbox search API finds one person's emails:
+`curl -s 'localhost:8025/api/v1/search?query=to:wendy@example.org' | jq .messages_count`.
+
+**7. Redeliver a welcome email's message.** Take the last `MemberRegistered` out of the
+stream and publish it again. The envelope id stays the same; the `Nats-Msg-Id` header is
+new, so JetStream's duplicate filter (a 2-minute window) doesn't drop it before it reaches
+Communications:
+
+```bash
+kubectl exec -n nats deploy/nats-box -- nats stream get MEMBERS --last-for cms.members.registered --json \
+  | jq -r .data | base64 -d > /tmp/msg.json
+kubectl exec -n nats deploy/nats-box -- nats pub cms.members.registered "$(cat /tmp/msg.json)" \
+  -H "Nats-Msg-Id:redeliver-$(date +%s)"
+kubectl logs -l app.kubernetes.io/name=communications-service --since=30s | grep 'welcome email handled' | jq -c '{messageId, outcome}'
+# {"messageId":"67b4a88d-…","outcome":"duplicate"}
+```
+
+*Expected:* outcome `duplicate`, and still one email to that member in the inbox. Now
+change the envelope id (`jq -c '.id = "replayed-by-hand-1"' /tmp/msg.json`) and publish
+that: still `duplicate`.
+
+Both were stopped by the same check, the use case's first step: this member already has a
+`WelcomeEmail` (one per member, ever, whatever the message id). The message-id check
+(`ProcessedMessage`, inside `runOnce`) never got a say. So what is it for? For a
+redelivery that arrives while the *first* delivery is still mid-send: no `WelcomeEmail`
+row exists yet, both pass step 1, and the second waits on the first's lock inside `runOnce`,
+then does nothing. You can't time that by hand; the integration test
+`runOnce lets one of two racing deliveries of a message do the work` does it for you
+(`welcome.integration.test.ts`). Two guards for two different duplicates: which one would
+still work if `MemberRegistered` carried no member id at all?
+
+**8. Members is down when Communications looks the member up.** Members must be up to
+register someone, so the order matters:
+
+```bash
+kubectl scale deploy/communications-service-communications-service --replicas=0
+kubectl wait --for=delete pod -l app.kubernetes.io/name=communications-service
+curl -s -H "$H" -H 'content-type: application/json' \
+  -d '{"name":"Rita Retry","email":"rita@example.org"}' $B/members/members
+kubectl scale deploy/members-service-members-service --replicas=0
+kubectl wait --for=delete pod -l app.kubernetes.io/name=members-service
+kubectl scale deploy/communications-service-communications-service --replicas=2
+kubectl logs -l app.kubernetes.io/name=communications-service -f | grep 'will retry' | jq -c '{delivery, retryInMs, err: .err.message}'
+# {"delivery":1,"retryInMs":1000,"err":"members-service didn't answer: connect ECONNREFUSED 10.105.36.249:3001"}
+# {"delivery":2,"retryInMs":2000,…}  … {"delivery":6,"retryInMs":30000,…}
+```
+
+*Expected* (measured, CMS-20): every delivery is `nak`ed with a growing delay (1, 2, 4, 8,
+16, then 30 s each), and Rita has no email. The scaled-down Deployments stay at 0 because
+the HPA ignores a Deployment at 0 (observability.md exercise 23). Now
+`kubectl scale deploy/members-service-members-service --replicas=2`: Rita's email arrives
+within one backoff period (2 s after members-service was ready, in our run), and only one.
+Why must the lookup failure be a `nak` and not a `term`?
+
+**9. Archived before the welcome email goes out.** Stop Communications, register a member,
+archive them (`curl -s -X DELETE -H "$H" $B/members/members/<id>`), then start
+Communications again.
+
+*Expected:* `{"outcome":"skipped"}` in the log, no email, and in Prometheus
+`messages_consumed_total{job="communications-service", outcome="skipped"}` goes up by one.
+The decision is recorded (`WelcomeEmail` with `status = 'skipped'`), so a redelivery is a
+`duplicate`, not a second chance to send.
+
+**10. Only new registrations.** Compare the stream with the consumer:
+
+```bash
+kubectl exec -n nats deploy/nats-box -- nats stream subjects MEMBERS
+# │ cms.members.archived │ 12 │ cms.members.registered │ 215 │
+kubectl exec -n nats deploy/nats-box -- nats consumer info MEMBERS communications-service --json | jq '{deliver_policy: .config.deliver_policy, num_pending}'
+# { "deliver_policy": "new", "num_pending": 0 }
+```
+
+*Expected:* hundreds of `MemberRegistered` in the stream, none pending for Communications,
+and none of those members in the inbox. Now delete the durable consumer
+(`nats consumer rm MEMBERS communications-service -f`) and restart the Pods: it's created
+again with `New`. What would have happened with `DeliverPolicy.All`, and what happens to a
+registration made while the consumer didn't exist?

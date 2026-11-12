@@ -7,19 +7,20 @@ exercised, mapped to the **five learning goals** in
 1. **Docker & containers**
 2. **Kubernetes** _(stages 5 and 7 done: cluster, Helm, observability; logs in Loki since CMS-28, traces in Tempo since CMS-29, SLOs and burn-rate alerts since CMS-31)_
 3. **System design** _(stage 9 done: async events between services; the contract evolved in CMS-27)_
-4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context)_
+4. **Domain-Driven Design (DDD)** — the emphasised priority _(stage 8 done: a second bounded context; a third, Communications, since CMS-20)_
 5. **Using AI tools** — issue-driven development _(agent orchestration track started: §12.4)_
 
 This guide is the **map**. The companion docs are the **detail**:
 
 - [`members-service-ddd.md`](members-service-ddd.md) — the DDD layering, with diagrams
 - [`events-service-ddd.md`](events-service-ddd.md) — the second context: several aggregates, a value object, cross-aggregate rules
+- [`communications-service-ddd.md`](communications-service-ddd.md) — the third context: a welcome email from a thin event, a side effect that can't be rolled back, ports and adapters
 - [`docker-local-dev.md`](docker-local-dev.md) — running the stack, Compose vs. raw `docker`
 - [`k8s-local-dev.md`](k8s-local-dev.md) — deploying to minikube with Helm + Traefik, step by step
 - [`ci-cd.md`](ci-cd.md) — the GitHub Actions pipeline, self-hosted runner, debugging
 - [`status-dashboards.md`](status-dashboards.md) — where to watch the pipeline and the cluster
 - [`observability.md`](observability.md) — Prometheus, Grafana, metrics, logs and traces, with exercises
-- [`messaging.md`](messaging.md) — NATS JetStream between the services: following an event, replay and idempotency exercises
+- [`messaging.md`](messaging.md) — NATS JetStream between the services: following an event, replay and idempotency exercises, and a registration to the welcome-email inbox (Mailpit)
 - [`agents.md`](agents.md) — the reviewer and docs-auditor agents, and measuring a reviewer with planted bugs
 
 Read this top to bottom once. Then, whenever a section feels thin, open the file it
@@ -59,8 +60,9 @@ NATS to events-service, with log lines and graph points linking to it (§13). **
 moved the start of that trace into the browser: real visitors' phones now report JS errors,
 Web Vitals and their own spans, with no personal data, through a rate-limited public
 endpoint (§14). **CMS-31** added metrics in the domain's words, a "Registration journey"
-dashboard from the browser down to Kubernetes, and SLOs with burn-rate alerts (§15). Next is
-CMS-20 (Communications, the welcome email).
+dashboard from the browser down to Kubernetes, and SLOs with burn-rate alerts (§15).
+**CMS-20** added a third context, Communications: a welcome email sent when a member
+registers, through a test mail server, Mailpit (§16).
 
 The workflow itself was also tightened (§12.2–12.3): mechanical doc checks, a
 `/ship` skill, image tags that make `/verify` test the current code, and a narrower
@@ -267,9 +269,9 @@ Three pieces of vocabulary made the CMS-33 investigation possible:
   Pods pull, the `local-*` rollback build, and its build cache. That was roughly 12 GB for
   three small services.
 - Services: a new `deploy` stage runs
-  [`pnpm --filter members-service deploy --prod`](../apps/members-service/Dockerfile#L111).
+  [`pnpm --filter members-service deploy --prod`](../apps/members-service/Dockerfile#L112).
   The service's `"files"` list (`dist`, `generated`, `prisma`) makes that folder the whole
-  app, so the runner [copies it in one step](../apps/members-service/Dockerfile#L149).
+  app, so the runner [copies it in one step](../apps/members-service/Dockerfile#L150).
   [`prisma`](../apps/members-service/package.json#L33) moved to `dependencies` (the
   migration init container runs its CLI from this image). `@cms/events` also declares
   [`"files": ["dist"]`](../packages/events/package.json#L15), so the copy holds only its
@@ -277,8 +279,8 @@ Three pieces of vocabulary made the CMS-33 investigation possible:
 - Web: [`output: 'standalone'`](../apps/web/next.config.mjs#L10) with
   [`outputFileTracingRoot`](../apps/web/next.config.mjs#L16) set to the monorepo root (the
   real package files live there). The runner copies
-  [`.next/standalone` and `.next/static`](../apps/web/Dockerfile#L147-L148) and runs
-  `node apps/web/server.js`, with [`HOSTNAME=0.0.0.0`](../apps/web/Dockerfile#L129)
+  [`.next/standalone` and `.next/static`](../apps/web/Dockerfile#L148-L149) and runs
+  `node apps/web/server.js`, with [`HOSTNAME=0.0.0.0`](../apps/web/Dockerfile#L130)
   because Docker and Kubernetes set `HOSTNAME` to the container's name.
 - Results: members 1.29 GB → **365 MB**, web 1.31 GB → **301 MB** on the host
   (containerd store); inside minikube (`overlay2`) 893/924 MB → **243/212 MB**. Free disk
@@ -289,7 +291,7 @@ Three pieces of vocabulary made the CMS-33 investigation possible:
   cache entry instead of three. The build-cache cap ([`CAP=1GB`](../scripts/prune-build-cache.sh#L31))
   keeps exactly that entry, and the script [loops](../scripts/prune-build-cache.sh#L34) until
   a pass frees nothing.
-- Deploy [starts minikube](../.github/workflows/deploy.yml#L133) if a reboot stopped it.
+- Deploy [starts minikube](../.github/workflows/deploy.yml#L137) if a reboot stopped it.
 
 **Why this way.** Both tools are the documented, standard answer for their stack, so the
 Dockerfiles stay readable: the change *removed* the `/repo` symlink-path workarounds rather
@@ -560,7 +562,7 @@ CMS-26 was carved out of the deferred CMS-23 for just this flow.
 | Problem | Lesson |
 | --- | --- |
 | On minikube, `/members` showed "Could not load members from http://localhost:3001: fetch failed", and had since the chart was written | Only Compose set the API URL; the web chart never did, so the app fell back to `localhost`, which inside a Pod is the Pod itself. Fix: `config.membersApiUrl` in the chart ([`values.yaml:24`](../charts/web/values.yaml#L24)) |
-| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:482`](../scripts/cluster-up.sh#L482)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
+| `cluster-up.sh`'s smoke test passed anyway | It only checked status codes, and the error page is a `200`. The smoke test now also checks the page's *content* ([`cluster-up.sh:503`](../scripts/cluster-up.sh#L503)). Code review then caught that the first version only looked for the error text, so an empty body or a `502` passed too. It now requires what a working page shows (the table or "No members yet"). A check should look for success, not just for one known failure |
 | The env var was called `NEXT_PUBLIC_MEMBERS_API_URL` but only server code read it | The prefix means "copy into the browser bundle", wrong for an internal URL. Renamed to `MEMBERS_API_URL` while the chart was being touched anyway |
 | `next build` would reject exporting the form's initial state from `actions.ts` | A `"use server"` file may only export async functions: each export becomes a callable endpoint. Shared types and constants live in [`formState.ts`](../apps/web/app/members/new/formState.ts) |
 | A real submit redirected to `?registered=undefined`, though all unit tests passed | members-service answers `201 { id }`, not the whole member. The tests' fake response was a full `Member`, so they encoded the wrong assumption. Fakes must be copied from the real API (`curl` it first), and only an end-to-end check catches the rest |
@@ -792,7 +794,7 @@ then gets SIGTERM once no new requests are arriving.
   the sleep, their SIGTERM handler ([`index.ts:63`](../apps/members-service/src/index.ts#L63))
   lets the NATS consumer finish its current message and drains the connection, all inside
   the same 30 s.
-- [`scripts/cluster-up.sh:322`](../scripts/cluster-up.sh#L322): the script deletes old
+- [`scripts/cluster-up.sh:343`](../scripts/cluster-up.sh#L343): the script deletes old
   `local-*` images after a deploy. `helm --wait` returns when the *new* Pods are Ready, but
   the old ones are now still sleeping, and Docker won't remove an image a container is
   using. So the script first waits until every Pod running one of our images runs this
@@ -1407,8 +1409,8 @@ the only code both services may import:
   that validate incoming JSON
   ([`contract.ts:122`](../packages/events/src/contract.ts#L122)).
 - Idempotent setup: `ensureStream` and `ensureConsumer`, "create, or update to this
-  config" ([`nats.ts:52`](../packages/events/src/nats.ts#L52),
-  [`nats.ts:79`](../packages/events/src/nats.ts#L79)).
+  config" ([`nats.ts:56`](../packages/events/src/nats.ts#L56),
+  [`nats.ts:83`](../packages/events/src/nats.ts#L83)).
 - The outbox relay ([`outboxRelay.ts:90`](../packages/events/src/outboxRelay.ts#L90)) and
   the ack/nak/term decision for each message
   ([`consumer.ts:58`](../packages/events/src/consumer.ts#L58)). Neither knows about
@@ -1425,7 +1427,7 @@ the only code both services may import:
    the member row and an `OutboxMessage` row in **one** transaction
    ([`PrismaMemberRepository.ts:81`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L81)).
 3. The relay, about once a second, publishes unpublished rows in order, with the row id
-   as the `Nats-Msg-Id` header ([`nats.ts:124`](../packages/events/src/nats.ts#L124)), and
+   as the `Nats-Msg-Id` header ([`nats.ts:145`](../packages/events/src/nats.ts#L145)), and
    sets `publishedAt`. If publishing fails, it stops the batch and retries next tick, so
    order is kept. Both Pods run a relay, but each batch first takes a Postgres advisory
    lock ([`outbox.ts`](../apps/members-service/src/infrastructure/outbox.ts)), so only one
@@ -2074,7 +2076,7 @@ request that produced it.
 | The longest trace | [`app/members/actions.ts:16`](../apps/web/app/members/actions.ts#L16) | the Archive button's Server Action: one click, one trace through web, members-service, the outbox, NATS and events-service |
 | Store the context | [`PrismaMemberRepository.ts:116`](../apps/members-service/src/infrastructure/PrismaMemberRepository.ts#L116), migration `20261029120000_outbox_traceparent` | `traceparent` column, written with the outbox row |
 | Shared helpers | [`packages/events/src/tracing.ts:56`](../packages/events/src/tracing.ts#L56) | `captureTraceContext`, `contextFromHeaders` ([`:64`](../packages/events/src/tracing.ts#L64)), `inMessagingSpan` ([`:102`](../packages/events/src/tracing.ts#L102)), `flushTraces` ([`:153`](../packages/events/src/tracing.ts#L153)) |
-| Relay → NATS | [`outboxRelay.ts:133`](../packages/events/src/outboxRelay.ts#L133), [`nats.ts:122`](../packages/events/src/nats.ts#L122) | PRODUCER span, child of the stored context; its own context goes out as a NATS header |
+| Relay → NATS | [`outboxRelay.ts:133`](../packages/events/src/outboxRelay.ts#L133), [`nats.ts:143`](../packages/events/src/nats.ts#L143) | PRODUCER span, child of the stored context; its own context goes out as a NATS header |
 | NATS → consumer | [`consumer.ts:65`](../packages/events/src/consumer.ts#L65) | CONSUMER span, child of the header; the handler runs inside it |
 | Charts | `charts/*/values.yaml` `tracing.otlpEndpoint` | `""` = off; on: `OTEL_TRACES_EXPORTER=otlp` + `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | Collector | [`otel-collector-values.yaml`](../k8s/monitoring/otel-collector-values.yaml) | `otlp` receiver → `memory_limiter`, `batch` → Tempo + `span_metrics` → Prometheus |
@@ -2385,7 +2387,129 @@ templates (§14).
 
 ---
 
-## 16. Self-check — can you explain each of these?
+## 16. A third context: Communications and the welcome email (CMS-20)
+
+`MemberRegistered` had been on the bus since CMS-27 with nobody listening. CMS-20 adds the
+third bounded context, Communications, with one slice: a member who registers gets a
+**welcome email**. Small as it is, it brings four ideas the first two contexts never
+needed: acting on a *thin* event, choosing where a new consumer starts, a side effect
+that can't be rolled back, and ports and adapters around an external system.
+
+Guide to the service: [`communications-service-ddd.md`](communications-service-ddd.md).
+Runbook (Mailpit, following a registration to the inbox, drills):
+[`messaging.md` §5](messaging.md#5-following-a-registration-to-the-inbox-cms-20).
+The decisions: [ADR-0005's CMS-20 addendum](adr/0005-communications-context-aggregates.md);
+the words: [`GLOSSARY.md`](../apps/communications-service/GLOSSARY.md).
+
+### 16.1 The concept
+
+**Consumer-side lookups vs fat events.** `MemberRegistered` carries only `{ memberId }`
+(§11.5). A consumer that needs the name and email asks Members for them, at the moment
+it acts. The alternative, a *fat* event carrying the person data, saves that call but
+copies personal data into the stream, where it stays for 7 days, and into every
+consumer's hands, whether they need it or not, and it's stale the moment the member
+changes their email. A thin event says **that** something happened; the owner of the
+data stays the one place to ask **what** it is. The cost: the consumer now depends on
+the owner being up when it acts.
+
+**Deliver policies.** A durable consumer remembers where it is in a stream. The question
+is where it *starts*, the first time. `All` starts at the oldest message the stream still
+holds: right for a consumer that must catch up on history. `New` starts at "now": right
+when old messages would cause the wrong effect. For a welcome email, `All` would send
+last week's registrations a very late welcome. The policy applies only at creation;
+afterwards the consumer resumes where it stopped.
+
+**Idempotent side effects.** Every consumer so far changed only its own database, in the
+same transaction as the processed message id, so a redelivered message changed nothing
+(ADR-0010). An email can't be part of that transaction: once SMTP has accepted it, it's
+gone. Something can fail between "sent" and "recorded", and you choose which way it
+fails: **at-least-once** (send, then record: a crash may send it twice) or
+**at-most-once** (record, then send: a crash may never send it). *Exactly once* across
+two systems that don't share a transaction isn't on the menu. For a welcome email, a
+rare duplicate is the better failure.
+
+**Ports and adapters** (hexagonal architecture). The use case needs two things from the
+outside world: "who is this member?" and "send this email". It names them as
+interfaces, **ports**, in its own words (`RecipientResolver`, `EmailSender`).
+**Adapters** implement them with real technology (HTTP to Members, SMTP to Mailpit).
+The use case and its tests never see HTTP or SMTP, so swapping Mailpit for a real
+provider is one new adapter, not a rewrite.
+
+| Term | Meaning | Here |
+| --- | --- | --- |
+| thin event | an event with ids only; consumers look up the rest | `MemberRegistered { memberId }` |
+| fat event | an event carrying the data consumers need | not used: it would copy person data |
+| deliver policy | where a new durable consumer starts reading | `New` for Communications, `All` for the others |
+| transactional message | a message to one person, caused by their action | the welcome email |
+| at-least-once / at-most-once | a side effect may repeat / may be lost on failure | at-least-once: send, then record |
+| port / adapter | an interface the core needs / its implementation | `EmailSender` / `SmtpEmailSender` |
+| Mailpit | a mail server that keeps mail in a web inbox | `mail.cms.local`, `localhost:8025` |
+
+### 16.2 How we did it here
+
+- **One aggregate, one invariant in the database.** `WelcomeEmail` is `sent` or
+  `skipped`, at most one per member: `memberId` is the primary key
+  ([`schema.prisma:26`](../apps/communications-service/prisma/schema.prisma#L26)), so even
+  two Pods racing can't create two.
+- **The use case in three steps**
+  ([`SendWelcomeEmailUseCase.ts`](../apps/communications-service/src/application/SendWelcomeEmailUseCase.ts)):
+  already decided for this member → `duplicate`
+  ([`:38`](../apps/communications-service/src/application/SendWelcomeEmailUseCase.ts#L38));
+  ask Members, *outside* the transaction; then inside `runOnce`
+  ([`:47`](../apps/communications-service/src/application/SendWelcomeEmailUseCase.ts#L47)),
+  skip an archived member, or **send first**
+  ([`:58`](../apps/communications-service/src/application/SendWelcomeEmailUseCase.ts#L58)) and
+  record after.
+- **The lookup's answers become NATS's answers.** 404 → `null`
+  ([`HttpRecipientResolver.ts:38`](../apps/communications-service/src/infrastructure/HttpRecipientResolver.ts#L38))
+  → `MemberNotFoundError` → `InvalidMessageError`
+  ([`messaging.ts:98`](../apps/communications-service/src/infrastructure/messaging.ts#L98)), so
+  `term`; 5xx or no answer → `RecipientsUnavailableError`, so `nak` with backoff.
+- **`ensureConsumer` takes a deliver policy**
+  ([`nats.ts:127`](../packages/events/src/nats.ts#L127)), and Communications passes `New`
+  ([`messaging.ts:66`](../apps/communications-service/src/infrastructure/messaging.ts#L66)).
+  The other two services keep `All`.
+- **Mailpit** runs in the cluster ([`k8s/mailpit.yaml`](../k8s/mailpit.yaml)), in compose,
+  and in the adapter's integration test, the same pinned image in all three.
+- **Every adapter is tested against the real thing:** a real Mailpit (send, then read it
+  back through its API), a fake HTTP server for Members (200, 404, 503, no answer, a 200
+  that isn't a member), a real Postgres for the repository and `runOnce`. The use case is
+  tested with in-memory fakes of all four ports.
+- **Nothing new to operate.** The consumer reports through `@cms/events`, so
+  `messages_consumed_total{job="communications-service", outcome}` and
+  `EventDeliveryStalled` (§15) cover it with no new dashboard or rule.
+
+### 16.3 Why this way
+
+- **A new aggregate rather than ADR-0005's `MessageCampaign`:** a campaign is an admin's
+  broadcast to a group; a welcome email is one person's transactional message. Reusing
+  the aggregate would have blurred both words.
+- **The lookup happens outside the transaction:** holding a database transaction open
+  while waiting on another service's HTTP answer ties up a connection for as long as
+  the other service is slow.
+- **Thin event + lookup, not a fat event:** decided in CMS-27, and CMS-20 is where its
+  cost appears. Welcome emails now wait while Members is down. That's acceptable for a
+  welcome email; if it weren't, the next step is a local read model of members built
+  from Members' events, not a fatter event.
+- **Deliberately not done:** a business API for Communications, authentication on the
+  lookup (needs Identity), HTML email, a real provider, and announcements, prayer requests
+  and campaigns (need Identity and Groups). Each is in ADR-0005's evolution table.
+
+### 16.4 What setting it up taught
+
+| Problem | Lesson |
+| --- | --- |
+| The first welcome email's trace showed members-service's registration and Communications' consumer, but no lookup and no send. The services traced incoming HTTP only: Node's `fetch` is built on undici, which the HTTP instrumentation doesn't patch, and nodemailer has no instrumentation at all | Read the trace of a new flow end to end before calling it traced. Communications now has `instrumentation-undici` (pinned to the SDK's 2.x line) and a hand-made `smtp send` span |
+| Copying events-service's Dockerfile and renaming `events-service` everywhere also renamed its copy of the *events-service* manifest line in the shared install block, which would have given the new image a different install layer from the other three | A find-and-replace across a file can hit lines that refer to *other* things with the same name. Comparing the four files' install instructions (`awk`, then `md5sum`) caught it; they must stay identical for the shared cache (§2.5) |
+| Reading the five settings through `process.env[name]` would have hidden all of them from `check-env.sh`, which looks for the literal `process.env.NAME`. Then a comment explaining that, containing that literal, made the check fail on a variable called `NAME` | A check that reads source text sees comments too, and can't see computed names. Read each variable by its literal name at the call site |
+| The first "Members is down" drill plan didn't work on paper: Communications handles a message within milliseconds, so stopping Members *after* registering is too late, and registering *needs* Members | To test "B is down when C reacts to A's event", stop C first, cause the event, stop B, then start C. The order is part of the drill (`messaging.md` exercise 8) |
+| The retry log said `fetch failed: fetch failed: connect ECONNREFUSED…` | Node's `fetch` puts the real reason in `err.cause`; log that, not the wrapper's message |
+| `/verify`'s build and a `cluster-up.sh --skip-build` (run by hand to start the tunnel) overlapped. The second one finished first, and its cleanup deleted every `local-*` image Helm wasn't using: including the one the first run had just built and was about to deploy. The new Pod sat in `ErrImageNeverPull` and Helm timed out | Two runs of an idempotent script aren't safe *at the same time*. Wait for one to end (`ps -eo args | grep "[b]ash scripts/cluster-up.sh"`: the `[b]` keeps grep from finding its own command line, which `pgrep -f` from a script does); the lasting fix is a lock in the script ("Where to go next": one owner for the cluster) |
+| After the VM rebooted, the new check from the CMS-31 retro fired on its first run: Kubernetes events had stopped reaching Loki | A check added after one incident earns its keep on the next: the fix (`rollout restart ds/alloy`) was printed next to the warning |
+
+---
+
+## 17. Self-check — can you explain each of these?
 
 If you can answer these from memory, you've absorbed what's been built. If not, the section
 in parentheses (and the file it links) is where to look.
@@ -2575,23 +2699,34 @@ in parentheses (and the file it links) is where to look.
 - [ ] Every Pod reports the outbox gauges. Why `max()` and not `sum()` in the queries? (§15.2)
 - [ ] events-service is down: which alert fires, and why does the event SLO stay green? And if members-service is completely down, what does the availability SLI show? (§15.2, §15.3)
 
+**A third context: Communications**
+
+- [ ] `MemberRegistered` carries only `memberId`. What does Communications do to get a name and an email, and what does that cost it compared with a fat event? (§16.1, §16.3)
+- [ ] Why does the Communications consumer start with `DeliverPolicy.New`, and when does the policy stop mattering? (§16.1, §16.2)
+- [ ] The welcome email is sent first and recorded after. What goes wrong if the Pod crashes in between, and why is that the better of the two failures? (§16.1)
+- [ ] Two Pods get `MemberRegistered` for the same member at once, with different message ids. What stops two `WelcomeEmail` rows, and can two emails still go out? (§16.2)
+- [ ] Members answers 404 for a member, and later 503 for another. What does NATS hear in each case, and why the difference? (§16.2)
+- [ ] What would change to send through a real provider instead of Mailpit, and what wouldn't? (§16.1, §16.2)
+
 ---
 
-## 17. Where to go next
+## 18. Where to go next
 
 All nine roadmap stages are done, and the member registration workflow is now usable from
 the browser (§5). **CMS-28** made logs from every Pod searchable in Grafana (§9.9), and **CMS-27**
 published `MemberRegistered` (§11.5). **CMS-29** followed one registration end to end as a
 trace (§13), and **CMS-30** started that trace in the visitor's browser (§14). **CMS-31** added
-business metrics, SLOs and burn-rate alerts (§15). The committed queue is **CMS-20**
-(Communications, the welcome email). From here, ADR-0007 suggests adding the deferred
+business metrics, SLOs and burn-rate alerts (§15). **CMS-20** added the third context,
+Communications, with one slice: a welcome email on `MemberRegistered`, through Mailpit
+(§16). From here, ADR-0007 suggests adding the deferred
 contexts (Finance, Communications, Groups, Identity) **one at a time**, as practice.
 Each one is now mostly a matter of applying patterns already learned. The most
 interesting next contexts are the ones that add a new kind of message flow:
 
-- **Communications** consuming `MemberRegistered` (a welcome email): the event is
-  already in the stream (CMS-27, §11.5). It's thin, so the consumer looks up name and email
-  from Members by `memberId`, and `nak`s while Members is unavailable.
+- ~~**Communications** consuming `MemberRegistered`~~: done in CMS-20 (§16). Its next
+  steps, each when a reason appears: a real email provider, a local read model of members
+  (if Members' availability holds welcome emails up), and announcements, prayer requests
+  and campaigns once Identity and Groups exist.
 - **Validating `memberId` in Events from messages**: a local list of known members,
   kept up to date from `MemberRegistered`/`MemberArchived`, instead of a sync call
   ([`events-service-ddd.md` §8](events-service-ddd.md#8-known-gaps-deliberate)).

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "communications-service.fullname" . }}-config
+  labels:
+    {{- include "communications-service.labels" . | nindent 4 }}
+data:
+  NODE_ENV: {{ .Values.config.nodeEnv | quote }}
+  PORT: {{ .Values.config.port | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  # Must match the metrics port the chart exposes; src/instrumentation.ts reads it.
+  METRICS_PORT: {{ .Values.metrics.port | quote }}
+  {{- with .Values.config.natsUrl }}
+  # Where to consume MemberRegistered from; src/index.ts reads it.
+  NATS_URL: {{ . | quote }}
+  {{- end }}
+  # The welcome email (CMS-20). src/index.ts requires all five and exits at
+  # startup if one is missing, so a typo here shows up as CrashLoopBackOff with
+  # "<NAME> is not set" in the Pod's log, not as silently missing emails.
+  MEMBERS_API_URL: {{ required "config.membersApiUrl is required" .Values.config.membersApiUrl | quote }}
+  SMTP_HOST: {{ required "config.smtpHost is required" .Values.config.smtpHost | quote }}
+  SMTP_PORT: {{ .Values.config.smtpPort | quote }}
+  WELCOME_FROM: {{ .Values.config.welcomeFrom | quote }}
+  CHURCH_NAME: {{ .Values.config.churchName | quote }}
+  # Tracing (values.yaml `tracing`). src/instrumentation.ts reads neither key
+  # itself: the OTel SDK does. "none" keeps the SDK from exporting anywhere.
+  OTEL_TRACES_EXPORTER: {{ if .Values.tracing.otlpEndpoint }}"otlp"{{ else }}"none"{{ end }}
+  {{- with .Values.tracing.otlpEndpoint }}
+  # The SDK appends /v1/traces to this base URL.
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+  {{- end }}

@@ -11,7 +11,9 @@
 # exits) → members-service → web. So a fresh "docker compose up" gives you a
 # working, migrated database and a running frontend with no manual steps.
 # events-service follows the same chain with its OWN database (events-db →
-# events-migrate → events-service): one Postgres per service, ADR-0008.
+# events-migrate → events-service): one Postgres per service, ADR-0008. So does
+# communications-service (CMS-20), which sends its welcome emails to mailpit: a
+# fake mail server whose inbox you read at http://localhost:8025.
 #
 # ── Production-shaped vs. dev hot-reload ─────────────────────────────────────
 # This file is production-shaped: the web service runs "next build" output (the standalone server)
@@ -69,6 +71,25 @@ x-events-base: &events-base
   environment:
     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@events-db:5432/events_db
     NATS_URL: nats://nats:4222
+  networks:
+    - cms-network
+
+# communications-service (CMS-20): its own database again, plus where it finds
+# Members (for the recipient's name and email) and where it sends email (mailpit).
+x-communications-base: &communications-base
+  build:
+    context: .
+    dockerfile: apps/communications-service/Dockerfile
+    network: host
+  image: church-cms-communications-service:latest
+  environment:
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@communications-db:5432/communications_db
+    NATS_URL: nats://nats:4222
+    MEMBERS_API_URL: http://members-service:3001
+    SMTP_HOST: mailpit
+    SMTP_PORT: "1025"
+    WELCOME_FROM: welcome@cms.local
+    CHURCH_NAME: Grace Community Church
   networks:
     - cms-network
 
@@ -196,6 +217,57 @@ services:
       nats:
         condition: service_started
 
+  # ─── Communications: database, migration job, service, mail server (CMS-20) ─
+  communications-db:
+    image: postgres:16-alpine
+    env_file: .env
+    environment:
+      POSTGRES_DB: communications_db
+    ports:
+      - "5434:5432" # 5432 and 5433 are taken by members-db and events-db
+    volumes:
+      - communications-db-data:/var/lib/postgresql/data
+    networks:
+      - cms-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  communications-migrate:
+    <<: *communications-base
+    command: ["node_modules/.bin/prisma", "migrate", "deploy"]
+    restart: "no"
+    depends_on:
+      communications-db:
+        condition: service_healthy
+
+  communications-service:
+    <<: *communications-base
+    ports:
+      - "3003:3003"
+    depends_on:
+      communications-migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_started
+      mailpit:
+        condition: service_started
+
+  # Mailpit: a mail server for testing. It accepts every email on SMTP port 1025
+  # and keeps it in a web inbox (http://localhost:8025) instead of delivering it,
+  # so no real person ever gets mail from a dev stack. The same image as the
+  # cluster (k8s/mailpit.yaml) and the integration tests.
+  mailpit:
+    image: axllent/mailpit:v1.32.0
+    ports:
+      - "8025:8025" # the web inbox and its API
+      - "1025:1025" # SMTP, for `pnpm dev` on the host (SMTP_HOST=localhost)
+    networks:
+      - cms-network
+
   # ─── Message bus (CMS-22, ADR-0010) ─────────────────────────────────────────
   # NATS with JetStream: members-service and events-service exchange domain
   # events through it (MemberArchived, AttendanceRecorded). See docs/messaging.md.
@@ -306,6 +378,7 @@ volumes:
   # across all services. Docker creates it on first run if it doesn't exist.
   members-db-data:
   events-db-data:
+  communications-db-data:
   nats-data:
 
 networks:

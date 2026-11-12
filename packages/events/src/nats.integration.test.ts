@@ -2,9 +2,10 @@
 // These are the guarantees ADR-0010 relies on, so they're tested for real
 // rather than with fakes: idempotent setup, Nats-Msg-Id deduplication, and
 // replay to a durable consumer that was stopped while messages arrived.
+import { DeliverPolicy } from "@nats-io/jetstream";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { STREAMS, SUBJECTS, parseMemberArchived, type MemberArchivedV1 } from "./contract.js";
+import { STREAMS, SUBJECTS, parseMemberArchived, type MemberArchivedV1, type MemberRegisteredV1 } from "./contract.js";
 import { runConsumer } from "./consumer.js";
 import { connectNats, ensureConsumer, ensureStream, jetStreamPublisher, type NatsHandles } from "./nats.js";
 
@@ -12,6 +13,10 @@ const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 function archived(id: string, memberId: string): MemberArchivedV1 {
   return { id, type: "MemberArchived", version: 1, occurredAt: new Date().toISOString(), data: { memberId } };
+}
+
+function registered(id: string, memberId: string): MemberRegisteredV1 {
+  return { id, type: "MemberRegistered", version: 1, occurredAt: new Date().toISOString(), data: { memberId } };
 }
 
 // Polls until `check` passes or the timeout runs out: consumers are async.
@@ -56,6 +61,40 @@ describe("NATS JetStream plumbing", () => {
 
     const info = await nats.jsm.streams.info(STREAMS.members.name);
     expect(info.config.subjects).toEqual(["cms.members.>"]);
+  });
+
+  // CMS-20: a new context (Communications) must not react to registrations made
+  // before it existed. A consumer created with DeliverPolicy.New starts at the end
+  // of the stream; the default (All) starts at the oldest stored message.
+  it("a consumer created with DeliverPolicy.New skips what the stream already holds", async () => {
+    await ensureStream(nats.jsm, STREAMS.members);
+    const publish = jetStreamPublisher(nats.js);
+    await publish(SUBJECTS.memberRegistered, registered("old-1", "m-old"), "old-1", {});
+
+    await ensureConsumer(nats.jsm, {
+      stream: STREAMS.members.name,
+      durable: "new-only",
+      filterSubject: SUBJECTS.memberRegistered,
+      deliverPolicy: DeliverPolicy.New,
+    });
+    await ensureConsumer(nats.jsm, {
+      stream: STREAMS.members.name,
+      durable: "from-start",
+      filterSubject: SUBJECTS.memberRegistered,
+    });
+
+    expect((await nats.jsm.consumers.info(STREAMS.members.name, "new-only")).num_pending).toBe(0);
+    expect((await nats.jsm.consumers.info(STREAMS.members.name, "from-start")).num_pending).toBeGreaterThanOrEqual(1);
+
+    // A restart calls ensureConsumer again (an update): the policy stays, nothing replays.
+    await ensureConsumer(nats.jsm, {
+      stream: STREAMS.members.name,
+      durable: "new-only",
+      filterSubject: SUBJECTS.memberRegistered,
+      deliverPolicy: DeliverPolicy.New,
+    });
+    await publish(SUBJECTS.memberRegistered, registered("new-1", "m-new"), "new-1", {});
+    expect((await nats.jsm.consumers.info(STREAMS.members.name, "new-only")).num_pending).toBe(1);
   });
 
   it("drops a re-publish with the same message id", async () => {

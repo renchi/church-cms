@@ -247,3 +247,59 @@ interface RecipientRecord {
 | `RecipientResolver` is a domain service, not part of any aggregate | It crosses a context boundary — cannot be an aggregate method             |
 | `PrayerRequest` visibility defaults to `private`                   | Pastoral moderation protects member privacy before content goes public    |
 | Failed campaigns create new records, not mutations                 | Audit trail integrity — same immutability principle as Finance offerings  |
+
+---
+
+## Addendum (CMS-20, November 2026): the welcome email
+
+**Status:** Accepted
+
+Communications became Active with one slice: a member who registers gets a welcome email.
+Members has published a thin `MemberRegistered { memberId }` since CMS-27, with no
+consumer until now. The decisions below came out of a design session with the user
+(recorded on CMS-20); the vocabulary is in
+[`apps/communications-service/GLOSSARY.md`](../../apps/communications-service/GLOSSARY.md).
+
+### Decision
+
+- **A fourth aggregate, `WelcomeEmail`** (`memberId`, `status: sent | skipped`,
+  `decidedAt`), beside the three above. A welcome email is a *transactional message*
+  (one person, caused by their own action), not a campaign: modelling it as a
+  one-recipient `MessageCampaign` would blur what a campaign is. One per member, ever,
+  enforced by the database (`memberId` is the primary key), so a second
+  `MemberRegistered` for the same member can't lead to a second email.
+- **At-least-once sending: send first, then record.** An email can't be rolled back, so
+  a crash between the send and the record must go one way or the other. Sending first
+  can repeat a welcome (on redelivery); recording first can lose one. A duplicate
+  welcome is harmless and a lost one goes unnoticed, so we accept duplicates.
+- **A member archived before the email goes out is skipped**, and the `WelcomeEmail` is
+  recorded as `skipped`: welcoming someone already archived is wrong, and recording the
+  decision keeps "every registration got an answer" visible.
+- **`RecipientResolver` gains `resolveMember(memberId)`** for one recipient, beside the
+  planned `resolve(group)`. Same concept, same name; the adapter calls
+  `GET /members/:id`. Members answering 404 means something is broken (Members never
+  deletes), so the message is terminated, not retried; Members being unavailable means
+  retry with backoff.
+- **The provider is SMTP to Mailpit**, a test mail server in the cluster, behind an
+  `EmailSender` port. Resend (above, "Deferred") is a later adapter, not a redesign.
+- **The consumer starts at "now"** (`DeliverPolicy.New`): members registered before
+  Communications existed get no late welcome email.
+- **No outbound event, no outbox.** Nothing consumes `WelcomeEmailSent` yet.
+
+### Consequences
+
+**Good:** the first consumer of a thin event, showing the lookup it implies; a side
+effect that can't be rolled back, with its trade-off written down; Communications runs
+through the same plumbing (`@cms/events` consumer, metrics, `EventDeliveryStalled`) as
+the other services.
+
+**Costs:** a welcome email depends on Members being up (it waits and retries, it isn't
+lost). A rare duplicate email is possible by design. The lookup has no authentication
+until Identity exists.
+
+| Now (after this addendum) | Trigger | Then |
+| --- | --- | --- |
+| SMTP to Mailpit | Real members should get real mail | A provider adapter (Resend), credentials from a Secret, its idempotency key to narrow the duplicate window |
+| Lookup over HTTP at send time | Members' availability holds welcome emails up too often | A local read model of members, built from Members' events (a copy of person data: weigh it) |
+| Plain text only | Someone asks for a designed email | `MessageBody` `html`, and a template |
+| No outbound event | Another context needs to know a welcome email went out | `WelcomeEmailSent` in `@cms/events`, plus an outbox in this service |

@@ -57,7 +57,7 @@ Never work directly on main. Scaffold new services with `/new-service`, and only
 ## Monorepo structure
 
 ```
-apps/       # deployable services (members-service, events-service, web)
+apps/       # deployable services (members-service, events-service, communications-service, web)
 packages/   # shared packages: @cms/events, the cross-context message contract + NATS plumbing, plus the services' shared tracing helpers (spans, sampler)
 charts/     # one Helm chart per deployable app
 k8s/        # one-off cluster manifests and add-on values (Postgres, Traefik, monitoring, NATS, ...)
@@ -74,7 +74,7 @@ docs/adr/   # architecture decision records. Read these before changing architec
 
 ## Active vs deferred services
 
-Only **two backend services** are in active development. Do not create or scaffold the others.
+Only **three backend services** are in active development. Do not create or scaffold the others.
 
 | Service                       | Status                                                                 |
 | ----------------------------- | ---------------------------------------------------------------------- |
@@ -83,7 +83,7 @@ Only **two backend services** are in active development. Do not create or scaffo
 | `apps/web`                    | Active: Next.js 15 frontend                                            |
 | `apps/identity-service`       | **Deferred**                                                           |
 | `apps/finance-service`        | **Deferred**                                                           |
-| `apps/communications-service` | **Deferred**                                                           |
+| `apps/communications-service` | Active: third context, one slice: the welcome email on `MemberRegistered` (CMS-20). Announcements, prayer requests and campaigns stay deferred (ADR-0007) |
 | `apps/groups-service`         | **Deferred**                                                           |
 
 ## Architecture essentials
@@ -93,7 +93,7 @@ Full context map: [`docs/adr/context-map.md`](docs/adr/context-map.md). Details 
 - **Members is the core domain.** Every other context references a `memberId`. It never duplicates person data.
 - **Each context owns its own database.** One Postgres per service. No context reads another's database.
 - **Anti-corruption layer:** never import another context's code. Reference it by ID. ESLint enforces this (`no-restricted-imports`).
-- **Cross-context communication:** async domain events over NATS JetStream (stage 9, ADR-0010): `MemberArchived` (Members → Events), `AttendanceRecorded` (Events → Members), and `MemberRegistered` (Members → Communications, published since CMS-27, no consumer until CMS-20; a thin `{ memberId }` event). Wire types, subjects and the outbox/consumer plumbing live in `packages/events` (`@cms/events`). Publishers write to a transactional outbox (never publish directly from a use case); consumers are idempotent via `UnitOfWork.runOnce`. A new cross-context event is a new type in `@cms/events` plus a mapping in the publisher's `infrastructure/outbox.ts`.
+- **Cross-context communication:** async domain events over NATS JetStream (stage 9, ADR-0010): `MemberArchived` (Members → Events), `AttendanceRecorded` (Events → Members), and `MemberRegistered` (Members → Communications, a thin `{ memberId }` event; Communications looks up name and email from Members at send time and sends a welcome email, CMS-20). Wire types, subjects and the outbox/consumer plumbing live in `packages/events` (`@cms/events`). Publishers write to a transactional outbox (never publish directly from a use case); consumers are idempotent via `UnitOfWork.runOnce`. A new cross-context event is a new type in `@cms/events` plus a mapping in the publisher's `infrastructure/outbox.ts`.
 
 ## Environments
 
@@ -143,6 +143,7 @@ Infrastructure keeps the same kind of table in its ADR: observability (tracing, 
 | `docs/study-guide.md`         | **The map.** Every concept learned so far, per roadmap stage, with self-check questions. Updated every ticket |
 | `docs/members-service-ddd.md` | DDD layering of the reference service                                                                         |
 | `docs/events-service-ddd.md`  | The second context: three aggregates, a value object, rules across aggregates                                 |
+| `docs/communications-service-ddd.md` | The third context: a welcome email from a thin event, a side effect that can't be rolled back, ports and adapters |
 | `docs/docker-local-dev.md`    | Runbook: Compose stack, images                                                                                |
 | `docs/k8s-local-dev.md`       | Runbook: minikube, Traefik, Helm deploys                                                                      |
 | `docs/ci-cd.md`               | Runbook: GitHub Actions, self-hosted runner, debugging                                                        |

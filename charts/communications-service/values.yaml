@@ -1,0 +1,97 @@
+# communications-service chart: a copy of charts/events-service with the names, ports
+# (3003 API, 9466 metrics), Ingress path (/api/communications), database, and the
+# `config` keys the welcome email needs (Members' URL, the mail server) changed.
+# Keeping the two charts identical in shape is deliberate: the Deploy workflow
+# treats every service the same way (see .github/workflows/deploy.yml).
+
+replicaCount: 2   # only used when autoscaling.enabled=false; otherwise the HPA sets the count
+
+image:
+  repository: communications-service
+  tag: local
+  pullPolicy: Never   # Never = use local image; IfNotPresent = pull if not cached; Always = always pull
+
+service:
+  type: ClusterIP
+  port: 3003
+
+resources:
+  requests:
+    cpu: 100m      # 100 millicores = 0.1 CPU
+    memory: 128Mi
+  limits:
+    cpu: 500m      # 500 millicores = 0.5 CPU
+    memory: 256Mi
+
+# How a Pod stops during a rollout (templates/deployment.yaml, study guide §7.8).
+# Same values as charts/web: see the comments there.
+shutdown:
+  preStopSeconds: 5                  # keep serving while Traefik drops the Pod; 0 = no hook
+  terminationGracePeriodSeconds: 30  # sleep + Fastify close + NATS drain, then SIGKILL
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+config:
+  nodeEnv: production
+  port: "3003"
+  logLevel: info   # pino level: debug | info | warn | error — raise to debug while troubleshooting
+  # The NATS server (ADR-0010, docs/messaging.md). NATS is a cluster add-on in
+  # its own "nats" namespace, so the address is the full Service DNS name:
+  # <service>.<namespace>.svc.cluster.local. Set it to "" to run without
+  # messaging: the health endpoint still answers, but no welcome emails go out.
+  natsUrl: nats://nats.nats.svc.cluster.local:4222
+  # Where the recipient resolver asks for a member's name and email (ADR-0005):
+  # members-service's Service, inside the cluster (<release>-<chart>:<port>).
+  # Never through the Ingress: this call doesn't leave the cluster.
+  membersApiUrl: http://members-service-members-service:3001
+  # The mail server, over SMTP. Mailpit is a cluster add-on in its own namespace
+  # (k8s/mailpit.yaml), so the full Service DNS name. It needs no login; a real
+  # provider would add credentials from a Secret (never here, in values).
+  smtpHost: mailpit.mailpit.svc.cluster.local
+  smtpPort: "1025"
+  # The sender of the welcome email, and the church it welcomes people to.
+  welcomeFrom: welcome@cms.local
+  churchName: Grace Community Church
+
+# The actual DB URL goes in secret.yaml; this key just names the secret
+database:
+  secretName: communications-service-db-secret
+  secretKey: DATABASE_URL
+
+# Runs "prisma migrate deploy" in an init container before the app starts
+migrations:
+  enabled: true
+
+ingress:
+  enabled: false    # flip to true at deploy time: --set ingress.enabled=true
+  host: cms.local
+  path: /api/communications
+
+# Distributed tracing (CMS-29, ADR-0009 addendum). Where the app pushes its spans
+# over OTLP/HTTP: the OTel Collector in the `monitoring` namespace, which batches
+# them and forwards them to Tempo. "" = tracing off (the default, so the chart
+# installs on a cluster without a Collector); deploy.yml and cluster-up.sh set:
+#   --set tracing.otlpEndpoint=http://otel-collector.monitoring.svc.cluster.local:4318
+# The Collector being down never breaks a request: the SDK buffers spans in
+# memory, drops them when the buffer is full, and logs the failed export.
+tracing:
+  otlpEndpoint: ""
+
+# Prometheus metrics (OpenTelemetry SDK, see apps/communications-service/src/instrumentation.ts)
+# 9466 only to match the local-dev default; each Pod has its own IP.
+metrics:
+  port: 9466
+  serviceMonitor:
+    # A ServiceMonitor is a custom resource from the Prometheus Operator
+    # (installed by kube-prometheus-stack, see docs/observability.md). On a
+    # cluster without it the CRD doesn't exist and the install would fail, so
+    # it is off by default; deploy.yml turns it on with --set.
+    enabled: false
+    interval: 15s
+    # kube-prometheus-stack's Prometheus only picks up ServiceMonitors that
+    # carry its release label.
+    release: kube-prometheus-stack
